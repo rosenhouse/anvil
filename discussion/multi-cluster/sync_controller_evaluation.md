@@ -1,496 +1,649 @@
-# Technical evaluation: a two-cluster "Outer → Inner" sync controller in Anvil
+# Two-cluster "Outer → Inner" sync controller: evaluation and design
 
-## The question
+**Revision 2.** Revision 1 proposed a single reconciler with a finalizer on
+`Outer`, literal spec/status equality, and adoption of pre-existing `Inner`
+objects, and claimed no framework changes. An adversarial review found that
+the finalizer made cleanup irreversible under the model's fault injection,
+that adoption was a cross-cluster privilege escalation, that the soundness
+argument was stated in the unsound direction, and that the composition
+precedent did not apply. This revision replaces the finalizer with a
+garbage-collecting janitor reconciler, defines convergence on a projection
+rather than whole-object equality, refuses to adopt, rewrites the soundness
+argument as a simulation, and adds one required framework change: modeling
+`metadata.generation`, without which no Anvil controller can set
+`status.observedGeneration` at all.
+
+## 0. The question and the short answer
 
 We want an example controller that runs in an *outer* cluster, reconciles an
 `Outer` custom resource by ensuring an `Inner` custom resource with the same
 namespace, name and spec exists in a separate *inner* cluster, and copies the
 `Inner` status back into the `Outer` status. Controllers in the inner cluster
-are the "real implementation". Deliverables: a production-shaped controller, a
-two-kind-cluster testbed, a set of formal assumptions and requirements, and a
-machine-checked proof.
+are the real implementation. `metadata.generation` and
+`status.observedGeneration` must behave conventionally for an observer of
+either cluster. Deliverables: a production-shaped controller, a two-kind-
+cluster testbed, formal assumptions and requirements, and a machine-checked
+proof.
 
-Does the current Anvil API support this, or do we need enhancements?
+**Does the current Anvil API support this?**
 
-## Short answer
+- **Model and proof framework:** yes, with one required enhancement. Both
+  clusters are modeled as one logical API server whose key space is the
+  disjoint union of the two clusters' objects (keys are
+  `(kind, namespace, name)` and the two kinds differ). The inner cluster's
+  controllers are ordinary "other controllers" bounded by a rely condition.
+  The required enhancement is `metadata.generation` in `ObjectMetaView` and
+  the API server model. Nothing else in `src/kubernetes_cluster/` changes.
+- **Shim layer:** needs a symmetric kind-to-client routing table, an entry
+  point that takes an explicit primary client, and the ability to run two
+  reconcilers in one process. Additive, roughly 150 lines.
+- **Not the right vehicle:** the external-system hook (`ExternalShimLayer`,
+  `ExternalModel`). It is a deterministic request-driven stub with no
+  spontaneous steps and no request drops, so it cannot model an inner
+  controller acting on its own, and it would force re-implementing API server
+  semantics in a bespoke model.
+- **Optional:** an owner-less transactional update (section 4.3). Needed only
+  to compose against a *verified* inner implementation, or to remove the
+  liveness dependency from the forward-sync proof.
 
-**The verification side needs no framework changes. The execution side needs a
-small, additive enhancement to the shim layer.**
-
-- **Model / spec / proof:** model both clusters as *one* logical API server
-  whose key space is the disjoint union of the two clusters' objects (keys are
-  `(kind, namespace, name)`, and `Outer` and `Inner` are different kinds). The
-  inner cluster's controllers are modeled as ordinary "other controllers"
-  constrained by a rely condition. Nothing in `src/kubernetes_cluster/` changes.
-  This is structurally the same setup as the already-verified
-  VDeployment → VReplicaSet pair: a controller that creates a child custom
-  resource, reads a status that a *different* controller writes, and whose
-  liveness depends on that other controller through Welder's
-  `liveness_dependency`.
-- **Shim layer:** `src/shim_layer/controller_runtime.rs` holds exactly one
-  `kube::Client` and sends every `KRequest` to it. We need (1) a second client
-  built from an inner-cluster kubeconfig, (2) routing of each request to a
-  client by the request's `ApiResource`, and (3) a cross-cluster
-  `Controller::watches(...)` trigger so `Inner` status changes wake the
-  reconciler promptly. This is a self-contained change of roughly 100 lines,
-  additive to the existing entry points.
-- **Not recommended:** the existing "external system" hook
-  (`ExternalShimLayer` / `ExternalModel`). It is the obvious-looking place for
-  "a remote thing the controller talks to", but it is a deterministic,
-  request-driven RPC stub with no spontaneous steps and no request drops, so it
-  cannot model an inner controller that changes status on its own, and it
-  would force us to re-implement the API server semantics (resource versions,
-  conflicts, status subresource) inside a custom model, losing the whole proof
-  library. Details in "Alternatives considered".
-
-The rest of this note gives the controller design, the mapping onto Anvil, the
-required enhancements, draft assumptions and requirements, the testbed, and an
-effort estimate.
-
-## 1. Controller design
+## 1. Design
 
 ### 1.1 Resources
 
-Two CRDs in group `anvil.dev`, both namespaced, both with a status
-subresource. They share the same `spec` and `status` Rust types so that "same
-spec" and "copy status" are literal equalities:
+Two CRDs in group `anvil.dev`, both namespaced, both with the status
+subresource. They share one Rust spec type and one status type:
 
 ```
-kind: Outer            # lives in the outer cluster; users create these
-kind: Inner            # lives in the inner cluster; only the sync controller creates these
+kind: Outer   # outer cluster; users create these
+kind: Inner   # inner cluster; only the sync controller creates these
+status:
+  observedGeneration: int64        # conventional meaning on each object
+  <mirrored fields>                # written by the inner implementation on Inner,
+                                   # copied to Outer by the sync controller
 ```
 
-The spec shape is arbitrary for the example; keep it small (two or three
-scalar fields) so the CR view types and marshalling lemmas stay short.
+Keep the spec to two or three scalar fields so the view types and
+marshalling lemmas stay short. The example's inner implementation is a small
+unverified "echo" controller that sets the mirrored fields from the spec and
+sets `Inner.status.observedGeneration = Inner.metadata.generation`.
 
-### 1.2 Identity and ownership across clusters
+### 1.2 Identity, ownership, and lifecycle
 
-- The `Inner` object for `Outer{ns, name}` is `Inner{ns, name}` in the inner
-  cluster. Same namespace, same name, by construction.
-- **No `ownerReferences` across clusters.** A real inner-cluster garbage
-  collector would delete an `Inner` whose owner UID does not exist in *its*
-  cluster. The controller must never set an owner reference on `Inner`. This is
-  also what makes the single-store model sound (see 2.2). Identity is carried
-  by a label `anvil.dev/managed-by: outer-sync` and an annotation
-  `anvil.dev/parent-uid: <Outer uid>` instead. Cluster API, KubeFed and
-  Karmada all follow this convention for the same reason.
-- **Cleanup via a finalizer on `Outer`** (`anvil.dev/inner-sync`). When `Outer`
-  gets a deletion timestamp, the controller deletes `Inner`, then removes the
-  finalizer.
+- `Inner{ns, name}` mirrors `Outer{ns, name}`. Names match by construction.
+- **No `ownerReferences` across clusters.** The inner cluster's garbage
+  collector would delete an `Inner` whose owner uid does not exist there, and
+  forbidding them is also what keeps the single-store model sound (3.2).
+- **No finalizers, on either object, by either of our controllers.** The
+  controller therefore has no irreversible action; every fault is
+  re-convergent, and `Outer` deletion is never blocked by a partition.
+- Identity is carried by a label `anvil.dev/managed-by: outer-sync` and an
+  annotation `anvil.dev/parent-uid: <Outer uid>`. The annotation is
+  load-bearing: it is how the janitor distinguishes a live mirror from a
+  stale one, and how the sync controller refuses to write to an `Inner` it
+  does not own.
+- **Refuse to adopt.** The sync controller writes to an existing `Inner` only
+  if it carries the label and its `parent-uid` equals the current `Outer`
+  uid. Anything else is left alone: a stale-uid mirror is removed by the
+  janitor and then recreated; a foreign object is never touched. Adoption
+  would let anyone who can create `Outer{ns,name}` in the outer cluster
+  overwrite `Inner{ns,name}` in the inner cluster.
+- **Cleanup is background garbage collection**, the same semantics Kubernetes
+  itself gives cascading deletion: a janitor reconciler removes any labeled
+  `Inner` whose `Outer` is absent or has a different uid.
 
-### 1.3 Reconcile state machine
-
-Each step issues at most one request, in Anvil style. Reads of the `Outer`
-object come from the shim layer's quorum read at the start of reconcile; reads
-of `Inner` are a quorum `Get` against the inner API server.
+### 1.3 The sync reconciler (primary kind `Outer`, runs against a snapshot with generation `g`, resource version `r`, spec `σ`, uid `u`)
 
 ```
 Init
- ├─ Outer has deletion timestamp
- │    ├─ finalizer absent  → Done
- │    └─ finalizer present → Get Inner → AfterGetInnerForDelete
- │           ├─ NotFound            → Update Outer (remove finalizer, rv from Outer) → AfterRemoveFinalizer → Done
- │           └─ Found               → Delete Inner (precondition: rv, uid)          → AfterDeleteInner → Update Outer (remove finalizer) → ...
- └─ Outer live
-      ├─ finalizer absent → Update Outer (add finalizer, rv from Outer) → AfterAddFinalizer → Done   (requeue picks up the rest)
-      └─ finalizer present → Get Inner → AfterGetInner
-             ├─ NotFound → Create Inner {ns, name, label, parent-uid annotation, spec: Outer.spec} → AfterCreateInner
-             ├─ Found, spec == Outer.spec → (skip)
-             └─ Found, spec != Outer.spec → Update Inner (fetched object with spec := Outer.spec, label ensured, rv from Get) → AfterUpdateInner
-             then → UpdateStatus Outer (status := Inner.status, rv from Outer) → AfterUpdateOuterStatus → Done
-Error (any unexpected response) → requeue with short backoff
+ └─ Get Inner{ns,name}                                   (inner cluster, quorum read)
+      ├─ NotFound → Create Inner{ns,name; label; parent-uid=u; spec=σ; no ownerRefs; no finalizers}
+      │              → AfterCreateInner → Done            (no status write yet)
+      ├─ Found, not ours (label missing or parent-uid ≠ u) → Done (no writes)
+      ├─ Found, ours, deletionTimestamp set → Done         (treat as absent-in-progress; requeue)
+      ├─ Found, ours, spec ≠ σ → Update Inner (fetched object; spec := σ; label/annotation ensured; rv from Get)
+      │              → AfterUpdateInner → Done            (inner cannot be caught up yet)
+      └─ Found, ours, spec == σ
+           ├─ Inner.status.observedGeneration ≠ Inner.metadata.generation → Done   (inner still converging)
+           └─ caught up
+                ├─ π(Outer.status) == π(Inner.status) ∧ Outer.status.observedGeneration == g → Done
+                └─ else UpdateStatus Outer{status := π(Inner.status) with observedGeneration := g; rv r}
+                       → AfterUpdateOuterStatus → Done
+Error (any unexpected response) → requeue with backoff
 ```
 
-Design notes that matter for both production behavior and the proof:
+`π` is the projection onto the mirrored fields. The controller never writes
+`Outer` spec or metadata, never writes `Inner` status, never deletes
+anything, and every write carries a resource version (custom resources do not
+permit unconditional updates, in the real API server or the model). The
+"skip when already equal" branch matters: it removes conflicts in steady
+state without relying on server-side no-op detection.
 
-- `Update Inner` sends the object returned by `Get` with only `spec` (and our
-  label/annotation) replaced. This preserves labels or annotations that
-  inner-cluster tooling may have added, and gives a well-defined "what the
-  update writes" in the model.
-- After adding the finalizer the reconcile ends and relies on requeue. This
-  avoids carrying a stale `Outer` resource version through the same reconcile
-  and is the usual controller-runtime idiom.
-- Custom resources do not allow unconditional updates (real API server and
-  Anvil's model agree: `allow_unconditional_update` is false for
-  `CustomResourceKind`), so every `Update`/`UpdateStatus` carries a resource
-  version and can fail with `Conflict`. A conflict ends the reconcile with an
-  error and the controller retries on the next round.
-- Policy for a pre-existing `Inner{ns,name}` not created by us: v1 takes
-  ownership (enforces spec, adds the label). A stricter "refuse to adopt and
-  report a condition on `Outer`" variant is easy to implement but changes the
-  premise of the liveness requirement; leave it as a follow-up.
+### 1.4 The janitor reconciler (primary kind `Inner`, runs in the same binary)
 
-### 1.4 Deployment shape
-
-- Runs as a Deployment in the outer cluster, one replica.
-- Outer-cluster RBAC: `outers`, `outers/status`, `outers/finalizers` (get,
-  list, watch, update, patch) plus the fault-injection ConfigMap if used.
-- Inner-cluster credentials: a kubeconfig mounted from a Secret, pointing at a
-  ServiceAccount token in the inner cluster bound to a Role that allows only
-  `inners` (get, list, watch, create, update, delete). Path passed by env var.
-- Watches: `Outer` in the outer cluster (primary), `Inner` in the inner
-  cluster mapped to `Outer{ns,name}` (secondary). The watch is a latency
-  optimization only. The proof does not depend on it, consistent with Anvil's
-  decision not to model the watch cache.
-
-## 2. Mapping onto Anvil's model
-
-### 2.1 One logical API server, two kinds
-
-`ClusterState` has one `api_server.resources: Map<ObjectRef, DynamicObjectView>`.
-Install both kinds:
-
-```rust
-membership: |cluster: Cluster, id: int| {
-    &&& cluster.controller_models.contains_pair(id, outer_sync_controller_model())
-    &&& cluster.type_is_installed_in_cluster::<OuterView>()
-    &&& cluster.type_is_installed_in_cluster::<InnerView>()
-}
+```
+Init
+ ├─ label missing → Done                                  (not ours)
+ └─ Get Outer{ns,name}                                    (outer cluster, quorum read)
+      ├─ Found, uid == parent-uid → Done
+      └─ NotFound, or uid ≠ parent-uid → Delete Inner{ns,name; precondition uid = Inner.uid} → Done
 ```
 
-The reconciler issues plain `KRequest`s for both kinds. `schedule_controller_
-reconcile` only fires for `reconcile_model.kind == Outer`, so only `Outer`
-objects trigger reconciles. `desired_state_is(outer)` and the
-`current_state_matches` predicates all read the same `resources` map, and the
-`Inner` key is `ObjectRef { kind: InnerView::kind(), namespace: outer.ns,
-name: outer.name }`.
+The uid precondition is what garbage collectors use; a resource-version
+precondition would only import the status-write race into deletion.
 
-The inner cluster's "real implementation" is any other controller id in
-`controller_models`. Our rely condition permits it to send `UpdateStatus` to
-`Inner` objects and forbids everything else we care about (2.4).
+### 1.5 Generation semantics, as seen from each cluster
 
-### 2.2 Why the single-store abstraction is sound here
+Kubernetes increments `metadata.generation` of a custom resource with a status
+subresource exactly when its spec changes, and never on status writes.
+Observers (kstatus-style tooling, `kubectl wait`, operators reading YAML)
+read `status.observedGeneration == metadata.generation` as "the status
+reflects the current spec".
 
-This is the one trusted argument that a reviewer must accept, so it should be
-written down next to the theorem.
+**Inner, seen from the inner cluster.** `Inner` is an ordinary CR. The sync
+controller writes its spec (which bumps `Inner.generation`, as an observer
+expects) and never its status. The inner implementation sets
+`Inner.status.observedGeneration` from `Inner.metadata.generation`. Nothing
+unusual is visible.
 
-1. **Atomicity and interleaving.** Every real request touches exactly one
-   API server, each API server executes each request atomically against its
-   own store, and the two key spaces are disjoint (different kinds). An
-   interleaving of two independent atomic stores is indistinguishable from one
-   atomic store over the disjoint union.
-2. **Resource versions and UIDs.** The model has one `resource_version_counter`
-   and one `uid_counter`; reality has one per cluster. The model therefore
-   admits fewer behaviors than reality for cross-object comparisons: in the
-   model an `Inner` created after an `Outer` always has a larger rv. The proof
-   must treat rv and uid as opaque per-object tokens compared only for
-   equality against the same object, which is all the API exposes anyway.
-   Anvil already relies on the analogous simplification for uid values. State
-   this as an explicit proof-hygiene rule.
-3. **Garbage collection.** The model's GC looks up owners in the union store,
-   so a cross-cluster owner reference would be treated as valid in the model
-   but deleted immediately in reality. Forbidding owner references on `Inner`
-   (part of our guarantee condition) removes the divergence: GC never acts on
-   `Inner` objects in either world.
-4. **Failures.** `drop_req` fails individual requests addressed to the API
-   server with an arbitrary `APIError`, and can do so for any finite prefix of
-   an execution. That covers "the inner cluster is unreachable for a while" and
-   "the outer cluster is unreachable for a while" independently. The liveness
-   assumption `disable_req_drop` now means *both* clusters' connectivity
-   eventually stabilizes. This is the honest assumption for a multi-cluster
-   controller and should be stated as such.
-5. **Namespaces.** Anvil does not model Namespace objects; creates never fail
-   for a missing namespace. Real inner clusters do fail. Assume the namespace
-   exists in the inner cluster (the testbed creates it). Creating it from the
-   controller would need cluster-scoped objects, which the model lists as a
-   TODO.
-6. **CRD installation.** `type_is_installed_in_cluster::<InnerView>()` in the
-   membership predicate corresponds to "the `Inner` CRD is applied in the
-   inner cluster".
+**Outer, seen from the outer cluster.** The sync controller sets
+`Outer.status.observedGeneration := g` only in the branch where it has
+verified, in one reconcile, that `Inner.spec == σ` and the inner
+implementation reports `Inner.status.observedGeneration ==
+Inner.metadata.generation`, and it writes that status with `Outer`'s
+resource version `r` from the same snapshot. Because a generation bump
+implies a resource-version bump, the write succeeds only while `Outer` is
+still at generation `g` with spec `σ`. So:
 
-### 2.3 Precedent: VDeployment → VReplicaSet
+> `Outer.status.observedGeneration == Outer.metadata.generation` holds
+> exactly when the current `Outer` spec has been propagated to `Inner` and
+> the mirrored status is the inner implementation's status for that spec.
 
-`src/controllers/vdeployment_controller/model/reconciler.rs` creates and
-updates `VReplicaSet` CRs and reads their `status.replicas`, which the
-VReplicaSet controller writes. `src/controllers/composition/vdeployment_
-reconciler.rs` declares `liveness_dependency: vrs_eventually_stable_
-reconciliation()` and `compose_all.rs` discharges it with `compose_dep`. Our
-controller is the same shape with two differences that make it *simpler*: it
-manages exactly one child per parent (no lists, no pods, no pod monkey) and it
-uses no owner references (no GC reasoning).
+While a spec change is propagating anywhere in the chain, `observedGeneration`
+lags and an observer sees "in progress". No bookkeeping of which `Inner`
+generation corresponds to which `Outer` generation is needed, because names
+match and the snapshot's resource version pins the correspondence. The
+`Inner`'s own `observedGeneration` is never copied to `Outer` (it is an
+inner-cluster number); `π` excludes it.
 
-### 2.4 Rely, guarantee and liveness dependency (draft)
+If an inner implementation never sets `observedGeneration`, `Outer` never
+reports caught-up. That is the honest outcome for a non-conforming inner
+controller; a per-deployment switch to treat a missing field as caught-up is
+an exec-level option outside the proof.
 
-**Guarantee (what our controller promises everyone else).** Every in-flight
-API request from our controller id is one of:
+### 1.6 Deployment shape
 
-- `Get` on an `Outer` or `Inner` key.
-- `Create` of an `Inner` with a provided name, no owner references, our
-  managed-by label, and `spec` equal to the spec of an `Outer` with the same
-  `(namespace, name)`.
-- `Update` of an `Inner` with the same constraints, carrying a resource version.
-- `Delete` of an `Inner` with a uid and resource-version precondition.
-- `Update` of an `Outer` that changes only `metadata.finalizers` (adds or
-  removes our finalizer) and carries a resource version.
-- `UpdateStatus` of an `Outer`, carrying a resource version.
+- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`.
+  kube-runtime has no leader election, and two live instances would violate
+  our own rely condition (safe under resource-version preconditions, but
+  outside the proof).
+- Outer-cluster RBAC: `outers` (get, list, watch), `outers/status` (update,
+  patch). If fault injection is used, `configmaps` (get, update) in the
+  `default` namespace, which is where `crash_or_continue` reads its
+  configuration.
+- Inner-cluster credential: a kubeconfig mounted from a Secret, pointing at a
+  ServiceAccount token in the inner cluster bound to a **ClusterRole** on
+  `inners` (get, list, watch, create, update, delete). `Outer` can live in any
+  outer namespace, so a namespaced Role is insufficient.
+- Watches: `Outer` in the outer cluster (sync primary), `Inner` in the inner
+  cluster (janitor primary and sync secondary, mapped to `Outer{ns,name}`).
+  Watches are a latency optimization; the proof relies only on requeue.
+- Client timeouts: kube-rs defaults to a 295-second read timeout. Lower it for
+  the inner client so a partition surfaces as an error within a reconcile
+  rather than a five-minute stall.
+- Requeue: 60 seconds after `Done`, 10 seconds after an error, both fixed
+  (the shim's `error_policy`). Exponential backoff is a shim improvement, not
+  a proof concern.
 
-In particular it never touches Pods or any other kind, so it trivially
-satisfies the rely conditions of the existing VReplicaSet, VDeployment,
-VStatefulSet and RabbitMQ controllers, and can be composed with them.
+## 2. Alternatives considered
 
-**Rely (what we require from every other controller `j`).** For every
-in-flight API request from `j`:
+**External-system hook.** Rejected for the reasons in section 0.
 
-- No `Create`, `Update`, `Delete`, `GetThenUpdate`, `GetThenDelete` on any
-  `Inner` key. (`UpdateStatus` and `GetThenUpdateStatus` on `Inner` are
-  allowed: that is the inner implementation.)
-- No `Update`, `UpdateStatus`, `Delete`, `GetThen*` on any `Outer` key.
+**First-class multi-API-server model** (`api_servers: Map<ClusterId, _>`,
+`HostId::APIServer(id)`, per-cluster GC and drops). Most faithful, and the
+right long-term direction if multi-cluster becomes a first-class Anvil use
+case. It changes `ClusterState`, `HostId`, every `s.resources()` accessor and
+every existing proof. Not justified for an example controller when the
+single-store simulation (3.2) handles the differences with stated
+obligations.
 
-Users are not modeled as controllers; their influence enters only through
-`always(desired_state_is(outer))` in the ESR premise, as for every Anvil
-controller.
+**Finalizer on `Outer`** (revision 1). Rejected: under the model's fault
+injection a `Get` can spuriously return `NotFound`, and "remove finalizer on
+NotFound" is irreversible, so cleanup was unprovable and, in reality, the
+same path fires when the inner CRD is uninstalled. Deletion also blocked on
+partitions. The janitor has the same exposure to a spurious `NotFound` but as
+a transient (it may delete a live mirror, which the sync controller then
+recreates) rather than a permanent leak.
 
-**Liveness dependency (what we require from the inner implementation).**
-Because `Update Inner` carries a resource version and status writes bump the
-resource version, an inner controller that changes `Inner.status` forever
-could starve our spec update. This is the race described in
-`discussion/fairness/fairness-on-controller-race.md`. The natural, defensible
-assumption is eventual stability of the inner implementation:
+**Uid-suffixed `Inner` names.** Would make cleanup of a delayed `Create`
+trivially provable but violates the same-name requirement. Not taken.
 
-> For every `Inner` object, if its spec stops changing then its status
-> eventually stops changing.
+## 3. Mapping onto Anvil's model
 
-Formally this is the inner controller's own ESR with `current_state_matches
-(inner) := status == f(spec)` for some function `f`, which is exactly what the
-demo's inner controller satisfies and exactly what `compose_dep` consumes.
-Note that in Anvil's API server model a status write that does not change the
-object is a no-op and does not bump the resource version, so an inner
-controller that merely re-writes the same status does not interfere.
+### 3.1 One logical store, two kinds, two controllers
 
-A later framework enhancement can remove this dependency for the forward
-direction (see 3.3). It cannot be removed for the backward direction, and it
-should not be: "copy a status that never settles" has no stable target.
-
-## 3. Required and optional framework enhancements
-
-### 3.1 Required: multi-client routing in the shim layer
-
-`reconcile_with` in `src/shim_layer/controller_runtime.rs` reads `ctx.client`
-and builds every `Api::<DynamicObject>::namespaced_with(client, ns, api_
-resource)` from it. Change:
-
-- `Data { client }` becomes `Data { client, remote: Option<RemoteTarget> }`
-  where `RemoteTarget { group: String, kind: String, client: Client }` (or a
-  small `ClientRouter` trait).
-- A helper `client_for(&Data, &ApiResource) -> &Client` selects the inner
-  client when `api_resource.group == remote.group && kind == remote.kind`, else
-  the outer client. Each `match req` arm and the three `transactional_*`
-  helpers take the routed client.
-- A new entry point `run_controller_with_remote::<K, R, E, O>(fault_injection,
-  remote_kubeconfig_path)` that builds the inner client with
-  `Kubeconfig::read_from` + `Config::from_custom_kubeconfig` +
-  `Client::try_from`, and registers the cross-cluster watch:
-
-  ```rust
-  Controller::new(Api::<K>::all(outer.clone()), watcher::Config::default())
-      .watches(Api::<O>::all(inner.clone()), watcher::Config::default(), |o| {
-          o.namespace().map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
-      })
-  ```
-
-`run_controller` and `run_controller_watching_owned` keep working unchanged.
-Fault injection (`crash_or_continue`) keeps using the outer client.
-
-Nothing on the verified side sees this: the reconciler still emits
-`KubeAPIRequest`s whose view is an `APIRequest` keyed by `(kind, ns, name)`.
-
-### 3.2 Required: the usual per-controller plumbing
-
-Same as for any Anvil controller, all mechanical:
-
-- `src/crds.rs`: `Outer` and `Inner` kube-derived types.
-- `trusted/spec_types.rs` and `trusted/exec_types.rs`: `OuterView`,
-  `InnerView` and exec wrappers (compare `vreplicaset_controller/trusted/`).
-- `model/reconciler.rs`, `model/install.rs`, `exec/reconciler.rs`.
-- `src/bin/outer_sync_controller.rs`, `deploy/outer_sync/`, e2e module.
-
-### 3.3 Optional: owner-less transactional update
-
-`GetThenUpdateRequest` / `GetThenUpdateStatusRequest` hard-code the predicate
-"current object has `owner_ref`" (both in the model and in the shim's retry
-loop; both carry a TODO saying the predicate should come from the client).
-Because we cannot use owner references on `Inner`, we cannot use these
-transactional requests and fall back to plain `Update` with a resource version.
-
-Generalizing the predicate (for example `owner_ref: Option<OwnerReferenceView>`
-with `None` meaning "object exists", i.e. controller-runtime's
-`retry.RetryOnConflict`) would let the forward-sync proof drop the liveness
-dependency for `Update Inner`. The change is mechanical but touches the message
-type, `well_formed()`, the shim, and every existing construction site and
-rely clause that reads `req.owner_ref`. Estimate one to three days plus a
-full re-verification. Not needed for v1.
-
-### 3.4 Optional: external-system hook improvements (only if someone insists on Option A)
-
-`ExternalShimLayer::external_call` is a synchronous, stateless
-`fn(EReq) -> EResp`; a kube client would need a runtime handle. The model's
-`ExternalModel` has no spontaneous step and external requests are exempt from
-`drop_req`. All three would need to change to make the external hook a
-faithful remote cluster. Not recommended; see below.
-
-## 4. Alternatives considered
-
-**A. Inner cluster as the controller's "external system".** Rejected. The
-external model is a deterministic function of (request, local state), driven
-only by our own requests, so the inner controller's spontaneous status
-changes are inexpressible without adding a new `Step` variant to
-`Cluster::next` (which every existing proof case-splits on). External requests
-cannot be dropped, so transient inner-cluster failures would be unmodeled. And
-we would re-implement resource versions, conflicts and the status subresource
-in a bespoke `Value`-typed state, losing `req_resp.rs`,
-`objects_in_store.rs`, `network_liveness.rs` and the `Cluster::` invariant
-library.
-
-**B. Single logical store, route by kind (recommended).** Described above. Zero
-model changes, small shim change, trusted argument in 2.2.
-
-**C. First-class multi-API-server model** (`api_servers: Map<ClusterId,
-APIServerState>`, `HostId::APIServer(id)`, per-cluster GC and drops). The most
-faithful option and the right long-term direction if multi-cluster becomes a
-first-class Anvil use case, but it changes `ClusterState`, `HostId`, every
-`s.resources()` accessor and every existing proof. Weeks of refactoring for an
-example controller, buying only the rv/uid-counter and GC-scope fidelity that
-option B handles with two explicit assumptions.
-
-## 5. Draft requirements and assumptions
-
-Written in the style of `trusted/liveness_theorem.rs`. `outer: OuterView`,
-`st: StatusView`.
+Both kinds are installed in one `Cluster`; the sync and janitor reconcilers
+are two controller ids in `controller_models`:
 
 ```rust
-pub open spec fn inner_key(outer: OuterView) -> ObjectRef {
-    ObjectRef { kind: InnerView::kind(), namespace: outer.metadata.namespace->0, name: outer.metadata.name->0 }
+membership_sync:    |c, id| c.controller_models.contains_pair(id, sync_controller_model())
+                          && c.type_is_installed_in_cluster::<OuterView>()
+                          && c.type_is_installed_in_cluster::<InnerView>()
+membership_janitor: |c, id| c.controller_models.contains_pair(id, janitor_controller_model()) && ...
+```
+
+`schedule_controller_reconcile` fires for the reconciler's own kind only, so
+`Outer` objects schedule the sync controller and `Inner` objects schedule the
+janitor. All predicates read the single `resources` map; the mirror key is
+`ObjectRef { kind: InnerView::kind(), namespace: outer.ns, name: outer.name }`.
+
+This is structurally the verified VDeployment → VReplicaSet pair (a parent
+creating a child CR whose status another controller writes, with a
+`liveness_dependency` discharged by `compose_dep`), with one important
+difference explained in 3.3: VDeployment uses owner references and the
+transactional `GetThenUpdate`; we cannot.
+
+### 3.2 Why the single-store model is sound for two real clusters
+
+This is the trusted argument, to be placed next to the theorem. It is a
+simulation, and it imposes obligations on the *implementation*, not on the
+proof.
+
+**Claim.** Every execution of the real system (two API servers with
+independent resource-version and uid counters, our two controllers, the
+network) maps to an execution of the model.
+
+**Map.** Union the two stores. Choose any linearization of write events
+consistent with each cluster's own order (each server serializes its own
+writes) and relabel resource versions and uids by their position in that
+order; the map is injective and order-preserving per cluster. Every real
+step then corresponds to a model step: a real create is a model create with
+the next counter value, and so on.
+
+**Obligation 1 (exec hygiene).** The relabeling changes rv and uid *values*
+but preserves equality between an object and a precondition or request that
+copied them from that object. The simulation therefore holds only for code
+whose behavior depends on rv and uid solely through such equality. Our two
+controllers must never read `resource_version()` or `uid()` values (they use
+`resource_version_eq`, `uid_eq`, and whole-object copy). The proof itself
+will use global-counter lemmas such as
+`object_in_ok_get_resp_is_same_as_etcd_with_same_rv` in `proof/req_resp.rs`
+and the `rv < resource_version_counter` clauses of the well-formedness
+invariants in `proof/objects_in_store.rs`; that is fine, because those lemmas
+are applied to compare a request with the store object of the same key,
+which the relabeling preserves.
+
+**Obligation 2 (composition).** Any other controller sharing the composition
+that reads rv values (VDeployment uses the rv as a pod-template hash; the
+RabbitMQ controller stores an rv string in an annotation) must live entirely
+in one cluster. All existing controllers do.
+
+**TCB notes.** Two trusted statements in the repository are literally false
+for a two-cluster deployment and must be documented as such: the
+`external_body` ensures in `kubernetes_api_objects/exec/object_meta.rs` that
+equates the real rv string with the model's global counter (unsatisfiable
+jointly for two counters; our controllers never call that accessor), and the
+axiom `generated_name_spec` in `spec/api_server/state_machine.rs`, which
+asserts generated-name uniqueness against every key regardless of kind (we
+never use `generateName`; the axiom's own TODO proposes the per-kind form).
+
+**Other divergences and how they are closed.**
+
+- *Garbage collection.* The model's GC looks up owners in the union store,
+  so a cross-cluster owner reference would be valid in the model and deleted
+  immediately in reality. Our guarantee forbids owner references on `Inner`,
+  so GC never acts on it in either world.
+- *Failures.* `drop_req` fails any individual request to the API server with
+  any `APIError`, for any finite prefix of an execution, independently per
+  request. That covers "the inner cluster is unreachable for a while" and
+  "the outer cluster is unreachable for a while". The fairness assumption
+  `disable_req_drop` now reads: both clusters' connectivity eventually
+  stabilizes.
+- *Executed-but-lost writes.* The model has no transition "server executed
+  the request, client received an error" (the network never loses messages).
+  The real case is simulated by "request executed, response left in flight,
+  controller crashes before reading it" via `restart_controller`. This is a
+  projection, not a refinement: a real lost response affects one key while
+  `restart_controller` wipes every key's ongoing reconcile. It is acceptable
+  here because reconciles for distinct `Outer` keys touch disjoint objects and
+  all our properties are per key. Consequences: the assumption "crashes
+  eventually stop" also covers "lost responses eventually stop", and a stale
+  request may still execute later, so every write must be safe to replay.
+  Updates and status updates carry resource versions, deletes carry uids.
+  `Create` has no precondition, and a delayed `Create Inner` can land after
+  its `Outer` is gone; the janitor collects it (5, R3).
+- *Namespaces.* Not modeled; creates never fail for a missing namespace.
+  Assume the inner namespace exists. Deleting the inner namespace deletes
+  `Inner` out of band and makes creates fail; R1 does not hold in reality
+  while that persists. Deleting the outer namespace proceeds without
+  blocking; the janitor cleans up.
+- *CRD installation and schema.* `type_is_installed_in_cluster::<InnerView>()`
+  corresponds to "the `Inner` CRD is applied in the inner cluster". Schema
+  parity, including OpenAPI defaults, is assumed; a default applied on one
+  side only makes the projected specs never equal.
+- *Spurious `NotFound`.* The model's fault injection may answer a `Get` of an
+  existing object with `ObjectNotFound`. Reality does the same when a CRD is
+  uninstalled or a kubeconfig points at the wrong cluster; the shim maps every
+  404 to `ObjectNotFound`. Before drops stop, the janitor may therefore delete
+  a live mirror, and the sync controller recreates it afterwards. The
+  operational assumption to state: the `Outer` CRD is installed whenever the
+  outer API server answers.
+- *Admission and Patch.* Not modeled. Mutating admission on `Inner` spec is
+  out of scope. The inner implementation may use Patch or server-side apply
+  for status; for our purposes that is an `UpdateStatus`.
+
+### 3.3 Rely, guarantee, and dependencies
+
+**Sync guarantee.** Every in-flight API request from the sync controller is
+one of: `Get` on an `Outer` or `Inner` key; `Create` of an `Inner` with a
+provided name, no owner references, no finalizers, our label, `parent-uid`
+equal to the triggering `Outer`'s uid, and spec equal to that `Outer`'s spec;
+`Update` of an `Inner` carrying a resource version, whose object equals the
+stored object at that resource version with spec replaced and our
+label/annotation ensured (stated rv-conditionally against the store, in the
+style of `vd_rely_update_req`); `UpdateStatus` of an `Outer` carrying a
+resource version, with `status.observedGeneration == metadata.generation` of
+the sent object. Never a delete, never `Outer` spec or metadata, never `Inner`
+status, never any other kind.
+
+**Janitor guarantee.** Only `Get` on `Outer` keys and `Delete` on labeled
+`Inner` keys with a uid precondition.
+
+Both guarantees trivially satisfy the rely conditions of the four existing
+verified controllers, which constrain only Pods, PVCs, VReplicaSets and
+RabbitMQ-managed kinds.
+
+**Rely on every other controller `j`** (the janitor and sync are composed
+with each other, so "other" excludes them):
+
+- On `Inner` keys: no `Create`, no `Delete`, no `GetThenDelete`, no spec
+  change; `UpdateStatus` and `GetThenUpdateStatus` allowed; `Update` allowed
+  only if it changes metadata alone and adds neither finalizers nor owner
+  references. This admits real inner implementations that label or annotate
+  their objects, and admits Patch-based status writes.
+- On `Outer` keys: no `Update`, `UpdateStatus`, `Delete`, `GetThen*`.
+
+Users are not modeled; their influence enters through
+`always(desired_state_is(outer))`.
+
+**D1, liveness dependency on the inner implementation (an axiom in v1).**
+For every `Inner`: if its spec stops changing, its status and metadata
+eventually stop changing and `status.observedGeneration == metadata.generation`.
+This is eventual stability of the inner controller, the premise of ESR
+itself. It is needed because `Update Inner` carries a resource version and
+every inner-side write bumps it; the R1 argument is "either our update
+eventually succeeds, or the inner spec is stable forever, in which case D1
+gives quiescence and the next Get/Update pair succeeds after drops stop". In
+the model a status write that changes nothing does not bump the resource
+version, so an inner controller that merely rewrites the same status does not
+interfere. Revision 1 claimed D1 could be discharged against the verified
+controllers in this repository; it cannot, because all of them require their
+CR to carry a controller owner reference (their status writes go through
+`GetThenUpdateStatus`, whose `well_formed` demands one) and our `Inner` has
+none. Discharging D1 against a verified inner implementation requires 4.3.
+
+**D2, liveness dependency of the sync controller on the janitor.** A
+stale-uid `Inner` (from a deleted and recreated `Outer`) must be removed
+before the sync controller, which refuses to adopt, can create the new
+mirror. D2 is the janitor's own liveness property R3 and *is* dischargeable
+with `compose_dep`: the janitor is ours, verified, uses no owner references
+and no transactional requests. This gives the proposal a genuine
+composition instance.
+
+## 4. Framework enhancements
+
+### 4.1 Required: model `metadata.generation`
+
+Without it no controller can set `status.observedGeneration` (the exec
+reconciler must conform to the model, and the model cannot see the field).
+The VStatefulSet CRD already declares `observedGeneration` in its status
+schema and the controller never populates it, for exactly this reason.
+
+Scope:
+
+- `ObjectMetaView`: add `generation: Option<int>`. Exec `ObjectMeta`: an
+  `external_body` getter `generation()` tied to the view, like
+  `resource_version()`.
+- API server model, custom resources only (the model's CRs all have the
+  status subresource, since `UpdateStatus` exists for them): `Create` sets
+  `Some(1)`; `Update` sets `old + 1` iff the spec changed, else unchanged, and
+  ignores any client-supplied value (server-owned, like rv and uid); `Update
+  Status` leaves it unchanged (already the case, since
+  `status_updated_object` keeps old metadata); setting a deletion timestamp
+  bumps it, as `rest.BeforeDelete` does. Built-in kinds have per-kind rules
+  in Kubernetes; leave them unmodeled (`None`, never read) rather than model
+  them wrong.
+- `src/executable_model/api_server.rs` and the conformance tests follow the
+  same rules.
+- Blast radius measured on the current tree: 107 `ObjectMetaView { .. }`
+  literals without a rest pattern that need the field, 38 whole-metadata
+  equality sites in existing proofs that need inspection, plus a full
+  re-verification. Estimate one to two weeks.
+
+### 4.2 Required: shim layer
+
+`reconcile_with` in `src/shim_layer/controller_runtime.rs` reads one
+`ctx.client`. Change:
+
+- `Data` carries a routing table `Vec<(group, kind, Client)>` plus a default
+  client; `client_for(&ApiResource) -> &Client` picks by group and kind. Every
+  request arm and the three `transactional_*` helpers take the routed client.
+- An entry point that takes an explicit primary `Client` (today
+  `run_controller` calls `Client::try_default()`), so the janitor's primary
+  watch and quorum read target the inner cluster.
+- A helper to run two controllers in one process (`tokio::join!` on two
+  `Controller::run` streams) and to register a secondary
+  `watches(Api::<Inner>::all(inner), cfg, mapper)` on the sync controller.
+- Client construction from a kubeconfig path with an explicit read timeout.
+
+Verified against kube-rs 0.91.0 source: `Controller::watches` has the needed
+signature; watcher errors surface as `Err` items behind a default backoff and
+the controller keeps running; single-object `Api::get` without a resource
+version is a quorum read; non-API errors (connection refused, timeouts) map
+to `APIError::Other`, which the reconciler treats as a generic retry.
+
+### 4.3 Optional: owner-less transactional update
+
+`GetThenUpdate*` hard-codes the predicate "current object carries
+`owner_ref`" in the model and in the shim's retry loop, both with TODOs. An
+owner-less form (controller-runtime's `RetryOnConflict`) would let the
+forward-sync proof drop D1 for the `Update Inner` step, and would let a
+verified inner implementation write its own status without an owner, which is
+what makes D1 dischargeable by composition. Mechanical but touches the
+message type, `well_formed()`, the shim, and every existing construction site
+and rely clause that reads `req.owner_ref`. One to three days plus
+re-verification. Not required for v1.
+
+## 5. Requirements and assumptions
+
+Notation as in `trusted/liveness_theorem.rs`. `π` projects a status onto the
+mirrored fields.
+
+```rust
+pub open spec fn inner_key(outer: OuterView) -> ObjectRef { /* kind Inner, same ns and name */ }
+
+pub open spec fn owned_inner(outer: OuterView, obj: DynamicObjectView) -> bool {
+    &&& obj.metadata.labels->0["anvil.dev/managed-by"] == "outer-sync"
+    &&& obj.metadata.annotations->0["anvil.dev/parent-uid"] == uid_string(outer.metadata.uid->0)
 }
 
-// Forward sync target: the mirror exists, is live, and carries the parent's spec.
+// R1 target.
 pub open spec fn spec_synced(outer: OuterView) -> StatePred<ClusterState> {
-    |s: ClusterState| {
-        let obj = s.resources()[inner_key(outer)];
-        &&& s.resources().contains_key(inner_key(outer))
-        &&& obj.metadata.deletion_timestamp is None
-        &&& InnerView::unmarshal(obj) is Ok
-        &&& InnerView::unmarshal(obj)->Ok_0.spec == outer.spec
-    }
+    |s| { let obj = s.resources()[inner_key(outer)];
+          &&& s.resources().contains_key(inner_key(outer))
+          &&& obj.metadata.deletion_timestamp is None
+          &&& owned_inner(outer, obj)
+          &&& InnerView::unmarshal(obj) is Ok
+          &&& InnerView::unmarshal(obj)->Ok_0.spec == outer.spec }
 }
 
-pub open spec fn inner_status_is(outer: OuterView, st: StatusView) -> StatePred<ClusterState> {
-    |s: ClusterState| {
-        &&& s.resources().contains_key(inner_key(outer))
-        &&& InnerView::unmarshal(s.resources()[inner_key(outer)]) is Ok
-        &&& InnerView::unmarshal(s.resources()[inner_key(outer)])->Ok_0.status == st
-    }
+// R2 premise: the inner implementation has settled on status st for this spec.
+pub open spec fn inner_settled(outer: OuterView, st: StatusView) -> StatePred<ClusterState> {
+    |s| { let inner = InnerView::unmarshal(s.resources()[inner_key(outer)])->Ok_0;
+          &&& spec_synced(outer)(s)
+          &&& inner.status.observed_generation == inner.metadata.generation
+          &&& π(inner.status) == st }
 }
 
+// R2 target.
 pub open spec fn status_synced(outer: OuterView, st: StatusView) -> StatePred<ClusterState> {
-    |s: ClusterState| {
-        &&& s.resources().contains_key(outer.object_ref())
-        &&& OuterView::unmarshal(s.resources()[outer.object_ref()]) is Ok
-        &&& OuterView::unmarshal(s.resources()[outer.object_ref()])->Ok_0.status == st
-    }
+    |s| { let o = OuterView::unmarshal(s.resources()[outer.object_ref()])->Ok_0;
+          &&& π(o.status) == st
+          &&& o.status.observed_generation == o.metadata.generation }
+}
+
+// R3: per mirror key k and parent uid a.
+pub open spec fn parent_absent(k: ObjectRef, a: Uid) -> StatePred<ClusterState> {
+    |s| !(s.resources().contains_key(outer_key_of(k)) && s.resources()[outer_key_of(k)].metadata.uid == Some(a))
+}
+pub open spec fn mirror_collected(k: ObjectRef, a: Uid) -> StatePred<ClusterState> {
+    |s| !(s.resources().contains_key(k) && labeled_with_parent(s.resources()[k], a))
 }
 ```
 
 **R1 (forward ESR).** For every `outer`:
 `always(desired_state_is(outer)) ~> always(spec_synced(outer))`.
 
-**R2 (backward ESR).** For every `outer` and `st`:
-`always(desired_state_is(outer) ∧ inner_status_is(outer, st)) ~> always(status_synced(outer, st))`.
+**R2 (backward ESR with generation).** For every `outer` and `st`:
+`always(desired_state_is(outer) ∧ inner_settled(outer, st)) ~> always(status_synced(outer, st))`.
+The premise fixes the inner status rather than assuming the inner controller
+is live, so R2 is independent of any particular inner implementation. Under
+`always(desired_state_is(outer))` the `Outer` generation is constant (a
+generation bump implies a spec change), which is what makes the target's
+`observed_generation == generation` conjunct stable.
 
-R2's premise fixes the inner status rather than assuming the inner controller
-is live; this keeps R2 independent of any particular inner implementation.
-Combined with R1 and the liveness dependency one gets the end-to-end
-corollary "spec stable ⇒ eventually `Outer.status == f(Outer.spec)` forever".
+**R3 (cleanup, the janitor's liveness property).** For every mirror key `k`
+and uid `a`: `always(parent_absent(k, a)) ~> always(mirror_collected(k, a))`.
+Its premise is an absence, unlike every existing Anvil proof; the mechanics
+are the same (weak fairness of `schedule_controller_reconcile` for the
+janitor on key `k`, which is enabled while the `Inner` exists). Delayed
+creates for uid `a` are finitely many, because a `Create` is only sent by a
+reconcile scheduled while an `Outer` with uid `a` existed.
 
-**R3 (cleanup, exec-tested in v1, proof optional).** If `Outer` has a deletion
-timestamp and our finalizer, eventually `Inner{ns,name}` is absent and the
-`Outer` object is gone. The API server model supports finalizers and
-deletion-time semantics, so this is provable, but none of the existing
-controllers prove a deletion path yet; budget it separately.
+**G-gen (safety invariant, part of the sync guarantee).** Every
+`UpdateStatus Outer` sent by the sync controller has
+`obj.status.observed_generation == obj.metadata.generation`, and was formed
+from an `Inner` that satisfied `inner_settled` for that `obj`'s spec. Combined
+with the resource-version precondition this yields the observer property in
+1.5.
 
-**Assumptions** (all standard for Anvil, restated for two clusters):
+**Corollary.** R1, D1 and R2 together give: if the `Outer` spec is stable,
+then eventually and stably `π(Outer.status) == f(spec)` and
+`observedGeneration == generation`, where `f` is the inner implementation's
+function.
+
+**Assumptions**, all standard for Anvil and restated for two clusters:
 
 1. `cluster.init()` and `always(cluster.next())`.
-2. Weak fairness (`next_with_wf`) of: the API server, our controller's steps,
-   `schedule_controller_reconcile` for our controller, `disable_crash` for our
-   controller, `disable_req_drop`, `disable_pod_monkey`, built-in controllers.
-   Interpreted: the outer controller eventually stops crashing, and both
-   clusters' API servers eventually stop failing requests.
-3. Both CRD types installed; our controller model registered under some id.
-4. Rely condition of 2.4 for every other controller id.
-5. Liveness dependency of 2.4 (inner status quiesces when inner spec is
-   stable). Needed for R1 only; can be discharged by `compose_dep` against a
-   verified inner controller, or assumed for an unverified one.
-6. Proof hygiene: resource versions and uids are compared only for equality
-   against the same object.
-7. Out of model: the inner namespace exists; no cross-cluster owner
-   references (enforced by our guarantee); no Patch or server-side apply.
+2. Weak fairness of the API server, of both our controllers' steps and
+   `schedule_controller_reconcile`, of `disable_crash` for both, of
+   `disable_req_drop`, `disable_pod_monkey`, and the built-in controllers.
+   Interpreted: our process eventually stops crashing, lost responses
+   eventually stop, and both clusters' API servers eventually stop failing
+   requests.
+3. Both CRD types installed; both controller models registered.
+4. The rely condition of 3.3 for every other controller id.
+5. D1 for the inner implementation (axiom in v1).
+6. The generation semantics of 4.1 hold for both real API servers (they do
+   for CRDs with the status subresource).
+7. Exec hygiene: our controllers never read rv or uid values (3.2,
+   obligation 1).
+8. Out of model, operational: the inner namespace exists; CRD schema parity;
+   the `Outer` CRD is installed whenever the outer API server answers; one
+   active replica; no mutating admission on `Inner` spec.
 
-## 6. Testbed
+## 6. What the model does and does not cover
 
-Scripts under `tools/` and manifests under `deploy/outer_sync/`, mirroring the
-existing `local-test.sh` / `deploy.sh` flow:
+Stated so that a reader does not over-read the theorem.
 
-1. `kind create cluster --name outer` and `kind create cluster --name inner`
-   (single control-plane nodes; the three-worker `deploy/kind.yaml` is not
-   needed). Both land on the shared `kind` Docker network.
-2. Apply `Inner` CRD, a namespace, a ServiceAccount, Role, RoleBinding and a
-   long-lived `kubernetes.io/service-account-token` Secret in `inner`. Render
-   a kubeconfig whose server is `https://<inner-control-plane container IP>:6443`
-   (from `docker inspect`; kind's API server certificate already includes the
-   node IP), whose CA is the cluster CA, and whose user is that token.
-3. In `outer`: apply `Outer` CRD, RBAC, the kubeconfig as a Secret, and the
-   controller Deployment mounting it. `kind load docker-image` as today.
-4. A tiny unverified inner "echo" controller (kube-rs, ~50 lines, its own
-   binary in `src/bin/`) deployed in `inner` that sets `Inner.status` from
-   `Inner.spec`. This is the stand-in for the real implementation and
-   satisfies the liveness dependency by construction.
-5. e2e module `e2e/src/outer_sync_e2e.rs` with two `Client`s from contexts
+| Real-world situation | In the model? | How |
+|---|---|---|
+| Outer controller live, inner cluster unreachable for a finite time | yes | `drop_req` on inner-bound requests |
+| Same for the outer cluster | yes | `drop_req` on outer-bound requests |
+| Permanent partition | excluded by fairness | correct: no liveness holds under it |
+| Write executed, client sees timeout | by projection | executed + `restart_controller`; all writes replay-safe; delayed `Create` collected by janitor |
+| Late delivery of a stale request after retry | yes | network reorders; preconditions reject stale writes |
+| Spurious/real `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | janitor may transiently delete a live mirror; recreated after drops stop |
+| Inner implementation changing status on its own | yes | other controller under rely |
+| Inner implementation adding labels/annotations | yes | metadata-only `Update` allowed by rely |
+| Inner implementation adding finalizers to `Inner` | no (rely forbids) | relaxing it adds a dependency "inner side releases finalizers" to R3 |
+| User deletes or edits `Inner` out of band; inner cluster rebuilt | no | controller recovers in exec (NotFound → Create; uid mismatch → janitor); modeling it needs an "inner monkey" step in `src/kubernetes_cluster/`, priced like `pod_monkey` |
+| Inner namespace deleted | no | R1 false in reality while it persists; operational assumption |
+| Outer deleted and recreated with new uid while old mirror exists | yes | janitor removes stale mirror (D2), sync recreates |
+| Pre-existing foreign `Inner{ns,name}` | vacuous in model (only our controllers create `Inner`) | exec refuses to adopt; observable only via logs and a lagging `observedGeneration` in v1 |
+| Two controller replicas | no | `replicas: 1`, `strategy: Recreate` |
+| Time-based behavior (staleness after N seconds) | no | no clock in the model |
+| Generation bumps on spec change, not on status | yes, after 4.1 | API server model |
+
+## 7. Testbed
+
+Scripts under `tools/`, manifests under `deploy/outer_sync/`, mirroring
+`local-test.sh` and `deploy.sh`:
+
+1. `kind create cluster --name outer` and `--name inner`, single control-plane
+   nodes on the shared `kind` Docker network.
+2. In `inner`: `Inner` CRD, a namespace, ServiceAccount, ClusterRole,
+   ClusterRoleBinding, a long-lived `kubernetes.io/service-account-token`
+   Secret, and the echo controller. Render a kubeconfig whose server is the
+   inner control-plane container's IP on port 6443 (from `docker inspect`;
+   pin the IP with `--ip` if the network is ever disconnected and reconnected
+   during tests; whether kind's API server certificate includes that IP is
+   not verifiable from this repository and must be checked once), CA from the
+   cluster, user from the token.
+3. In `outer`: `Outer` CRD, RBAC, the kubeconfig Secret, the controller
+   Deployment (`replicas: 1`, `strategy: Recreate`), image loaded with
+   `kind load docker-image`.
+4. e2e module `e2e/src/outer_sync_e2e.rs` with two `Client`s from contexts
    `kind-outer` and `kind-inner`:
-   - create `Outer` → `Inner` appears with equal spec, label and parent-uid;
-   - update `Outer.spec` → `Inner.spec` follows;
-   - `Inner.status` set by echo controller → `Outer.status` equals it;
-   - `docker pause inner-control-plane` for ~30 s during an update, then
-     unpause → convergence resumes (exercises the `drop_req` assumption);
-   - delete `Outer` → `Inner` removed, finalizer released, `Outer` gone;
-   - pre-create a foreign `Inner{ns,name}` → adopted (v1 policy).
-6. CI job alongside the existing e2e jobs; two single-node kind clusters fit
-   on a standard runner.
+   - create `Outer` → `Inner` appears with equal spec, label, parent-uid;
+   - update `Outer.spec` → `Inner.spec` follows; `Inner.generation` increases
+     by exactly one per spec change and not on status copies;
+   - echo controller settles → `Outer.status` mirrors it and
+     `Outer.status.observedGeneration == Outer.metadata.generation`; before
+     it settles, `observedGeneration` lags (assert with a watch log);
+   - partition: `docker network disconnect kind inner-control-plane` during an
+     update (this fails fast; a `docker pause` shorter than the client read
+     timeout never reaches the error path), then reconnect with the same IP →
+     convergence resumes;
+   - delete `Outer` → the janitor removes `Inner`; delete `Outer` while
+     partitioned → deletion completes immediately, `Inner` removed after heal;
+   - delete and recreate `Outer` with the same name → old mirror removed, new
+     one created, no adoption;
+   - pre-create a foreign `Inner{ns,name}` → never modified, `Outer` never
+     reports caught-up;
+   - crash mode of the shim during each write step.
+5. CI job alongside the existing e2e jobs; two single-node clusters fit on a
+   standard runner.
 
-For a live demo, the same scripts plus `kubectl --context kind-outer` /
-`kubectl --context kind-inner` side by side are sufficient. Running the
-controller out-of-cluster with two kubeconfig contexts also works and is
-convenient for development, but the in-cluster deployment is what the
-"production-shaped" goal calls for.
-
-## 7. Effort and phasing (rough)
+## 8. Effort and phasing (rough)
 
 | Phase | Work | Estimate |
 |---|---|---|
-| 1 | Shim routing + remote watch; CRDs, views, exec reconciler; deploy manifests | ~1 week |
-| 2 | Two-cluster testbed, echo controller, e2e tests, CI job | ~3–5 days |
-| 3 | Model reconciler, install, trusted spec (R1, R2, rely/guarantee, dependency) | ~3 days |
-| 4 | Liveness proof of R1 and R2 | ~3–6 weeks |
-| 5 | Guarantee proof, `ControllerSpec` and CORE instance, composition with existing controllers | ~1 week |
-| 6 (optional) | R3 deletion proof; owner-less transactional update (3.3) | 1–3 weeks |
+| 0 | `metadata.generation` in view, API server model, executable model, exec getter; re-verify all controllers | 1–2 weeks |
+| 1 | Shim routing, explicit-client entry point, dual-controller runner; CRDs, views, both exec reconcilers; manifests | ~1 week |
+| 2 | Two-cluster testbed, echo controller, e2e tests, CI job | ~1 week |
+| 3 | Model reconcilers, install, trusted spec (R1–R3, G-gen, rely/guarantee, D1, D2) | ~1 week |
+| 4 | Liveness proofs: sync R1 (new lemma family for conflict-under-dependency, stale-snapshot status write), R2, janitor R3 (absence premise, no precedent) | 4–8 weeks |
+| 5 | Guarantee proofs, `ControllerSpec`s, `compose_dep` (sync on janitor) and composition with the four existing controllers | 1–2 weeks |
+| optional | Owner-less transactional update (4.3); inner-monkey model step; readiness conditions on `Outer` | 1–3 weeks |
 
-Phase 4 dominates. For calibration, the VReplicaSet liveness proof is about
-10k lines of Verus; this controller has fewer moving parts (one child, no
-lists, no GC, no pod monkey) but two new ingredients: a two-kind
-rely/guarantee and the leads-to argument that threads the liveness dependency
-through the `Update Inner` conflict case. Expect the proof to be shorter than
-VReplicaSet's, not trivially so.
+For calibration, the existing `proof/` directories are 8.7k lines
+(VReplicaSet), 11.7k (VDeployment), 13.8k (VStatefulSet) and 9k (RabbitMQ).
+Both our reconcilers are smaller than any of those, but three ingredients
+have no precedent: plain `Update`/`UpdateStatus` with resource versions (all
+existing controllers use `GetThenUpdate*`), a leads-to that threads a
+liveness dependency through a conflict loop, and a deletion-side liveness
+property. Phase 4 dominates and is the least certain number.
 
-## 8. Risks and open points
+## 9. Open decisions
 
-- **The conflict/dependency argument (2.4)** is the only genuinely new proof
-  idea. If it proves awkward, 3.3 is the escape hatch: with an owner-less
-  transactional update the shim's retry loop absorbs the race and R1 needs no
-  dependency.
-- **Adoption policy** for a pre-existing `Inner` (1.3) changes the R1 premise
-  if we choose "refuse". Decide before writing the trusted spec.
-- **Model fidelity caveats** in 2.2 items 2 and 5 must appear next to the
-  theorem so a reader does not over-read what was proved.
-- **Kind networking**: the in-cluster controller reaches the inner API server
-  by container IP on the `kind` Docker network. This is stable on Linux CI
-  runners; on Docker Desktop it needs the same network but has worked for
-  Cluster API's docker provider for years.
+- **Rely on inner-side finalizers.** v1 forbids them. If real inner
+  implementations need them, R3 acquires a dependency on their release and
+  the sync controller must treat terminating mirrors as absent-in-progress
+  (already in the state machine).
+- **Conditions on `Outer` status.** A `Ready`/`InnerReachable` condition is
+  cheap to add to the projection but adds no provable content without time in
+  the model. Recommended as an exec-visible follow-up once R1–R3 are proved.
+- **Transient deletion by the janitor on spurious `NotFound`.** Accepted in
+  v1 as the price of never blocking deletion. If the inner workload is
+  expensive to tear down, a second confirming `Get` before `Delete` reduces
+  the real-world exposure at no cost to the proof.
