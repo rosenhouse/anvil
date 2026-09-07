@@ -21,14 +21,15 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   gone is eventually removed; R3s, no mirror pointing at a departed parent
   persists. All four are ESR-style properties in the sense of the Anvil paper.
 - Assumed: D3, the inner side eventually releases terminating objects; exactly
-  one outer cluster per inner cluster; uids do not collide across the two
-  clusters; the operational items in section 3.5.
+  one outer cluster per inner cluster; the operational items in section 3.5.
 - Framework additions (section 5): `metadata.generation` in the model, a JSON
   patch primitive, and a cluster tag on the exec wrappers with routing in the
   shim.
-- What is mechanized about "two clusters" (section 2): the model has one store
-  with two kinds. The mapping from two real API servers to that store is a
-  refinement argument; issue #7 on the fork tracks making it a theorem.
+- What is mechanized about "two clusters" (section 2): a two-store model,
+  `TwoCluster`, with a proof that every execution of it is, under an injective
+  relabeling of uids and resource versions, an execution of the one-store
+  model. R1, R2, R3 and R3s are then stated on two-store executions
+  (`widget_two_cluster_theorem`).
 
 ## 1. Design
 
@@ -157,42 +158,68 @@ kind, so outer copies schedule the sync reconciler and inner copies the
 janitor. The inner implementation is an ordinary other controller under a rely
 condition.
 
-### 2.2 From two real clusters to one store
+### 2.2 Two stores, and the refinement into one
 
-The claim is a simulation: every execution of the real system (two API servers
-with independent uid and resource-version counters, the two reconcilers, the
-network) maps to an execution of the model. The map unions the stores, folds
-the cluster into the kind, and relabels uids and resource versions by their
-position in a linearization of all writes. Three obligations make it sound:
+`kubernetes_cluster/spec/two_cluster.rs` defines `TwoCluster`: a cluster whose
+kinds are split between a primary and a remote API server, each with its own
+store, uid counter and resource-version counter, while controllers, network
+and failures are shared. Every step is a step of the one-store model taken on
+one of the two projections. A request is handled by the API server of its
+kind, the garbage collector of a side reads only that side's store, and a
+reconcile is scheduled from the store of the controller's kind. For the Widget
+pair the remote kinds are `{widget@inner}`.
 
-1. **Exec hygiene.** Relabeling preserves equality between an object's uid or
-   resource version and a value copied from it, and nothing else. The exec
-   code therefore gets uids as an opaque `UidToken` that supports equality and
-   one designated flow into data, the `parent-uid` annotation written by
-   `make_inner`; `tools/check-widget-exec-hygiene.sh` (run in CI) checks there
-   is exactly one such flow and no read of resource versions. Real uids are
-   assumed not to collide across the two clusters (the relabeling makes them
-   globally distinct).
-2. **Composition.** A controller sharing the composition that reads counter
-   values (VDeployment uses a resource version as a hash; RabbitMQ stores one
-   in an annotation) must live in one cluster. All existing controllers do.
-3. **Tagging.** The cluster of a controller's primary watch is derived from its
-   wrapper type (`ClusterBound`), response objects carry the tag of the client
-   that produced them, and a wrapper's `unmarshal` rejects a mismatched tag.
-   The mapping from (cluster, kind) to model kind is injective.
+`kubernetes_cluster/proof/two_cluster/` proves that every execution of
+`TwoCluster` maps to an execution of `Cluster`. The map unions the two stores
+and relabels uids and resource versions injectively, per side, by an
+assignment read off the execution: the k-th value a store's counter allocates
+goes to the number of values both stores had allocated by then, so the
+one-store counters count every allocation once. Annotation values follow the
+uids through a per-controller hook; for the Widget pair the hook covers the
+`parent-uid` annotation. The proof (`relabel`, `api_server`, `steps`,
+`execution`, `fairness`) covers the initial state, every step, and weak
+fairness of every action the liveness proofs assume. Fairness needs the
+two-store message behind a one-store message to stay the same while a wait
+lasts, which follows from the one-store invariants that no message is in
+flight twice and that in-flight ids are below the allocator.
 
-Two trusted statements in the repository are false for two clusters and are
-not used by these reconcilers: the `external_body` ensures equating the real
-resource-version string with the model's global counter, and the axiom
-`generated_name_spec`, which asserts generated-name uniqueness across kinds.
+`widget_sync_controller/proof/two_cluster.rs` instantiates the refinement.
+Both reconcilers commute with the relabeling, and `widget_two_cluster_theorem`
+states R1, R2, R3 and R3s of every execution of the two-store model that runs
+exactly the pair under its fairness assumptions and D3, each property read on
+the store its objects live in.
 
-Issue #7 on the fork replaces this argument with a two-store model and a
-refinement proof into the one-store model.
+The refinement holds under hypotheses, all met by the Widget pair:
+
+1. Controllers write only objects of known kinds, name what they create, put
+   owner references only on kinds of the object's own side (`request_ok`), and
+   have no external system.
+2. Installed types validate objects without reading metadata, and their
+   default status unmarshals (true of every type installed through
+   `Cluster::installed_type`).
+3. Every reconciler commutes with the relabeling: run on the relabeled object
+   and response it reaches the same local state and sends the relabeled
+   request. A reconciler that copies a uid or resource version into data other
+   than through the hook, or whose local state holds one, does not. The
+   `UidToken` boundary (section 5.3) and `tools/check-widget-exec-hygiene.sh`
+   hold the exec code to the same discipline as the model.
+4. The pod monkey of the two-store model writes named pods without
+   server-assigned fields or owner references.
+
+What remains trusted is the usual Anvil boundary, per store: that each real API
+server behaves as the model's API server, with its uids and resource versions
+read as that store's counter values. A controller that reads counter values
+into data (VDeployment uses a resource version as a hash; RabbitMQ stores one
+in an annotation) is outside hypothesis 3 and must live in one cluster. The
+axiom `generated_name_spec` and the `external_body` ensures equating a real
+resource-version string with the model counter are not used by these
+reconcilers.
 
 ### 2.3 What the model covers
 
 | Situation | Modeled | How |
 |---|---|---|
+| Two API servers with independent uid and resource-version counters | yes | the two-store model and its refinement (section 2.2) |
 | Either cluster unreachable for a finite time | yes | `drop_req` |
 | Permanent partition | excluded | fairness (`disable_req_drop`) |
 | Write executed, client sees a timeout | by projection | executed plus `restart_controller`; every write is replay-safe (patches test uid and generation, deletes carry uids); a delayed `Create` is collected by the janitor |
@@ -310,7 +337,7 @@ as a third member would discharge both (issue #3).
 4. The relies of 3.2 for every other controller id.
 5. D3.
 6. Generation semantics as in section 5.1 on both real API servers (true for CRDs with the status subresource).
-7. The simulation obligations of 2.2, including uid non-collision across clusters and one outer cluster per inner cluster.
+7. The hypotheses of the refinement in 2.2, and one outer cluster per inner cluster.
 8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec.
 
 ## 4. Deployment shape
@@ -371,7 +398,7 @@ status without an owner reference, which composing against one requires.
 | Alternative | Why not |
 |---|---|
 | Finalizer on the outer copy for cleanup | "remove finalizer on NotFound" is irreversible under fault injection and under a CRD uninstall; deletion blocks on partitions |
-| Native multi-store `ClusterState` | changes every `s.resources()` use and every `APIServerStep` case split in the repository; the refinement (issue #7) gets the same theorem without that |
+| Native multi-store `ClusterState` | changes every `s.resources()` use and every `APIServerStep` case split in the repository; the two-store model and refinement (section 2.2) give the same theorem without that |
 | The external-system hook for the inner cluster | a deterministic request-driven stub; cannot model an inner controller acting on its own |
 | Uid-suffixed mirror names | trivially provable cleanup, but names must match |
 | Reading status from the PATCH response | already modeled (`PatchResponse` carries the object); the copy rule refuses that status anyway, since it is for the previous generation; adds a state for no change in R1 to R3 |
@@ -387,15 +414,16 @@ status without an owner reference, which composing against one requires.
 | Guarantees, store and message invariants | `widget_sync_controller/proof/{guarantee,helper_invariants,janitor_invariants,sync_invariants}.rs` |
 | Termination, R3, R1, R2, R3s | `widget_sync_controller/proof/liveness/` |
 | Welder specs and composition | `composition/widget_{janitor,sync}_reconciler.rs` |
+| Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
+| Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
+| R1 to R3s on two clusters | `widget_sync_controller/proof/two_cluster.rs` |
 | Binaries, manifests, testbed, e2e | `src/bin/`, `deploy/widget_sync/`, `tools/two-cluster-test.sh`, `e2e/src/widget_sync_e2e.rs` |
 
-Full-repository verification (`cargo verus verify --lib`) passes; the count is
-recorded in the commit that last changed a proof.
+Full-repository verification (`cargo verus verify --lib`) passes.
 
 ## 8. Future work
 
-Tracked as issues on the fork: two-store model and refinement (#7); verified
-echo controller discharging D3 (#3); operability (#9) and hardening (#10);
+Tracked as issues on the fork: verified echo controller discharging D3 (#3); operability (#9) and hardening (#10);
 proof layout and solver budgets (#11); composition with the other four
 controllers and Patch in the executable model (#12); modeling out-of-band
 mirror edits and deletes (#13); parent-cluster identity, a `keep` annotation,
