@@ -146,6 +146,8 @@ pub proof fn lemma_always_each_builtin_object_in_etcd_is_well_formed(self, spec:
                             APIRequest::GetThenDeleteRequest(_) => {}
                             APIRequest::GetThenUpdateRequest(_) => {}
                             APIRequest::GetThenUpdateStatusRequest(_) => {}
+                            APIRequest::PatchRequest(_) => {}
+                            APIRequest::PatchStatusRequest(_) => {}
                         }
                     }
                     _ => {}
@@ -175,6 +177,8 @@ pub proof fn lemma_always_each_builtin_object_in_etcd_is_well_formed(self, spec:
                             APIRequest::GetThenDeleteRequest(_) => {}
                             APIRequest::GetThenUpdateRequest(_) => {}
                             APIRequest::GetThenUpdateStatusRequest(_) => {}
+                            APIRequest::PatchRequest(_) => {}
+                            APIRequest::PatchStatusRequest(_) => {}
                         }
                     }
                     _ => {}
@@ -237,6 +241,8 @@ pub proof fn lemma_always_each_custom_object_in_etcd_is_well_formed<T: CustomRes
                             }
                             APIRequest::GetThenUpdateRequest(_) => {}
                             APIRequest::GetThenUpdateStatusRequest(_) => {}
+                            APIRequest::PatchRequest(_) => {}
+                            APIRequest::PatchStatusRequest(_) => {}
                         }
                     }
                     _ => {}
@@ -257,6 +263,8 @@ pub proof fn lemma_always_each_custom_object_in_etcd_is_well_formed<T: CustomRes
                             APIRequest::GetThenDeleteRequest(_) => {}
                             APIRequest::GetThenUpdateRequest(_) => {}
                             APIRequest::GetThenUpdateStatusRequest(_) => {}
+                            APIRequest::PatchRequest(_) => {}
+                            APIRequest::PatchStatusRequest(_) => {}
                         }
                     }
                     _ => {}

@@ -145,4 +145,26 @@ pub open spec fn extract_some_k_get_then_update_status_resp_view(resp_o: Default
     resp_o->0->KResponse_0->GetThenUpdateStatusResponse_0.res
 }
 
+#[verifier(inline)]
+pub open spec fn is_some_k_patch_resp_view(resp_o: DefaultResp) -> bool {
+    resp_o is Some && resp_o->0 is KResponse && resp_o->0->KResponse_0 is PatchResponse
+}
+
+#[verifier(inline)]
+pub open spec fn is_some_k_patch_status_resp_view(resp_o: DefaultResp) -> bool {
+    resp_o is Some && resp_o->0 is KResponse && resp_o->0->KResponse_0 is PatchStatusResponse
+}
+
+// should be called only when is_some_k_patch_resp_view holds
+#[verifier(inline)]
+pub open spec fn extract_some_k_patch_resp_view(resp_o: DefaultResp) -> Result<DynamicObjectView, APIError> {
+    resp_o->0->KResponse_0->PatchResponse_0.res
+}
+
+// should be called only when is_some_k_patch_status_resp_view holds
+#[verifier(inline)]
+pub open spec fn extract_some_k_patch_status_resp_view(resp_o: DefaultResp) -> Result<DynamicObjectView, APIError> {
+    resp_o->0->KResponse_0->PatchStatusResponse_0.res
+}
+
 }

@@ -31,11 +31,23 @@ pub open spec fn rmq_rely(other_id: int) -> StatePred<ClusterState> {
                 APIRequest::GetThenDeleteRequest(req) => rmq_rely_get_then_delete_req(req),
                 APIRequest::UpdateStatusRequest(req) => rmq_rely_update_status_req(req)(s),
                 APIRequest::GetThenUpdateStatusRequest(req) => rmq_rely_get_then_update_status_req(req),
+                APIRequest::PatchRequest(req) => rmq_rely_patch_req(req),
+                APIRequest::PatchStatusRequest(req) => rmq_rely_patch_status_req(req),
                 // Get/List requests do not interfere
                 _ => true,
             }
         }
     }
+}
+
+// Other controllers don't patch RMQ-managed objects at all.
+pub open spec fn rmq_rely_patch_req(req: PatchRequest) -> bool {
+    !(is_rmq_managed_kind(req.kind) && has_rmq_prefix(req.name))
+}
+
+// Other controllers don't patch the status of the RMQ-managed config map.
+pub open spec fn rmq_rely_patch_status_req(req: PatchStatusRequest) -> bool {
+    !(req.kind == Kind::ConfigMapKind && has_rmq_prefix(req.name))
 }
 
 // Helper to check if a kind is managed by the RMQ controller

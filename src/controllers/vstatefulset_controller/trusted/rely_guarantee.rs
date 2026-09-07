@@ -48,10 +48,17 @@ pub open spec fn vsts_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::GetThenUpdateRequest(req) => vsts_rely_get_then_update_req(req),
             APIRequest::DeleteRequest(req) => vsts_rely_delete_req(req)(s),
             APIRequest::GetThenDeleteRequest(req) => vsts_rely_get_then_delete_req(req),
-            // Get/List/UpdateStatus requests are unconstrained
+            APIRequest::PatchRequest(req) => vsts_rely_patch_req(req),
+            // Get/List/UpdateStatus/PatchStatus requests are unconstrained
             _ => true,
         }
     }
+}
+
+// Other controllers don't patch pods or PVCs at all.
+pub open spec fn vsts_rely_patch_req(req: PatchRequest) -> bool {
+    &&& req.kind != Kind::PodKind
+    &&& req.kind != Kind::PersistentVolumeClaimKind
 }
 
 pub open spec fn vsts_rely_create_req(req: CreateRequest) -> bool {

@@ -630,6 +630,43 @@ ensures
                         assert(s.resources().contains_key(resource_key) ==> s_prime.resources().contains_key(resource_key));
                     }
                 },
+                APIRequest::PatchRequest(req) => {
+                    if id == controller_id {
+                        // rmq_guarantee returns false for PatchRequest from rabbitmq controller.
+                        assert(false);
+                    } else {
+                        if s.resources().contains_key(resource_key) {
+                            if req.key() == resource_key {
+                                // rmq_rely_patch_req: other controllers never patch an rmq-managed
+                                // key with the rmq prefix, which resource_key is.
+                                assert(false);
+                            } else {
+                                assert(req.key() != resource_key);
+                            }
+                        }
+                        assert(s.resources().contains_key(resource_key) ==> s_prime.resources().contains_key(resource_key));
+                    }
+                },
+                APIRequest::PatchStatusRequest(req) => {
+                    if id == controller_id {
+                        // rmq_guarantee returns false for PatchStatusRequest from rabbitmq controller.
+                        assert(false);
+                    } else {
+                        if s.resources().contains_key(resource_key) {
+                            if req.key() == resource_key {
+                                if req.kind == Kind::ConfigMapKind {
+                                    // rmq_rely_patch_status_req: other controllers never patch the
+                                    // status of the rmq-managed config maps.
+                                    assert(false);
+                                }
+                                // For non-CM: status-only change preserves spec; contains_key preserved.
+                            } else {
+                                assert(req.key() != resource_key);
+                            }
+                        }
+                        assert(s.resources().contains_key(resource_key) ==> s_prime.resources().contains_key(resource_key));
+                    }
+                },
             }
         },
         HostId::BuiltinController => {

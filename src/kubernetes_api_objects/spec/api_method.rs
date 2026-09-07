@@ -5,7 +5,9 @@ use crate::kubernetes_api_objects::spec::{
     common::{Kind, ObjectRef},
     dynamic::*,
     owner_reference::*,
+    patch_tests::*,
     preconditions::*,
+    resource::Value,
 };
 use crate::vstd_ext::string_view::*;
 use vstd::prelude::*;
@@ -29,6 +31,53 @@ pub enum APIRequest {
     GetThenDeleteRequest(GetThenDeleteRequest),
     GetThenUpdateRequest(GetThenUpdateRequest),
     GetThenUpdateStatusRequest(GetThenUpdateStatusRequest),
+    PatchRequest(PatchRequest),
+    PatchStatusRequest(PatchStatusRequest),
+}
+
+// PatchRequest replaces the spec of the object with the key (kind, name and namespace),
+// provided the tests pass against the object as stored. It models a JSON patch made of
+// `test` operations on metadata.uid and/or metadata.generation followed by an `add`
+// of /spec, executed atomically by the API server. Unlike UpdateRequest it carries no
+// resourceVersion, so it does not fail when unrelated fields (status, labels,
+// annotations, finalizers) were written since the sender read the object; the
+// generation test is what pins the spec the sender based its decision on.
+pub struct PatchRequest {
+    pub namespace: StringView,
+    pub name: StringView,
+    pub kind: Kind,
+    pub tests: PatchTestsView,
+    pub spec: Value,
+}
+
+impl PatchRequest {
+    pub open spec fn key(self) -> ObjectRef {
+        ObjectRef {
+            kind: self.kind,
+            namespace: self.namespace,
+            name: self.name,
+        }
+    }
+}
+
+// PatchStatusRequest is PatchRequest against the status subresource: it replaces the
+// status of the object if the tests pass. Spec and metadata are untouched.
+pub struct PatchStatusRequest {
+    pub namespace: StringView,
+    pub name: StringView,
+    pub kind: Kind,
+    pub tests: PatchTestsView,
+    pub status: Value,
+}
+
+impl PatchStatusRequest {
+    pub open spec fn key(self) -> ObjectRef {
+        ObjectRef {
+            kind: self.kind,
+            namespace: self.namespace,
+            name: self.name,
+        }
+    }
 }
 
 // GetRequest gets an object with the key (kind, name and namespace).
@@ -203,6 +252,18 @@ pub enum APIResponse {
     GetThenDeleteResponse(GetThenDeleteResponse),
     GetThenUpdateResponse(GetThenUpdateResponse),
     GetThenUpdateStatusResponse(GetThenUpdateStatusResponse),
+    PatchResponse(PatchResponse),
+    PatchStatusResponse(PatchStatusResponse),
+}
+
+// PatchResponse has the object as stored after PatchRequest was applied.
+pub struct PatchResponse {
+    pub res: Result<DynamicObjectView, APIError>,
+}
+
+// PatchStatusResponse has the object as stored after PatchStatusRequest was applied.
+pub struct PatchStatusResponse {
+    pub res: Result<DynamicObjectView, APIError>,
 }
 
 // GetResponse has the object returned by GetRequest.

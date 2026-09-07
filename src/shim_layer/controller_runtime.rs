@@ -1,7 +1,7 @@
 use crate::external_shim_layer::*;
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::exec::prelude::Preconditions;
-use crate::kubernetes_api_objects::exec::{api_method::*, api_resource::*, dynamic::*, resource::*};
+use crate::kubernetes_api_objects::exec::{api_method::*, api_resource::*, dynamic::*, patch_tests::*, resource::*};
 use crate::kubernetes_api_objects::spec::resource::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
 use crate::shim_layer::fault_injection::*;
@@ -11,7 +11,7 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, DeleteParams, ListParams, PostParams, Resource, ResourceExt},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, Resource, ResourceExt},
     config::{KubeConfigOptions, Kubeconfig},
     runtime::{
         controller::{Action, Controller},
@@ -605,6 +605,76 @@ where
                                 }
                             }
                         }
+                        KubeAPIRequest::PatchRequest(patch_req) => {
+                            check_fault_timing = true;
+                            let cluster = patch_req.api_resource.cluster();
+                            let api = Api::<kube::api::DynamicObject>::namespaced_with(
+                                ctx.clusters.client_of(cluster)?.clone(),
+                                &patch_req.namespace,
+                                patch_req.api_resource.as_kube_ref(),
+                            );
+                            let key = patch_req.key();
+                            let spec = patch_req
+                                .obj
+                                .into_kube()
+                                .data
+                                .get("spec")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let patch = json_patch_with_tests(&patch_req.tests, "/spec", spec);
+                            match api
+                                .patch(&patch_req.name, &PatchParams::default(), &Patch::<()>::Json(patch))
+                                .await
+                            {
+                                Err(err) => {
+                                    kube_resp = KubeAPIResponse::PatchResponse(KubePatchResponse {
+                                        res: Err(kube_error_to_api_error(&err)),
+                                    });
+                                    info!("{} Patch {} failed with error: {}", log_header, key, err);
+                                }
+                                Ok(obj) => {
+                                    kube_resp = KubeAPIResponse::PatchResponse(KubePatchResponse {
+                                        res: Ok(DynamicObject::from_kube_in(obj, cluster)),
+                                    });
+                                    info!("{} Patch {} done", log_header, key);
+                                }
+                            }
+                        }
+                        KubeAPIRequest::PatchStatusRequest(patch_status_req) => {
+                            check_fault_timing = true;
+                            let cluster = patch_status_req.api_resource.cluster();
+                            let api = Api::<kube::api::DynamicObject>::namespaced_with(
+                                ctx.clusters.client_of(cluster)?.clone(),
+                                &patch_status_req.namespace,
+                                patch_status_req.api_resource.as_kube_ref(),
+                            );
+                            let key = patch_status_req.key();
+                            let status = patch_status_req
+                                .obj
+                                .into_kube()
+                                .data
+                                .get("status")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Null);
+                            let patch = json_patch_with_tests(&patch_status_req.tests, "/status", status);
+                            match api
+                                .patch_status(&patch_status_req.name, &PatchParams::default(), &Patch::<()>::Json(patch))
+                                .await
+                            {
+                                Err(err) => {
+                                    kube_resp = KubeAPIResponse::PatchStatusResponse(KubePatchStatusResponse {
+                                        res: Err(kube_error_to_api_error(&err)),
+                                    });
+                                    info!("{} PatchStatus {} failed with error: {}", log_header, key, err);
+                                }
+                                Ok(obj) => {
+                                    kube_resp = KubeAPIResponse::PatchStatusResponse(KubePatchStatusResponse {
+                                        res: Ok(DynamicObject::from_kube_in(obj, cluster)),
+                                    });
+                                    info!("{} PatchStatus {} done", log_header, key);
+                                }
+                            }
+                        }
                         KubeAPIRequest::GetThenDeleteRequest(req) => {
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenDeleteResponse(
@@ -902,6 +972,33 @@ pub async fn transactional_get_then_update_status_by_retry(
             }
         }
     }
+}
+
+// json_patch_with_tests builds the JSON patch that realizes a PatchRequest or
+// PatchStatusRequest: one `test` per present test, then an `add` of the whole
+// value at `path` (`add` on an existing member replaces it; on a missing one it
+// creates it). The API server evaluates the whole document atomically against the
+// current object, which is what the model's one-step handle_patch_request assumes.
+fn json_patch_with_tests(tests: &PatchTests, path: &str, value: serde_json::Value) -> json_patch::Patch {
+    use json_patch::{AddOperation, PatchOperation, TestOperation};
+    let mut ops = Vec::new();
+    if let Some(uid) = tests.uid_value() {
+        ops.push(PatchOperation::Test(TestOperation {
+            path: "/metadata/uid".to_string(),
+            value: serde_json::Value::String(uid),
+        }));
+    }
+    if let Some(generation) = tests.generation_value() {
+        ops.push(PatchOperation::Test(TestOperation {
+            path: "/metadata/generation".to_string(),
+            value: serde_json::json!(generation),
+        }));
+    }
+    ops.push(PatchOperation::Add(AddOperation {
+        path: path.to_string(),
+        value,
+    }));
+    json_patch::Patch(ops)
 }
 
 // error_policy defines the controller's behavior when the reconcile ends with an error.

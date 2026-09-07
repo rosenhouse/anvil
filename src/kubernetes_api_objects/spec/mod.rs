@@ -11,6 +11,7 @@ pub mod dynamic;
 pub mod label_selector;
 pub mod object_meta;
 pub mod owner_reference;
+pub mod patch_tests;
 pub mod persistent_volume_claim;
 pub mod pod;
 pub mod pod_template_spec;
