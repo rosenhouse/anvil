@@ -139,6 +139,7 @@ ensures
                 namespace: Some(req.namespace),
                 resource_version: Some(s.api_server.resource_version_counter),
                 uid: Some(s.api_server.uid_counter),
+                generation: initial_generation(req.obj.kind),
                 deletion_timestamp: None,
                 ..req.obj.metadata
             },
@@ -198,6 +199,7 @@ ensures
             namespace: Some(req.namespace),
             resource_version: Some(s.api_server.resource_version_counter),
             uid: Some(s.api_server.uid_counter),
+            generation: initial_generation(req.obj.kind),
             deletion_timestamp: None,
             ..req.obj.metadata
         },
