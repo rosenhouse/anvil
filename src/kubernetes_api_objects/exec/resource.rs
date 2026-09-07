@@ -63,6 +63,14 @@ macro_rules! implement_object_wrapper_type {
             {
                 ApiResource::from_kube_in(kube::api::ApiResource::erase::<$it>(&()), $cluster)
             }
+        }
+
+        #[verifier(external)]
+        impl $crate::kubernetes_api_objects::exec::api_resource::ClusterBound for $t {
+            fn cluster() -> $crate::kubernetes_api_objects::exec::api_resource::ClusterId { $cluster }
+        }
+
+        impl $t {
 
             #[verifier(external_body)]
             pub fn marshal(self) -> (obj: DynamicObject)

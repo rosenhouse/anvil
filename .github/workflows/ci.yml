@@ -257,6 +257,8 @@ jobs:
           cache: false
       - name: Install kind
         run: go install sigs.k8s.io/kind@v$kind_version
+      - name: Check widget sync exec hygiene
+        run: ./tools/check-widget-exec-hygiene.sh
       - name: Deploy widget sync controller across two kind clusters
         run: |
           . "$HOME/.cargo/env"

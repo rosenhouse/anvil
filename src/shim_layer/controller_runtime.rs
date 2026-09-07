@@ -207,11 +207,10 @@ where
 }
 
 // run_controller_in_clusters runs a controller whose custom resource K lives in
-// `cr_cluster` (its watch and quorum reads go to that cluster's client) and whose
-// requests may target either cluster.
+// the cluster its wrapper type R::K is bound to (its watch and quorum reads go to
+// that cluster's client) and whose requests may target either cluster.
 pub async fn run_controller_in_clusters<K, R, E>(
     clusters: ClusterClients,
-    cr_cluster: ClusterId,
     fault_injection: bool,
 ) -> Result<()>
 where
@@ -226,13 +225,14 @@ where
         + 'static,
     K::DynamicType: Default + Eq + Hash + Clone + Debug + Unpin,
     R: Reconciler + Send + Sync,
-    R::K: ResourceWrapper<K> + Send,
+    R::K: ResourceWrapper<K> + ClusterBound + Send,
     <R::K as View>::V: CustomResourceView,
     R::S: Send,
     R::EReq: Send,
     R::EResp: Send,
     E: ExternalShimLayer<R::EReq, R::EResp>,
 {
+    let cr_cluster = <R::K as ClusterBound>::cluster();
     // The primary watch stream is long-lived, so it uses the watch client of its cluster.
     let crs = Api::<K>::all(clusters.watch_client_of(cr_cluster)?.clone());
 
@@ -263,7 +263,6 @@ where
 // periodic requeue, not on this watch.
 pub async fn run_controller_with_same_name_watch<K, R, E, O>(
     clusters: ClusterClients,
-    cr_cluster: ClusterId,
     watched_cluster: ClusterId,
     fault_injection: bool,
 ) -> Result<()>
@@ -278,7 +277,7 @@ where
         + Sync
         + 'static,
     R: Reconciler + Send + Sync,
-    R::K: ResourceWrapper<K> + Send,
+    R::K: ResourceWrapper<K> + ClusterBound + Send,
     <R::K as View>::V: CustomResourceView,
     R::S: Send,
     R::EReq: Send,
@@ -292,6 +291,7 @@ where
         + Sync
         + 'static,
 {
+    let cr_cluster = <R::K as ClusterBound>::cluster();
     let crs = Api::<K>::all(clusters.watch_client_of(cr_cluster)?.clone());
     let watched = Api::<O>::all(clusters.watch_client_of(watched_cluster)?.clone());
 

@@ -33,7 +33,7 @@ const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
     let args: Vec<String> = env::args().collect();
-    let cmd = args[1].clone();
+    let cmd = args.get(1).cloned().unwrap_or_default();
 
     if cmd == String::from("export") {
         println!("{}", serde_yaml::to_string(&Widget::crd())?);
@@ -52,13 +52,11 @@ async fn main() -> Result<()> {
 
         let sync = run_controller_with_same_name_watch::<Widget, WidgetSyncReconciler, VoidExternalShimLayer, Widget>(
             clusters.clone(),
-            ClusterId::Primary,
             ClusterId::Remote,
             fault_injection,
         );
         let janitor = run_controller_in_clusters::<Widget, WidgetJanitorReconciler, VoidExternalShimLayer>(
             clusters,
-            ClusterId::Remote,
             fault_injection,
         );
         tokio::try_join!(sync, janitor)?;
