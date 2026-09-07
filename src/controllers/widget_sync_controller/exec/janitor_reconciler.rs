@@ -1,5 +1,6 @@
 // Exec implementation of the janitor reconciler; every function is proved to
 // conform to its counterpart in model::janitor_reconciler.
+use crate::kubernetes_api_objects::exec::common::KindExec;
 use crate::kubernetes_api_objects::exec::prelude::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
@@ -171,7 +172,8 @@ pub fn parent_uid_annotation(inner: &InnerWidget) -> (parent_uid: String)
     inner.metadata().annotations().unwrap().get(&"anvil.dev/parent-uid".to_string()).unwrap()
 }
 
-// Whether some listed outer copy has `parent_uid` as its uid. See model::parent_listed.
+// Whether some listed outer copy has `parent_uid` as its uid; objects of any other
+// kind are ignored. See model::parent_listed.
 pub fn parent_listed(objs: &Vec<DynamicObject>, parent_uid: &String) -> (b: bool)
     ensures b == model::parent_listed(objs.deep_view(), parent_uid@),
 {
@@ -181,15 +183,20 @@ pub fn parent_listed(objs: &Vec<DynamicObject>, parent_uid: &String) -> (b: bool
         invariant
             i <= objs.len(),
             found == exists |j: int| 0 <= j < i
-                && (#[trigger] objs.deep_view()[j]).metadata.uid is Some
+                && (#[trigger] objs.deep_view()[j]).kind == OuterWidgetView::kind()
+                && objs.deep_view()[j].metadata.uid is Some
                 && int_to_string_view(objs.deep_view()[j].metadata.uid->0) == parent_uid@,
         decreases objs.len() - i,
     {
+        let is_outer = match objs[i].kind() {
+            KindExec::CustomResourceKind(k) => k.eq(&"widget".to_string()),
+            _ => false,
+        };
         let uid = objs[i].metadata().uid();
         proof {
             assert(objs.deep_view()[i as int] == objs[i as int]@);
         }
-        if uid.is_some() && uid.unwrap().matches_annotation_value(parent_uid) {
+        if is_outer && uid.is_some() && uid.unwrap().matches_annotation_value(parent_uid) {
             found = true;
         }
         i = i + 1;

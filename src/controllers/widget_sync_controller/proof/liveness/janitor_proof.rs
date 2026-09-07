@@ -884,7 +884,8 @@ pub proof fn lemma_list_answered_while_parent_absent(s: ClusterState, req: ListR
     assert(handle_list_request(req, s.api_server).res->Ok_0 == objs);
     if parent_listed(objs, parent) {
         let i = choose |i: int| 0 <= i < objs.len()
-            && (#[trigger] objs[i]).metadata.uid is Some
+            && (#[trigger] objs[i]).kind == OuterWidgetView::kind()
+            && objs[i].metadata.uid is Some
             && int_to_string_view(objs[i].metadata.uid->0) == parent;
         let o = objs[i];
         assert(objs.contains(o));
