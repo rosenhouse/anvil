@@ -75,6 +75,10 @@ kubectl --context "$inner_ctx" apply -f "$manifests/rbac_inner.yaml"
 # Build a kubeconfig for the inner cluster from the service account token. The
 # outer cluster's pods reach the inner API server through the docker network the
 # kind nodes share, so the server address is the inner control-plane container's IP.
+# The token is a separate Secret key next to the kubeconfig, referenced with a
+# relative tokenFile: kube resolves it against the kubeconfig's directory and
+# re-reads it at least once a minute, so rotating the Secret needs no restart.
+# An inline token would take precedence and is never re-read.
 for _ in $(seq 1 30); do
     token="$(kubectl --context "$inner_ctx" -n widget-sync get secret widget-sync-remote-token \
         -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
@@ -88,6 +92,8 @@ fi
 ca_data="$(kubectl --context "$inner_ctx" -n widget-sync get secret widget-sync-remote-token -o jsonpath='{.data.ca\.crt}')"
 inner_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${inner_cluster}-control-plane")"
 kubeconfig_dir="$(mktemp -d)"
+# No trailing newline: the file content becomes the bearer header verbatim.
+printf '%s' "$token" > "$kubeconfig_dir/token"
 cat > "$kubeconfig_dir/kubeconfig" <<EOF
 apiVersion: v1
 kind: Config
@@ -99,7 +105,7 @@ clusters:
 users:
   - name: widget-sync-remote
     user:
-      token: ${token}
+      tokenFile: token
 contexts:
   - name: inner
     context:
@@ -111,7 +117,8 @@ EOF
 # Outer cluster: RBAC, the remote kubeconfig Secret, and the sync controller.
 kubectl --context "$outer_ctx" apply -f "$manifests/rbac.yaml"
 kubectl --context "$outer_ctx" -n widget-sync create secret generic widget-sync-remote-kubeconfig \
-    --from-file=kubeconfig="$kubeconfig_dir/kubeconfig"
+    --from-file=kubeconfig="$kubeconfig_dir/kubeconfig" \
+    --from-file=token="$kubeconfig_dir/token"
 rm -rf "$kubeconfig_dir"
 kubectl --context "$outer_ctx" apply -f "$manifests/deploy_local.yaml"
 

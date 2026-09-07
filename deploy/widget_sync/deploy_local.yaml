@@ -1,7 +1,10 @@
 # The widget sync controller, deployed in the outer (primary) cluster.
 # Exactly one replica: the proofs assume a single active sync controller.
 # The Secret widget-sync-remote-kubeconfig holds a kubeconfig for the inner
-# cluster (key "kubeconfig"); tools/two-cluster-test.sh creates it.
+# cluster (key "kubeconfig") and the bearer token it references through a
+# relative tokenFile (key "token"); tools/two-cluster-test.sh creates it. Both
+# keys land in the same mounted directory. kube re-reads the token file at
+# least once a minute, so rotating the Secret takes effect without a restart.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
