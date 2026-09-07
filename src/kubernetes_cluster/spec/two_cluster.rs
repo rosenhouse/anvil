@@ -212,12 +212,13 @@ impl TwoCluster {
         self.on_side(Side::Primary, self.cluster.disable_req_drop())
     }
 
-    // The pod monkey writes only named pods that carry no server-assigned field
-    // and no owner reference: such a pod reads the same in both models. (A pod
-    // with an owner reference to a kind of the other side would be collected by
-    // the garbage collector of its own side, which the one-store model cannot
-    // express; and which of the monkey's actions runs is chosen from the pod, so
-    // the pod must not change under the abstraction.)
+    // The pod monkey writes only named pods that carry no server-assigned field,
+    // no owner reference and no annotation: such a pod reads the same in both
+    // models. The refinement needs that because which of the monkey's actions
+    // runs is a `choose` over the monkey's input, which the proof cannot equate
+    // between a pod and its relabeling. The price is that the stale-write and
+    // garbage-collection behaviours the one-store monkey exercises on pods are
+    // not exercised here.
     pub open spec fn pod_monkey_next(self) -> Action<TwoClusterState, PodView, ()> {
         let base = self.on_side(Side::Primary, self.cluster.pod_monkey_next());
         Action {

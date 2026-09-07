@@ -2,9 +2,10 @@
 // and its one liveness assumption about the inner side (D3). Motivation:
 // doc/widget_sync_design.md, section 3.
 //
-// Both clusters are one logical store in the model; the outer copy has kind
+// Both clusters are one logical store in this model; the outer copy has kind
 // OuterWidgetView::kind() and the mirror has kind InnerWidgetView::kind(), at the
-// same namespace and name.
+// same namespace and name. The reading on two stores, with the outer copy in
+// one and the mirror in the other, is widget_sync_controller::proof::two_cluster.
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{cluster::*, esr::*, message::*};
 use crate::vstd_ext::string_view::*;
