@@ -26,7 +26,7 @@ use crate::widget_sync_controller::{
     model::{install::*, sync_reconciler::*},
     proof::{
         guarantee::*, helper_invariants::*, janitor_invariants::*,
-        liveness::{janitor_proof::*, sync_proof::*, terminate},
+        liveness::{api_actions::*, spec::*, sync_spec_proof::*, terminate},
         predicate::*, sync_invariants::*,
     },
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
