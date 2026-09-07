@@ -16,7 +16,10 @@
 //
 // The refinement of TwoCluster into Cluster (kubernetes_cluster::proof::two_cluster)
 // is what lets a property proved on Cluster be read as a property of two
-// clusters.
+// clusters. It needs every object written to a store to be of a kind the cluster
+// knows and to refer, through its owner references, only to kinds of its own
+// side (object_ok below); the pod monkey is held to that here, controllers are
+// held to it by a hypothesis of the refinement.
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{
@@ -209,8 +212,19 @@ impl TwoCluster {
         self.on_side(Side::Primary, self.cluster.disable_req_drop())
     }
 
+    // The pod monkey writes only named pods whose owner references stay on the
+    // pods' side: a pod with an owner reference to a kind of the other side would
+    // be collected by the garbage collector of its own side, which the one-store
+    // model cannot express.
     pub open spec fn pod_monkey_next(self) -> Action<TwoClusterState, PodView, ()> {
-        self.on_side(Side::Primary, self.cluster.pod_monkey_next())
+        let base = self.on_side(Side::Primary, self.cluster.pod_monkey_next());
+        Action {
+            precondition: |input: PodView, s: TwoClusterState| {
+                &&& self.pod_ok(input)
+                &&& (base.precondition)(input, s)
+            },
+            transition: base.transition,
+        }
     }
 
     pub open spec fn disable_pod_monkey(self) -> Action<TwoClusterState, (), ()> {
@@ -223,6 +237,38 @@ impl TwoCluster {
 
     pub open spec fn stutter(self) -> Action<TwoClusterState, (), ()> {
         self.on_side(Side::Primary, self.cluster.stutter())
+    }
+
+    // A kind the cluster knows: built in, or an installed custom resource type.
+    pub open spec fn kind_ok(self, kind: Kind) -> bool {
+        kind is CustomResourceKind ==> self.cluster.installed_types.contains_key(kind->CustomResourceKind_0)
+    }
+
+    // An object that may be written to a store: of a known kind, with owner
+    // references to kinds of its own side only.
+    pub open spec fn object_ok(self, o: DynamicObjectView) -> bool {
+        &&& self.kind_ok(o.kind)
+        &&& o.metadata.owner_references is Some ==> forall |i: int| 0 <= i < o.metadata.owner_references->0.len()
+            ==> self.side_of_kind((#[trigger] o.metadata.owner_references->0[i]).kind) == self.side_of_kind(o.kind)
+    }
+
+    // A request the refinement handles: the object it writes is object_ok and a
+    // Create names it (a generated name is drawn per store, which the one-store
+    // model cannot follow).
+    pub open spec fn request_ok(self, req: APIRequest) -> bool {
+        match req {
+            APIRequest::CreateRequest(r) => self.object_ok(r.obj) && r.obj.metadata.name is Some,
+            APIRequest::UpdateRequest(r) => self.object_ok(r.obj),
+            APIRequest::UpdateStatusRequest(r) => self.kind_ok(r.obj.kind),
+            APIRequest::GetThenUpdateRequest(r) => self.object_ok(r.obj),
+            APIRequest::GetThenUpdateStatusRequest(r) => self.kind_ok(r.obj.kind),
+            _ => true,
+        }
+    }
+
+    pub open spec fn pod_ok(self, pod: PodView) -> bool {
+        &&& pod.metadata.name is Some
+        &&& self.object_ok(pod.marshal())
     }
 
     pub open spec fn init(self) -> StatePred<TwoClusterState> {
