@@ -104,6 +104,10 @@ pub open spec fn etcd_object_is_well_formed(self, key: ObjectRef) -> StatePred<C
         &&& Self::etcd_object_is_weakly_well_formed(key)(s)
         &&& unmarshallable_object(obj, self.installed_types)
         &&& valid_object(obj, self.installed_types)
+        // The API server owns metadata.generation: custom resources always carry one,
+        // built-in kinds never do (their generation is unmodeled). Needed, e.g., to show
+        // that an update carrying the stored object's content is a no-op.
+        &&& obj.metadata.generation is Some == obj.kind is CustomResourceKind
     }
 }
 
