@@ -423,7 +423,8 @@ pub open spec fn handle_delete_request(req: DeleteRequest, s: APIServerState) ->
                 (s, DeleteResponse{res: Ok(())})
             } else {
                 // Setting the deletion timestamp for the first time also bumps the generation
-                // (see rest.BeforeDelete and updateForGracefulDeletionAndFinalizers in the API server).
+                // when it is non-zero, which it always is for a custom resource (see markAsDeleting
+                // in k8s.io/apiserver/pkg/registry/generic/registry/store.go).
                 let stamped_obj_with_new_rv = obj.with_deletion_timestamp(deletion_timestamp())
                                                  .with_resource_version(s.resource_version_counter)
                                                  .with_generation(bumped_generation(obj));
