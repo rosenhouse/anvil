@@ -18,7 +18,6 @@
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
 use crate::vstd_ext::string_view::*;
-use crate::widget_sync_controller::model::{janitor_reconciler, sync_reconciler};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use vstd::prelude::*;
@@ -48,7 +47,7 @@ pub open spec fn mirror_create_req(req: CreateRequest, outer_key: ObjectRef) -> 
             &&& outer.object_ref() == outer_key
             &&& outer.metadata.uid is Some
             &&& req.namespace == outer_key.namespace
-            &&& req.obj == #[trigger] sync_reconciler::make_inner(outer).marshal()
+            &&& req.obj == #[trigger] make_inner(outer).marshal()
             &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
         }
     }

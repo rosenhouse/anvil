@@ -8,7 +8,6 @@
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{cluster::*, esr::*, message::*};
 use crate::vstd_ext::string_view::*;
-use crate::widget_sync_controller::model::{janitor_reconciler, sync_reconciler};
 use crate::widget_sync_controller::trusted::spec_types::*;
 use verus_temporal_logic::defs::*;
 use vstd::prelude::*;
@@ -53,9 +52,9 @@ pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState>
 pub open spec fn mirror_spec_undisturbed(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg: Message| #[trigger] s.in_flight().contains(msg) && msg.content is APIRequest ==> match msg.content->APIRequest_0 {
-            APIRequest::UpdateRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
-            APIRequest::GetThenUpdateRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
-            APIRequest::PatchRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.spec, outer),
+            APIRequest::UpdateRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
+            APIRequest::GetThenUpdateRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
+            APIRequest::PatchRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.spec, outer),
             _ => true,
         }
     }
@@ -68,13 +67,13 @@ pub open spec fn writes_outer_spec(spec: Value, outer: OuterWidgetView) -> bool 
 
 pub open spec fn spec_synced(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        let key = sync_reconciler::inner_key(outer);
+        let key = inner_key(outer);
         let obj = s.resources()[key];
         let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
         &&& s.resources().contains_key(key)
         &&& obj.metadata.deletion_timestamp is None
         &&& InnerWidgetView::unmarshal(obj) is Ok
-        &&& sync_reconciler::is_mirror_of(inner, outer)
+        &&& is_mirror_of(inner, outer)
         &&& inner.spec == outer.spec
     }
 }
@@ -100,9 +99,9 @@ pub open spec fn widget_status_eventually_mirrored_per_cr(outer: OuterWidgetView
 // `mirrored` (a status with only the mirrored fields set) for it.
 pub open spec fn inner_settled(outer: OuterWidgetView, mirrored: WidgetStatusView) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        let inner = InnerWidgetView::unmarshal(s.resources()[sync_reconciler::inner_key(outer)])->Ok_0;
+        let inner = InnerWidgetView::unmarshal(s.resources()[inner_key(outer)])->Ok_0;
         &&& spec_synced(outer)(s)
-        &&& sync_reconciler::inner_caught_up(inner)
+        &&& inner_caught_up(inner)
         &&& inner.status->0.mirrored() == mirrored
     }
 }
@@ -179,8 +178,8 @@ pub open spec fn parent_absent(key: ObjectRef, parent_uid: Uid) -> StatePred<Clu
 pub open spec fn mirror_of_parent(obj: DynamicObjectView, parent_uid: Uid) -> bool {
     let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
     &&& InnerWidgetView::unmarshal(obj) is Ok
-    &&& janitor_reconciler::has_mirror_identity(inner)
-    &&& janitor_reconciler::parent_uid_annotation(inner) == int_to_string_view(parent_uid)
+    &&& has_mirror_identity(inner)
+    &&& parent_uid_annotation(inner) == int_to_string_view(parent_uid)
 }
 
 pub open spec fn mirror_collected(key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
@@ -206,6 +205,56 @@ pub open spec fn inner_terminating_object(key: ObjectRef, uid: Uid) -> StatePred
 
 pub open spec fn inner_releases_terminating_objects() -> TempPred<ClusterState> {
     tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
+}
+
+// The janitor's Deletes are sound: a Delete the janitor has in flight tests a uid
+// that has been issued, and if the object it would remove is a mirror, that
+// mirror's parent is absent for good. This is what the sync reconciler needs to
+// know about the janitor. It is part of the janitor's ESR rather than of its
+// guarantee because it holds only under the janitor's rely (nobody forges the
+// parent-uid annotation), and guarantees are unconditional.
+pub open spec fn snapshot_is_mirror(cr: DynamicObjectView) -> bool {
+    &&& InnerWidgetView::unmarshal(cr) is Ok
+    &&& has_mirror_identity(InnerWidgetView::unmarshal(cr)->Ok_0)
+}
+
+pub open spec fn snapshot_parent(cr: DynamicObjectView) -> StringView {
+    parent_uid_annotation(InnerWidgetView::unmarshal(cr)->Ok_0)
+}
+
+// No object carries the parent uid `parent`, and none ever will.
+pub open spec fn parent_absent_forever(parent: StringView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& forall |u: int| u >= s.api_server.uid_counter ==> #[trigger] int_to_string_view(u) != parent
+        &&& forall |k: ObjectRef| #[trigger] s.resources().contains_key(k) && s.resources()[k].metadata.uid is Some
+            ==> int_to_string_view(s.resources()[k].metadata.uid->0) != parent
+    }
+}
+
+pub open spec fn janitor_delete_is_sound(msg: Message, s: ClusterState) -> bool {
+    let req = msg.content.get_delete_request();
+    let obj = s.resources()[req.key];
+    &&& req.preconditions is Some
+    &&& req.preconditions->0.uid is Some
+    &&& req.preconditions->0.uid->0 < s.api_server.uid_counter
+    &&& (s.resources().contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
+        ==> parent_absent_forever(snapshot_parent(obj))(s)
+}
+
+pub open spec fn janitor_deletes_are_sound(controller_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |msg: Message| {
+            &&& #[trigger] s.in_flight().contains(msg)
+            &&& msg.src.is_controller_id(controller_id)
+            &&& msg.content is APIRequest
+            &&& msg.content.is_delete_request()
+        } ==> janitor_delete_is_sound(msg, s)
+    }
+}
+
+// What the janitor promises under its rely: R3, and sound deletes throughout.
+pub open spec fn widget_janitor_esr(controller_id: int) -> TempPred<ClusterState> {
+    widget_mirrors_eventually_collected().and(always(lift_state(janitor_deletes_are_sound(controller_id))))
 }
 
 }

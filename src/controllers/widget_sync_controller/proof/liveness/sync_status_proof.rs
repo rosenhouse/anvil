@@ -1550,9 +1550,10 @@ pub proof fn sync_eventually_mirrors_status(spec: TempPred<ClusterState>, cluste
         sync_membership(cluster, controller_id, janitor_id),
         spec.entails(always(lift_state(sync_rely_with_janitor(cluster, controller_id, janitor_id)))),
         spec.entails(inner_releases_terminating_objects()),
-        spec.entails(widget_mirrors_eventually_collected()),
+        spec.entails(widget_janitor_esr(janitor_id)),
     ensures spec.entails(widget_status_eventually_mirrored()),
 {
+    entails_and_split(spec, widget_mirrors_eventually_collected(), always(lift_state(janitor_deletes_are_sound(janitor_id))));
     assert(sync_next_with_wf(cluster, controller_id).entails(always(lift_action(cluster.next()))));
     entails_trans(spec, sync_next_with_wf(cluster, controller_id), always(lift_action(cluster.next())));
     sync_invariants_hold(spec, cluster, controller_id, janitor_id);

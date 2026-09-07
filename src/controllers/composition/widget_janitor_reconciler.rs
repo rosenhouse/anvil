@@ -13,7 +13,7 @@ verus! {
 
 pub open spec fn widget_janitor_controller_spec(id: int) -> ControllerSpec {
     ControllerSpec {
-        esr: widget_mirrors_eventually_collected(),
+        esr: widget_janitor_esr(id),
         liveness_dependency: true_pred(),
         safety_guarantee: always(lift_state(widget_janitor_guarantee(id))),
         // D3: the inner side releases terminating mirrors.
@@ -108,8 +108,8 @@ pub proof fn widget_janitor_singleton_core_holds(cluster: CoreCluster, id: int)
             assert(env_fn(id) == inner_releases_terminating_objects());
             entails_trans(spec_re, spec, lift_state(inner.init()));
             entails_trans(spec_re, spec, janitor_next_with_wf(inner, id));
-            janitor_eventually_collects_mirrors(spec_re, inner, id);
-            assert(ESR_fn(c) == widget_mirrors_eventually_collected());
+            janitor_satisfies_its_spec(spec_re, inner, id);
+            assert(ESR_fn(c) == widget_janitor_esr(id));
         }
     }
     spec_entails_tla_forall(spec_re, ESR_fn);

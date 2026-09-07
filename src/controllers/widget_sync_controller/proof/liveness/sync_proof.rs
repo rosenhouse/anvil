@@ -94,7 +94,7 @@ pub open spec fn sync_rely_with_janitor(cluster: Cluster, controller_id: int, ja
 // `janitor_id`, and both Widget types are installed.
 pub open spec fn sync_membership(cluster: Cluster, controller_id: int, janitor_id: int) -> bool {
     &&& cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model())
-    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model())
+    &&& cluster.controller_models.contains_key(janitor_id)
     &&& controller_id != janitor_id
     &&& cluster.type_is_installed_in_cluster::<InnerWidgetView>()
     &&& cluster.type_is_installed_in_cluster::<OuterWidgetView>()
@@ -349,6 +349,7 @@ pub proof fn sync_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster
         spec.entails(always(lift_action(cluster.next()))),
         sync_membership(cluster, controller_id, janitor_id),
         spec.entails(always(lift_state(sync_rely_with_janitor(cluster, controller_id, janitor_id)))),
+        spec.entails(always(lift_state(janitor_deletes_are_sound(janitor_id)))),
     ensures spec.entails(sync_invariants(cluster, controller_id, janitor_id)),
 {
     cluster.lemma_always_every_in_flight_msg_has_unique_id(spec);
@@ -411,7 +412,6 @@ pub proof fn sync_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster
     lemma_sync_rely_implies_mirror_write_facts(spec, cluster, controller_id, janitor_id);
     lemma_always_every_mirror_is_bound(spec, cluster);
     lemma_always_sync_crs_are_bound(spec, cluster, controller_id);
-    lemma_always_janitor_deletes_are_sound(spec, cluster, janitor_id);
     lemma_always_builtin_deletes_never_target_mirrors(spec, cluster);
     lemma_always_sync_pending_requests_match_snapshots(spec, cluster, controller_id);
     entails_always_and_n!(
@@ -2879,9 +2879,10 @@ pub proof fn sync_eventually_synced(spec: TempPred<ClusterState>, cluster: Clust
         sync_membership(cluster, controller_id, janitor_id),
         spec.entails(always(lift_state(sync_rely_with_janitor(cluster, controller_id, janitor_id)))),
         spec.entails(inner_releases_terminating_objects()),
-        spec.entails(widget_mirrors_eventually_collected()),
+        spec.entails(widget_janitor_esr(janitor_id)),
     ensures spec.entails(widget_spec_eventually_synced()),
 {
+    entails_and_split(spec, widget_mirrors_eventually_collected(), always(lift_state(janitor_deletes_are_sound(janitor_id))));
     assert(sync_next_with_wf(cluster, controller_id).entails(always(lift_action(cluster.next()))));
     entails_trans(spec, sync_next_with_wf(cluster, controller_id), always(lift_action(cluster.next())));
     sync_invariants_hold(spec, cluster, controller_id, janitor_id);
