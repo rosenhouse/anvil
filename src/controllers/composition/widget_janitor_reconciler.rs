@@ -3,7 +3,7 @@ use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::cluster::*;
 use crate::widget_sync_controller::model::install::*;
-use crate::widget_sync_controller::proof::{guarantee::*, liveness::janitor_proof::*, predicate::*};
+use crate::widget_sync_controller::proof::{guarantee::*, liveness::janitor_proof::*, liveness::spec::*, predicate::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;

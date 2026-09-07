@@ -12,7 +12,7 @@ use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
 use crate::widget_sync_controller::model::install::*;
-use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::sync_proof::*, liveness::sync_status_proof::*};
+use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::spec::*, liveness::sync_spec_proof::*, liveness::sync_status_proof::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;

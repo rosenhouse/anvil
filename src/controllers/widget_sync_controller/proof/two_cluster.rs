@@ -16,7 +16,7 @@ use crate::vstd_ext::string_view::*;
 use crate::composition::{widget_janitor_reconciler::*, widget_sync_reconciler::*};
 use crate::widget_sync_controller::{
     model::{install::*, janitor_reconciler, sync_reconciler},
-    proof::{guarantee::*, liveness::{janitor_proof::*, sync_proof::*, sync_status_proof::*, cleanup_proof::*}, predicate::*},
+    proof::{guarantee::*, liveness::{janitor_proof::*, spec::*, sync_spec_proof::*, sync_status_proof::*, cleanup_proof::*}, predicate::*},
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
 use verus_temporal_logic::{defs::*, rules::*};
