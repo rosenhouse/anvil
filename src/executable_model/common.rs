@@ -241,6 +241,56 @@ impl DynamicObject {
         self.as_kube_mut_ref().metadata.deletion_timestamp = None;
     }
 
+    // Built-in kinds keep generation unmodeled (None); custom resources follow the model's rules.
+    // Mirrors the kind list in kind() above.
+    #[verifier(external)]
+    fn is_builtin_kind(&self) -> bool {
+        match self.as_kube_ref().types.as_ref().map(|t| t.kind.as_str()) {
+            Some("ConfigMap") | Some("DaemonSet") | Some("PersistentVolumeClaim") | Some("Pod")
+            | Some("Role") | Some("RoleBinding") | Some("StatefulSet") | Some("Service")
+            | Some("ServiceAccount") | Some("Secret") => true,
+            _ => false,
+        }
+    }
+
+    #[verifier(external)]
+    fn spec_json(&self) -> Option<&serde_json::Value> {
+        self.as_kube_ref().data.get("spec")
+    }
+
+    #[verifier(external_body)]
+    pub fn set_initial_generation(&mut self)
+        ensures self@ == old(self)@.with_generation(model::initial_generation(old(self)@.kind)),
+    {
+        self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() { None } else { Some(1) };
+    }
+
+    #[verifier(external_body)]
+    pub fn set_bumped_generation(&mut self)
+        ensures self@ == old(self)@.with_generation(model::bumped_generation(old(self)@)),
+    {
+        self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() {
+            None
+        } else {
+            Some(self.as_kube_ref().metadata.generation.unwrap_or(0) + 1)
+        };
+    }
+
+    // Sets this object's generation to what the API server assigns when this object's spec
+    // replaces other's spec: bumped iff the spec changed.
+    #[verifier(external_body)]
+    pub fn set_next_generation_from(&mut self, other: &DynamicObject)
+        ensures self@ == old(self)@.with_generation(model::next_generation(other@, old(self)@.spec)),
+    {
+        self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() {
+            None
+        } else if self.spec_json() != other.spec_json() {
+            Some(other.as_kube_ref().metadata.generation.unwrap_or(0) + 1)
+        } else {
+            other.as_kube_ref().metadata.generation
+        };
+    }
+
     #[verifier(external_body)]
     pub fn set_deletion_timestamp_from(&mut self, other: &DynamicObject)
         ensures self@ == old(self)@.overwrite_deletion_stamp(other@.metadata.deletion_timestamp),

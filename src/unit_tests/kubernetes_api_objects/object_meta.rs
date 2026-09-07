@@ -122,6 +122,19 @@ pub fn test_resource_version() {
 }
 
 #[test]
+pub fn test_generation() {
+    let object_meta = ObjectMeta::default();
+    assert!(object_meta.generation().is_none());
+    let object_meta = ObjectMeta::from_kube(
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            generation: Some(3),
+            ..Default::default()
+        },
+    );
+    assert_eq!(Some(3), object_meta.generation());
+}
+
+#[test]
 pub fn test_has_deletion_timestamp() {
     let object_meta = ObjectMeta::default();
     let time = Time(Utc::now());

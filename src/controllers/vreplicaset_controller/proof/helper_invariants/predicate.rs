@@ -282,6 +282,7 @@ pub open spec fn every_create_request_is_well_formed(cluster: Cluster, controlle
                     namespace: Some(req.namespace), // Set namespace for new object
                     resource_version: Some(s.api_server.resource_version_counter), // Set rv for new object
                     uid: Some(s.api_server.uid_counter), // Set uid for new object
+                    generation: initial_generation(req.obj.kind), // Set generation for new object
                     deletion_timestamp: None, // Unset deletion timestamp for new object
                     ..req.obj.metadata
                 },

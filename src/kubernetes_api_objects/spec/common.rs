@@ -11,6 +11,9 @@ pub type Uid = int;
 // make ResourceVersion an int, instead of String, so that it is easy to compare in spec/proof
 pub type ResourceVersion = int;
 
+// Generation is an int64 in Kubernetes; modeled as int like the other metadata counters
+pub type Generation = int;
+
 // GenerateNameCounter is used to specify how the API server generates a random and unique name
 // according to the generate name field
 // make GenerateNameCounter an int, instead of String, so that it is easy to compare in spec/proof

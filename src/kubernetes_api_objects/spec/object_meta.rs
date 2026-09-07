@@ -15,6 +15,12 @@ pub struct ObjectMetaView {
     pub namespace: Option<StringView>,
     pub resource_version: Option<ResourceVersion>,
     pub uid: Option<Uid>,
+    // generation is owned by the API server. The API server model sets and
+    // bumps it for custom resources only (see initial_generation and
+    // next_generation in kubernetes_cluster::spec::api_server::state_machine);
+    // for built-in kinds it is left None (unmodeled), since Kubernetes' rules
+    // for them differ per kind.
+    pub generation: Option<Generation>,
     pub labels: Option<Map<StringView, StringView>>,
     pub annotations: Option<Map<StringView, StringView>>,
     pub owner_references: Option<Seq<OwnerReferenceView>>,
@@ -30,11 +36,19 @@ impl ObjectMetaView {
             namespace: None,
             resource_version: None,
             uid: None,
+            generation: None,
             labels: None,
             annotations: None,
             owner_references: None,
             finalizers: None,
             deletion_timestamp: None,
+        }
+    }
+
+    pub open spec fn with_generation(self, generation: Option<Generation>) -> ObjectMetaView {
+        ObjectMetaView {
+            generation: generation,
+            ..self
         }
     }
 

@@ -139,6 +139,18 @@ impl ObjectMeta {
         self.inner.resource_version == other.inner.resource_version
     }
 
+    // generation is owned by the API server (see ObjectMetaView::generation),
+    // so there is a getter but no setter: controllers read it to populate
+    // status.observedGeneration and never write it.
+    #[verifier(external_body)]
+    pub fn generation(&self) -> (generation: Option<i64>)
+        ensures
+            self@.generation is Some == generation is Some,
+            generation is Some ==> generation->0 as int == self@.generation->0,
+    {
+        self.inner.generation
+    }
+
     #[verifier(external_body)]
     pub fn has_some_uid(&self) -> (b: bool)
         ensures self@.uid is Some == b,
