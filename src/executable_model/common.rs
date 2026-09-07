@@ -61,7 +61,9 @@ impl std::clone::Clone for KubeObjectRef {
     }
 }
 
-// Maps a kind string to KindExec.
+// Maps a kind string to KindExec. Any kind that is not built in is a custom
+// resource whose spec-level kind is the string itself, which is what the tests
+// of the executable model rely on (SimpleCRView::kind() is "simple").
 // Not a perfect implementation but sufficient for conformance tests.
 #[verifier(external)]
 fn kind_exec_from_str(kind: &str) -> KindExec {
@@ -76,7 +78,7 @@ fn kind_exec_from_str(kind: &str) -> KindExec {
         "Service" => KindExec::ServiceKind,
         "ServiceAccount" => KindExec::ServiceAccountKind,
         "Secret" => KindExec::SecretKind,
-        _ => panic!(), // We assume the DynamicObject won't be a custom object
+        custom => KindExec::CustomResourceKind(custom.to_string()),
     }
 }
 
