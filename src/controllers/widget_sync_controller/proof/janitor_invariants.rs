@@ -325,7 +325,8 @@ proof fn lemma_list_response_decides_parent(cluster: Cluster, s: ClusterState, c
         lemma_set_to_seq_contains_all_elements(selected);
         assert(objs.contains(o));
         let i = choose |i: int| 0 <= i < objs.len() && objs[i] == o;
-        assert((#[trigger] objs[i]).metadata.uid is Some && int_to_string_view(objs[i].metadata.uid->0) == parent);
+        assert((#[trigger] objs[i]).kind == OuterWidgetView::kind());
+        assert(objs[i].metadata.uid is Some && int_to_string_view(objs[i].metadata.uid->0) == parent);
         assert(parent_listed(objs, parent));
     } else {
         assert(parent_absent_forever(parent)(s));

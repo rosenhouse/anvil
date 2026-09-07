@@ -57,11 +57,13 @@ pub open spec fn at_step(step: WidgetJanitorStepView) -> WidgetJanitorReconcileS
     WidgetJanitorReconcileState { reconcile_step: step }
 }
 
-// The listed outer copies contain the mirror's parent: some object's uid, as a
-// string, equals the parent-uid annotation. Uids are compared for equality only.
+// The listed outer copies contain the mirror's parent: some outer copy's uid, as
+// a string, equals the parent-uid annotation. Uids are compared for equality
+// only, and only outer copies are looked at.
 pub open spec fn parent_listed(objs: Seq<DynamicObjectView>, parent_uid: StringView) -> bool {
     exists |i: int| 0 <= i < objs.len()
-        && (#[trigger] objs[i]).metadata.uid is Some
+        && (#[trigger] objs[i]).kind == OuterWidgetView::kind()
+        && objs[i].metadata.uid is Some
         && int_to_string_view(objs[i].metadata.uid->0) == parent_uid
 }
 
