@@ -21,6 +21,13 @@ folds the cluster into the model's kind at the trusted wrapper boundary, so
 the model sees distinct keys whether or not the real kinds differ, and adds
 the rely clause and testbed cases that the same-kind case needs.
 
+**Decisions closed after revision 3.** The inner cluster's real controller
+may put finalizers on mirrors (rely relaxed; cleanup gains dependency D3).
+Status conditions on the outer copy are a follow-up after R1–R3. The
+janitor deletes after a single `Get`. The shared kind is `Widget`, the
+inner model kind is `widget@inner`, and the cluster enum is
+`ClusterId { Outer, Inner }`.
+
 ## 0. The question and the short answer
 
 We want an example controller that runs in an *outer* cluster, reconciles a
@@ -96,9 +103,14 @@ spec/status shape work identically.
 - **No `ownerReferences` across clusters.** The inner cluster's garbage
   collector would delete an `Inner` whose owner uid does not exist there, and
   forbidding them is also what keeps the single-store model sound (3.2).
-- **No finalizers, on either object, by either of our controllers.** The
+- **No finalizers by either of our controllers, on either object.** The
   controller therefore has no irreversible action; every fault is
-  re-convergent, and `Outer` deletion is never blocked by a partition.
+  re-convergent, and `Outer` deletion is never blocked by a partition. The
+  inner cluster's real `Widget` controller *may* put its own finalizers on
+  mirrors (it is a normal `Widget` controller and does not know they are
+  mirrors). A janitor `Delete` then only stamps a deletion timestamp; the
+  mirror lingers until the inner side releases its finalizer, which is the
+  inner controller's own liveness obligation (D3 in 3.3).
 - Identity is carried by a label `anvil.dev/managed-by: outer-sync` and an
   annotation `anvil.dev/parent-uid: <Outer uid>`. The annotation is
   load-bearing: it is how the janitor distinguishes a live mirror from a
@@ -128,7 +140,8 @@ Init
       ├─ NotFound → Create Inner{ns,name; label; parent-uid=u; spec=σ; no ownerRefs; no finalizers}
       │              → AfterCreateInner → Done            (no status write yet)
       ├─ Found, not ours (label missing or parent-uid ≠ u) → Done (no writes)
-      ├─ Found, ours, deletionTimestamp set → Done         (treat as absent-in-progress; requeue)
+      ├─ Found, deletionTimestamp set (ours or not) → Done  (absent-in-progress: wait for the inner side to
+      │                                                      release its finalizers; Create would return AlreadyExists)
       ├─ Found, ours, spec ≠ σ → Update Inner (fetched object; spec := σ; label/annotation ensured; rv from Get)
       │              → AfterUpdateInner → Done            (inner cannot be caught up yet)
       └─ Found, ours, spec == σ
@@ -158,7 +171,13 @@ Init
 ```
 
 The uid precondition is what garbage collectors use; a resource-version
-precondition would only import the status-write race into deletion.
+precondition would only import the status-write race into deletion. If the
+mirror carries an inner-side finalizer, `Delete` stamps a deletion timestamp
+and returns Ok; the mirror stays scheduled while it exists, so the janitor
+re-runs, re-issues `Delete` (a no-op on an already-terminating object), and
+the object disappears when the inner side removes its finalizer. The janitor
+never touches finalizers itself. It deletes after a single `Get`; the
+transient false deletion on a spurious `NotFound` is accepted (2, 3.2).
 
 ### 1.5 Generation semantics, as seen from each cluster
 
@@ -411,22 +430,24 @@ with each other, so "other" excludes them):
 
 - On `Inner` keys: no `Create`, no `Delete`, no `GetThenDelete`, no spec
   change; `UpdateStatus` and `GetThenUpdateStatus` allowed; `Update` allowed
-  only if it changes metadata alone, adds neither finalizers nor owner
-  references, and preserves our label and `parent-uid` annotation. This
-  admits real inner implementations that label or annotate their objects and
-  write status by Patch. The preservation clause matters most in the
-  same-kind case, where the inner cluster's real `Widget` controller has
-  opinions about the object's metadata: a controller that replaced metadata
-  wholesale would make the janitor lose track of the mirror and the sync
-  controller refuse it forever. Merge-patch style controllers satisfy it.
+  only if it changes metadata alone, adds no owner references, and preserves
+  our label and `parent-uid` annotation. Adding and removing the inner
+  side's own finalizers is allowed. This admits real inner implementations
+  that label, annotate or finalize their objects and write status by Patch.
+  The preservation clause matters most in the same-kind case, where the
+  inner cluster's real `Widget` controller has opinions about the object's
+  metadata: a controller that replaced metadata wholesale would make the
+  janitor lose track of the mirror and the sync controller refuse it forever.
+  Merge-patch style controllers satisfy it.
 - On `Outer` keys: no `Update`, `UpdateStatus`, `Delete`, `GetThen*`.
 
 Users are not modeled; their influence enters through
 `always(desired_state_is(outer))`.
 
 **D1, liveness dependency on the inner implementation (an axiom in v1).**
-For every `Inner`: if its spec stops changing, its status and metadata
-eventually stop changing and `status.observedGeneration == metadata.generation`.
+For every `Inner` that is not terminating: if its spec stops changing, its
+status and metadata (finalizers included) eventually stop changing and
+`status.observedGeneration == metadata.generation`.
 This is eventual stability of the inner controller, the premise of ESR
 itself. It is needed because `Update Inner` carries a resource version and
 every inner-side write bumps it; the R1 argument is "either our update
@@ -447,6 +468,18 @@ mirror. D2 is the janitor's own liveness property R3 and *is* dischargeable
 with `compose_dep`: the janitor is ours, verified, uses no owner references
 and no transactional requests. This gives the proposal a genuine
 composition instance.
+
+**D3, liveness dependency on the inner implementation for cleanup (an axiom
+in v1).** For every `Inner` with a deletion timestamp: the inner side
+eventually removes every finalizer it owns, and no other actor adds
+finalizers to a terminating object (the API server rejects new finalizers
+on terminating objects anyway). D3 is what lets a janitor `Delete` end in
+the object's removal. R3 depends on D3 directly; R1 depends on it through
+D2 whenever a stale or falsely-deleted mirror must disappear before the
+sync controller can recreate it. D1 and D3 together are simply "the inner
+implementation is live": it settles on stable specs and it lets go of
+terminating objects. Both are stated as one `liveness_dependency`
+predicate in the sync controller's `ControllerSpec`.
 
 ## 4. Framework enhancements
 
@@ -589,7 +622,11 @@ Its premise is an absence, unlike every existing Anvil proof; the mechanics
 are the same (weak fairness of `schedule_controller_reconcile` for the
 janitor on key `k`, which is enabled while the `Inner` exists). Delayed
 creates for uid `a` are finitely many, because a `Create` is only sent by a
-reconcile scheduled while an `Outer` with uid `a` existed.
+reconcile scheduled while an `Outer` with uid `a` existed. `mirror_collected`
+counts a terminating mirror as not yet collected, so R3 holds under D3: the
+janitor's `Delete` stamps the deletion timestamp, D3 removes the finalizers,
+and the update that removes the last finalizer deletes the object
+(`handle_update_request`, the update-that-deletes branch).
 
 **G-gen (safety invariant, part of the sync guarantee).** Every
 `UpdateStatus Outer` sent by the sync controller has
@@ -615,7 +652,7 @@ function.
 3. Both model kinds installed (the CRD applied in both clusters); both
    controller models registered.
 4. The rely condition of 3.3 for every other controller id.
-5. D1 for the inner implementation (axiom in v1).
+5. D1 and D3 for the inner implementation (axioms in v1).
 6. The generation semantics of 4.1 hold for both real API servers (they do
    for CRDs with the status subresource).
 7. Exec hygiene: our controllers never read rv or uid values (3.2,
@@ -638,7 +675,7 @@ Stated so that a reader does not over-read the theorem.
 | Spurious/real `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | janitor may transiently delete a live mirror; recreated after drops stop |
 | Inner implementation changing status on its own | yes | other controller under rely |
 | Inner implementation adding labels/annotations | yes | metadata-only `Update` allowed by rely |
-| Inner implementation adding finalizers to `Inner` | no (rely forbids) | relaxing it adds a dependency "inner side releases finalizers" to R3 |
+| Inner implementation adding finalizers to `Inner` | yes | rely allows it; R3 (and R1 via D2) depend on D3, "the inner side releases finalizers on terminating objects" |
 | User deletes or edits `Inner` out of band; inner cluster rebuilt | no | controller recovers in exec (NotFound → Create; uid mismatch → janitor); modeling it needs an "inner monkey" step in `src/kubernetes_cluster/`, priced like `pod_monkey` |
 | Inner namespace deleted | no | R1 false in reality while it persists; operational assumption |
 | Outer deleted and recreated with new uid while old mirror exists | yes | janitor removes stale mirror (D2), sync recreates |
@@ -689,8 +726,12 @@ Scripts under `tools/`, manifests under `deploy/outer_sync/`, mirroring
      `Widget{ns,name}` in `outer` → the inner object is never modified, the
      echo controller keeps serving it, the outer object never reports
      caught-up;
-   - have the echo controller add its own label and annotation to mirrors →
-     ours survive, sync and janitor unaffected;
+   - have the echo controller add its own label, annotation and a finalizer
+     to every `Widget` it reconciles, releasing the finalizer on deletion →
+     ours survive; deleting the outer copy leaves the mirror terminating
+     until the echo controller releases it, then it disappears; deleting and
+     recreating the outer copy waits for the old mirror to finish
+     terminating before the new one is created;
    - `kubectl get widget -A` in both contexts as the demo view: same names,
      same specs, statuses flowing inward-to-outward;
    - crash mode of the shim during each write step.
@@ -717,21 +758,27 @@ existing controllers use `GetThenUpdate*`), a leads-to that threads a
 liveness dependency through a conflict loop, and a deletion-side liveness
 property. Phase 4 dominates and is the least certain number.
 
-## 9. Open decisions
+## 9. Decisions and follow-ups
 
-- **Rely on inner-side finalizers.** v1 forbids them. If real inner
-  implementations need them, R3 acquires a dependency on their release and
-  the sync controller must treat terminating mirrors as absent-in-progress
-  (already in the state machine).
-- **Conditions on `Outer` status.** A `Ready`/`InnerReachable` condition is
-  cheap to add to the projection but adds no provable content without time in
-  the model. Recommended as an exec-visible follow-up once R1–R3 are proved.
-- **Transient deletion by the janitor on spurious `NotFound`.** Accepted in
-  v1 as the price of never blocking deletion. If the inner workload is
-  expensive to tear down, a second confirming `Get` before `Delete` reduces
-  the real-world exposure at no cost to the proof.
-- **Naming.** `Widget` is a placeholder for the shared kind; the model tag
-  string (`@inner`) and the `ClusterId` enum are likewise placeholders.
-- **Surfacing refusal.** In the same-kind case a refused native object is a
-  routine conflict, and a condition on the outer object saying so is worth
-  more than in revision 2. Still recommended as a follow-up after R1–R3.
+Decided:
+
+- **Inner-side finalizers on mirrors: allowed.** Rely permits them; D3
+  covers their release; the sync controller treats terminating mirrors as
+  absent-in-progress; the janitor re-issues `Delete` until the object is gone.
+- **Janitor deletes after a single `Get`.** The transient false deletion on
+  a spurious `NotFound` is accepted as the price of never blocking deletion.
+- **Naming.** Kind `Widget` in group `anvil.dev`; inner model kind
+  `widget@inner`; `ClusterId { Outer, Inner }`.
+
+Follow-ups after R1–R3 are proved:
+
+- **Conditions on the outer copy's status.** A `Synced`/`InnerReachable`
+  condition surfacing refused native conflicts and unreachable inner
+  clusters. Cheap to add to the projection; no provable content without time
+  in the model; increasingly useful in the same-kind case where refusal is
+  routine.
+- **Owner-less transactional update** (4.3), to compose against a verified
+  inner implementation and to drop D1 from the forward-sync conflict
+  argument.
+- **Inner-monkey model step**, if out-of-band mutation of mirrors is to be
+  brought inside the proved envelope.
