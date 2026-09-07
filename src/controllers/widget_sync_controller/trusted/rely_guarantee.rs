@@ -1,20 +1,13 @@
-// Rely and guarantee conditions of the Widget sync example (section 3.3 of
-// discussion/multi-cluster/sync_controller_evaluation.md).
+// Rely and guarantee conditions of the Widget sync example (doc/widget_sync_design.md,
+// section 3). The sync reconciler and the janitor are separate controllers; each
+// relies on every other controller, and each guarantee is what the other's rely
+// needs from it. In a deployment the other controllers are whatever runs against
+// the outer cluster and the inner cluster's own Widget implementation.
 //
-// The sync reconciler and the janitor reconciler are separate controllers in the
-// model; each relies on every other controller, the other one of the pair
-// included, and each guarantee is what the other one's rely needs from it. In the
-// real deployment the other controllers are: whatever runs against the outer
-// cluster, and the inner cluster's own Widget implementation together with
-// everything else that runs there.
-//
-// Two clauses are state-dependent, in the style of vd_rely_update_req:
-//   - a Create of a mirror carries a parent uid that no object other than the one
-//     at the outer key has (mirror_create_req), which is what lets the janitor
-//     trust a parent uid it reads off a mirror;
-//   - a Delete of a mirror is only sent once its parent is gone for good
-//     (mirror_delete_req), which is what lets the sync reconciler keep a mirror
-//     whose parent exists.
+// mirror_create_req is state-dependent, in the style of vd_rely_update_req: a
+// Create of a mirror carries a parent uid that no object other than the one at
+// the outer key has, which is what lets the janitor trust a parent uid it reads
+// off a mirror.
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
 use crate::vstd_ext::string_view::*;
@@ -53,12 +46,9 @@ pub open spec fn mirror_create_req(req: CreateRequest, outer_key: ObjectRef) -> 
     }
 }
 
-// A Delete of a mirror the janitor's way: with a uid precondition. Why such a
-// delete never removes a mirror whose parent exists is not a property of the
-// message but of the janitor's state machine (it decides from a List of the outer
-// copies); the sync reconciler's proof establishes it from the janitor's model,
-// which is why the sync reconciler's spec names the janitor as a member of the
-// cluster rather than as an anonymous other controller.
+// A Delete of a mirror the janitor's way: with a uid precondition. That such a
+// delete never removes a mirror whose parent exists holds only under the janitor's
+// rely and is part of the janitor's ESR (janitor_deletes_are_sound).
 pub open spec fn mirror_delete_req(req: DeleteRequest) -> bool {
     &&& req.key.kind == InnerWidgetView::kind()
     &&& req.preconditions is Some
@@ -85,15 +75,9 @@ pub open spec fn preserves_mirror_identity(old_meta: ObjectMetaView, new_meta: O
 // An update of a mirror by another controller carries a resource version, and if
 // it is going to land (the resource version matches the store) it changes neither
 // the owner references nor the mirror's identity. Stale updates, which the API
-// server rejects, are unconstrained.
-//
-// The spec is deliberately left free: a mistaken (fat-finger) edit of a mirror's
-// spec is something the sync reconciler must tolerate. It overwrites such an edit
-// (the mirror's spec is compared with the outer copy's on every reconcile), and it
-// never copies status fields the inner side computed for it (fields are copied only
-// when the inner status observes the mirror's current generation). Convergence
-// (R1, R2) is then stated for the time after such edits stop, see
-// mirror_spec_undisturbed in liveness_theorem.rs.
+// server rejects, are unconstrained. The spec is not constrained: the sync
+// reconciler overwrites other writers' spec edits, and R1 and R2 are stated for
+// the time after such edits stop (mirror_spec_undisturbed in liveness_theorem.rs).
 pub open spec fn mirror_update_req(req: UpdateRequest) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let etcd_obj = s.resources()[req.key()];
@@ -108,9 +92,9 @@ pub open spec fn mirror_update_req(req: UpdateRequest) -> StatePred<ClusterState
     }
 }
 
-// The transactional form of the same condition. (A mirror has no owner
-// references, so such a request fails its owner check anyway; the clause keeps
-// the rely honest rather than relying on that.)
+// The transactional form of the same condition. A mirror has no owner references,
+// so such a request fails its owner check anyway; the clause is stated so the rely
+// does not depend on that.
 pub open spec fn mirror_get_then_update_req(req: GetThenUpdateRequest) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let etcd_obj = s.resources()[req.key()];
@@ -135,9 +119,8 @@ pub open spec fn widget_sync_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::CreateRequest(req) => req.obj.kind != InnerWidgetView::kind(),
             APIRequest::UpdateRequest(req) => mirror_update_req(req)(s),
             APIRequest::GetThenUpdateRequest(req) => mirror_get_then_update_req(req)(s),
-            // Patches of a mirror's spec are tolerated (fat-finger edits, see
-            // mirror_update_req); a patch never changes identity. Status patches are
-            // how the inner implementation is expected to report.
+            // A patch never changes identity; a spec patch is an out-of-band edit the
+            // sync reconciler overwrites (see mirror_update_req).
             APIRequest::PatchRequest(_) => true,
             // Nobody else writes the status of an outer copy.
             APIRequest::UpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),

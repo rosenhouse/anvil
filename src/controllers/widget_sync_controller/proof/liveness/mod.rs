@@ -1,3 +1,4 @@
+pub mod cleanup_proof;
 pub mod janitor_proof;
 pub mod sync_proof;
 pub mod sync_status_proof;

@@ -1,5 +1,5 @@
 // Exec implementation of the sync reconciler; every function is proved to conform
-// to its counterpart in model::sync_reconciler.
+// to its counterpart in model::sync_reconciler, which carries the comments.
 use crate::kubernetes_api_objects::exec::prelude::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
@@ -105,7 +105,6 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
             let get_result = extract_some_k_get_resp!(resp_o);
             if get_result.is_err() {
                 if get_result.unwrap_err().is_object_not_found() {
-                    // No mirror: create it.
                     let req = KubeAPIRequest::CreateRequest(KubeCreateRequest {
                         api_resource: InnerWidget::api_resource(),
                         namespace: namespace,
@@ -125,7 +124,6 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 assert(opt_i64_view(generation) == outer@.metadata.generation);
             }
             if inner.metadata().has_deletion_timestamp() {
-                // Absent-in-progress: wait for the inner side to release it.
                 let previous = outer.status();
                 proof {
                     assert(previous.deep_view() == outer@.status);
@@ -134,7 +132,6 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 return write_outer_status_or_done(outer, status);
             }
             if !is_mirror_of(&inner, outer) {
-                // Not ours: never touch it, report the conflict.
                 let previous = outer.status();
                 proof {
                     assert(previous.deep_view() == outer@.status);
@@ -143,13 +140,10 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 return write_outer_status_or_done(outer, status);
             }
             if !inner.spec().eq(&outer.spec()) {
-                // Propagate the spec, pinned to the mirror's generation.
                 let req = KubeAPIRequest::PatchRequest(inner_spec_patch(&inner, outer));
                 return (at_step(WidgetSyncStep::AfterPatchInner), Some(Request::KRequest(req)));
             }
             if inner_caught_up(&inner) {
-                // Spec is in place and the inner implementation has observed this very
-                // generation of it: mirror the status back and stamp the outer generation.
                 let inner_status = match inner.status() {
                     Some(s) => s,
                     None => {
@@ -160,9 +154,6 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 let status = WidgetStatus::outer_status_for(generation, &inner_status, true, "Synced".to_string());
                 return write_outer_status_or_done(outer, status);
             }
-            // Spec is in place but the inner status was computed for an older generation
-            // of the mirror (possibly a mistaken edit since overwritten): never copy such
-            // fields. Keep what was reported before and say the inner side is converging.
             let previous = outer.status();
             proof {
                 assert(previous.deep_view() == outer@.status);

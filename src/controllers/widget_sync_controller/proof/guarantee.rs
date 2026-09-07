@@ -57,6 +57,46 @@ pub proof fn lemma_api_server_step_only_grows_by_fresh_uids(cluster: Cluster, s:
     }
 }
 
+// A key that appears in the store, or whose object is replaced, was created by the
+// request the API server just handled; the created object keeps the request's
+// labels, annotations and spec.
+#[verifier(rlimit(100))]
+#[verifier(spinoff_prover)]
+pub proof fn lemma_new_object_comes_from_create(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
+    requires
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+        s_prime.resources().contains_key(key),
+        !(s.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == s.resources()[key].metadata.uid),
+    ensures
+        msg.content is APIRequest,
+        msg.content.is_create_request(),
+        ({
+            let req = msg.content.get_create_request();
+            let obj = s_prime.resources()[key];
+            &&& key.kind == req.obj.kind
+            &&& key.namespace == req.namespace
+            &&& req.obj.metadata.name is Some ==> key.name == req.obj.metadata.name->0
+            &&& obj.kind == req.obj.kind
+            &&& obj.metadata.labels == req.obj.metadata.labels
+            &&& obj.metadata.annotations == req.obj.metadata.annotations
+            &&& obj.spec == req.obj.spec
+        }),
+{
+    match msg.content->APIRequest_0 {
+        APIRequest::GetRequest(_) => {},
+        APIRequest::ListRequest(_) => {},
+        APIRequest::CreateRequest(_) => {},
+        APIRequest::DeleteRequest(_) => {},
+        APIRequest::UpdateRequest(_) => {},
+        APIRequest::UpdateStatusRequest(_) => {},
+        APIRequest::GetThenDeleteRequest(_) => {},
+        APIRequest::GetThenUpdateRequest(_) => {},
+        APIRequest::GetThenUpdateStatusRequest(_) => {},
+        APIRequest::PatchRequest(_) => {},
+        APIRequest::PatchStatusRequest(_) => {},
+    }
+}
+
 pub proof fn lemma_uid_bound_preserved(parent_uid: Uid, outer_key: ObjectRef, s: ClusterState, s_prime: ClusterState)
     requires
         parent_uid_is_bound_to_key(parent_uid, outer_key)(s),
