@@ -535,8 +535,9 @@ Scope:
   records that custom resources always carry a generation and built-in
   kinds never do; RabbitMQ's no-op ConfigMap update needed exactly that
   fact. Staged verification of `kubernetes_cluster` and all four controllers
-  plus `composition` passes; the full `cargo verus verify --lib` result is
-  recorded in the commit that follows.
+  plus `composition` passes, and the full `cargo verus verify --lib` passes
+  (944 verified, 0 errors, about 25 minutes on Verus `main` built for this
+  branch).
 
 ### 4.2 Required: cluster-tagged wrappers and shim layer
 
