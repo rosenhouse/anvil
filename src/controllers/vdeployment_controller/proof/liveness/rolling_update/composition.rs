@@ -456,6 +456,7 @@ pub proof fn esr_for_each_ranking(
 // Obligation 2: Monotonicity (ranking never increases)
 // forall n. spec |= [] (p(n) => [] (exists m <= n. p(m)))
 // flaky
+#[verifier(rlimit(100))]
 #[verifier(spinoff_prover)]
 pub proof fn ranking_never_increases(
     spec: TempPred<ClusterState>, new_vrs: VReplicaSetView, new_vrs_key: ObjectRef, vd: VDeploymentView, controller_id: int, cluster: Cluster
