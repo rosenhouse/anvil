@@ -192,6 +192,8 @@ pub proof fn lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_s
 
 
 // Helper lemma for the APIServerStep case
+#[verifier(rlimit(100))]
+#[verifier(spinoff_prover)]
 proof fn lemma_xor_preserves_during_api_server_step(
     self, controller_id: int, key: ObjectRef, s: ClusterState, s_prime: ClusterState, input: Option<Message>,
 )

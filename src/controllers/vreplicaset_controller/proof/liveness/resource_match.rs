@@ -2570,6 +2570,8 @@ pub proof fn lemma_from_after_receive_ok_resp_at_after_delete_pod_step_to_update
     );
 }
 
+#[verifier(rlimit(100))]
+#[verifier(spinoff_prover)]
 pub proof fn lemma_from_after_send_update_vrs_status_req_to_receive_ok_resp(
     spec: TempPred<ClusterState>, vrs: VReplicaSetView, cluster: Cluster, controller_id: int,
     req_msg: Message,

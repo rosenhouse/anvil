@@ -87,6 +87,15 @@ pub proof fn lemma_api_request_other_than_pending_req_msg_maintains_matching_pod
                 }
             }
         }
+    } else if msg.content.is_patch_request() {
+        // Nobody other than this controller patches pods (see vrs_rely_patch_req).
+        let req = msg.content.get_patch_request();
+        assert(req.kind != Kind::PodKind);
+        assert(req.key().kind != Kind::PodKind);
+    } else if msg.content.is_patch_status_request() {
+        let req = msg.content.get_patch_status_request();
+        assert(req.kind != Kind::PodKind);
+        assert(req.key().kind != Kind::PodKind);
     }
     assert(matching_pod_entries(vrs, s.resources()) == matching_pod_entries(vrs, s_prime.resources()));
     helper_lemmas::matching_pods_equal_to_matching_pod_entries_values(vrs, s.resources());
@@ -126,6 +135,19 @@ pub proof fn lemma_api_request_other_than_pending_req_msg_maintains_etcd_vrs_sta
         assert(helper_invariants::no_other_pending_update_status_request_interferes_with_vrs_reconcile(req, vrs)(s));
         assert(req.key() == vrs.object_ref());
         assert(false);
+    }
+    if resource_patch_status_request_msg(vrs.object_ref())(msg) {
+        // Nobody else patches the status of a VReplicaSet (see vrs_rely_patch_status_req).
+        let req = msg.content.get_patch_status_request();
+        assert(helper_invariants::no_other_pending_patch_status_request_interferes_with_vrs_reconcile(req, vrs));
+        assert(req.kind == VReplicaSetView::kind());
+        assert(false);
+    }
+    if resource_patch_request_msg(vrs.object_ref())(msg) {
+        // A spec patch on the VReplicaSet is admitted as an update, which keeps the stored status.
+        if s_prime.resources()[vrs.object_ref()] != s.resources()[vrs.object_ref()] {
+            assert(s_prime.resources()[vrs.object_ref()].status == s.resources()[vrs.object_ref()].status);
+        }
     }
 }
 
