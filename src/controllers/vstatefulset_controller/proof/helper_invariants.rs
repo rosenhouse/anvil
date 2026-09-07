@@ -166,6 +166,18 @@ ensures
                                                 }
                                             }
                                         },
+                                        APIRequest::PatchRequest(req) => {
+                                            // Nobody else patches pods.
+                                            assert(rely_guarantee::vsts_rely_patch_req(req));
+                                            assert(req.key().kind != Kind::PodKind);
+                                        },
+                                        APIRequest::PatchStatusRequest(req) => {
+                                            // A status patch keeps the metadata.
+                                            if req.key() == pod_key {
+                                                assert(s.resources().contains_key(pod_key));
+                                                assert(s_prime.resources()[pod_key].metadata == s.resources()[pod_key].metadata);
+                                            }
+                                        },
                                         _ => {}
                                     }
                                 } else if cr_key != vsts.object_ref() {
@@ -278,6 +290,7 @@ pub open spec fn all_pod_requests_from_vsts_controller_carry_only_vsts_owner_ref
     }
 }
 
+#[verifier(rlimit(100))]
 #[verifier(spinoff_prover)]
 proof fn lemma_eventually_always_all_pod_requests_from_vsts_controller_carry_only_vsts_owner_ref_inductive_step(
     cluster: Cluster, controller_id: int, vsts: VStatefulSetView, s: ClusterState, s_prime: ClusterState
@@ -1164,6 +1177,18 @@ ensures
                                                     assert(!exists |vsts_name: StringView| #[trigger] pvc_name_match(name, vsts_name));
                                                     assert(false);
                                                 }
+                                            }
+                                        },
+                                        APIRequest::PatchRequest(req) => {
+                                            // Nobody else patches PVCs.
+                                            assert(rely_guarantee::vsts_rely_patch_req(req));
+                                            assert(req.key().kind != Kind::PersistentVolumeClaimKind);
+                                        },
+                                        APIRequest::PatchStatusRequest(req) => {
+                                            // A status patch keeps the metadata.
+                                            if req.key() == pvc_key {
+                                                assert(s.resources().contains_key(pvc_key));
+                                                assert(s_prime.resources()[pvc_key].metadata == s.resources()[pvc_key].metadata);
                                             }
                                         },
                                         _ => {},
