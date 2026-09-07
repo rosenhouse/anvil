@@ -746,7 +746,7 @@ pub proof fn lemma_relabel_msgs_empty(tc: TwoCluster, r: Relabeling)
 pub proof fn lemma_relabel_msgs_contains(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m: Message)
     ensures
         ms.contains(m) ==> relabel_msgs(tc, r, ms).contains(relabel_msg(tc, r, m)),
-        relabel_msgs(tc, r, ms).contains(m) ==> exists |m2: Message| ms.contains(m2) && relabel_msg(tc, r, m2) == m,
+        relabel_msgs(tc, r, ms).contains(m) ==> exists |m2: Message| #[trigger] ms.contains(m2) && relabel_msg(tc, r, m2) == m,
 {
     broadcast use group_multiset_axioms, group_multiset_properties;
     if ms.contains(m) {
