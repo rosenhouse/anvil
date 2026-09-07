@@ -1,7 +1,7 @@
 use crate::external_shim_layer::*;
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::exec::prelude::Preconditions;
-use crate::kubernetes_api_objects::exec::{api_method::*, dynamic::*, resource::*};
+use crate::kubernetes_api_objects::exec::{api_method::*, api_resource::*, dynamic::*, resource::*};
 use crate::kubernetes_api_objects::spec::resource::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
 use crate::shim_layer::fault_injection::*;
@@ -11,12 +11,14 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
-    api::{Api, DeleteParams, ListParams, PostParams, Resource},
+    api::{Api, DeleteParams, ListParams, PostParams, Resource, ResourceExt},
+    config::{KubeConfigOptions, Kubeconfig},
     runtime::{
         controller::{Action, Controller},
+        reflector::ObjectRef,
         watcher,
     },
-    Client, CustomResourceExt,
+    Client, Config, CustomResourceExt,
 };
 use kube_core::{ErrorResponse, NamespaceResourceScope};
 use serde::{de::DeserializeOwned, Serialize};
@@ -30,6 +32,49 @@ use vstd::string::*;
 // The key is to implement the reconcile function (impl FnMut(Arc<K>, Arc<Ctx>) -> ReconcilerFut),
 // which is required by the kube-rs framework to build a controller,
 // on top of reconcile_core, which is provided by the developer.
+
+// ClusterClients holds one kube client per ClusterId. Every request the reconciler
+// emits names its cluster through the ApiResource it carries (see
+// kubernetes_api_objects::exec::api_resource::ClusterId), and the shim routes the
+// request to the matching client and tags the objects in the response with the
+// same cluster. Single-cluster controllers only ever use `primary`.
+pub struct ClusterClients {
+    pub primary: Client,
+    pub remote: Option<Client>,
+}
+
+impl ClusterClients {
+    pub fn single(primary: Client) -> Self {
+        ClusterClients { primary, remote: None }
+    }
+
+    pub fn client_of(&self, cluster: ClusterId) -> &Client {
+        match cluster {
+            ClusterId::Primary => &self.primary,
+            ClusterId::Remote => self
+                .remote
+                .as_ref()
+                .expect("a request targets the remote cluster but no remote client is configured"),
+        }
+    }
+
+    pub fn client_for(&self, api_resource: &ApiResource) -> &Client {
+        self.client_of(api_resource.cluster())
+    }
+}
+
+// client_from_kubeconfig builds a client for another cluster from a kubeconfig file
+// (e.g. one mounted from a Secret). The read timeout is set explicitly: kube's
+// default of nearly five minutes would turn a partition into a five-minute stall
+// inside a single reconcile instead of an error the reconciler can react to.
+pub async fn client_from_kubeconfig(path: &str, timeout: Duration) -> Result<Client> {
+    let kubeconfig = Kubeconfig::read_from(path)?;
+    let mut config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await?;
+    config.connect_timeout = Some(timeout);
+    config.read_timeout = Some(timeout);
+    config.write_timeout = Some(timeout);
+    Ok(Client::try_from(config)?)
+}
 
 // run_controller prepares and runs the controller. It requires:
 // K: the custom resource type
@@ -65,7 +110,7 @@ where
     info!("starting controller");
     Controller::new(crs, watcher::Config::default()) // The controller's reconcile is triggered when a CR is created/updated
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { client })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -117,7 +162,121 @@ where
         .owns(Api::<Pod>::all(client.clone()), watcher::Config::default()) // Watch owned Pods
         .owns(Api::<O>::all(client.clone()), watcher::Config::default()) // Watch owned CRs of type O
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { client })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary })) // The reconcile function is registered
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!("reconciled {:?}", o),
+                Err(e) => info!("reconcile failed: {}", e),
+            }
+        })
+        .await;
+    info!("controller terminated");
+    Ok(())
+}
+
+// run_controller_in_clusters runs a controller whose custom resource K lives in
+// `cr_cluster` (its watch and quorum reads go to that cluster's client) and whose
+// requests may target either cluster.
+pub async fn run_controller_in_clusters<K, R, E>(
+    clusters: ClusterClients,
+    cr_cluster: ClusterId,
+    fault_injection: bool,
+) -> Result<()>
+where
+    K: Clone
+        + Resource<Scope = NamespaceResourceScope>
+        + CustomResourceExt
+        + DeserializeOwned
+        + Debug
+        + Send
+        + Serialize
+        + Sync
+        + 'static,
+    K::DynamicType: Default + Eq + Hash + Clone + Debug + Unpin,
+    R: Reconciler + Send + Sync,
+    R::K: ResourceWrapper<K> + Send,
+    <R::K as View>::V: CustomResourceView,
+    R::S: Send,
+    R::EReq: Send,
+    R::EResp: Send,
+    E: ExternalShimLayer<R::EReq, R::EResp>,
+{
+    let crs = Api::<K>::all(clusters.client_of(cr_cluster).clone());
+
+    let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {
+        return reconcile_with::<K, R, E>(cr, ctx, fault_injection).await;
+    };
+
+    info!("starting controller (custom resource in {:?} cluster)", cr_cluster);
+    Controller::new(crs, watcher::Config::default())
+        .shutdown_on_signal()
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster }))
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!("reconciled {:?}", o),
+                Err(e) => info!("reconcile failed: {}", e),
+            }
+        })
+        .await;
+    info!("controller terminated");
+    Ok(())
+}
+
+// run_controller_with_same_name_watch is run_controller_in_clusters plus a
+// secondary watch on objects of type O in `watched_cluster`: a change to
+// O{namespace, name} triggers a reconcile of K{namespace, name}. This is the
+// trigger a mirroring controller uses to notice status changes on the mirror in
+// the other cluster. It is a latency optimization only: liveness rests on the
+// periodic requeue, not on this watch.
+pub async fn run_controller_with_same_name_watch<K, R, E, O>(
+    clusters: ClusterClients,
+    cr_cluster: ClusterId,
+    watched_cluster: ClusterId,
+    fault_injection: bool,
+) -> Result<()>
+where
+    K: Clone
+        + Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+        + CustomResourceExt
+        + DeserializeOwned
+        + Debug
+        + Send
+        + Serialize
+        + Sync
+        + 'static,
+    R: Reconciler + Send + Sync,
+    R::K: ResourceWrapper<K> + Send,
+    <R::K as View>::V: CustomResourceView,
+    R::S: Send,
+    R::EReq: Send,
+    R::EResp: Send,
+    E: ExternalShimLayer<R::EReq, R::EResp>,
+    O: Clone
+        + Resource<Scope = NamespaceResourceScope, DynamicType = ()>
+        + DeserializeOwned
+        + Debug
+        + Send
+        + Sync
+        + 'static,
+{
+    let crs = Api::<K>::all(clusters.client_of(cr_cluster).clone());
+    let watched = Api::<O>::all(clusters.client_of(watched_cluster).clone());
+
+    let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {
+        return reconcile_with::<K, R, E>(cr, ctx, fault_injection).await;
+    };
+
+    info!(
+        "starting controller (custom resource in {:?} cluster, watching {:?} cluster by name)",
+        cr_cluster, watched_cluster
+    );
+    Controller::new(crs, watcher::Config::default())
+        .watches(watched, watcher::Config::default(), |o: O| {
+            o.namespace()
+                .map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
+        })
+        .shutdown_on_signal()
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -155,7 +314,9 @@ where
     <R::K as View>::V: CustomResourceView,
     E: ExternalShimLayer<R::EReq, R::EResp>,
 {
-    let client = &ctx.client;
+    // The custom resource is read from the cluster it lives in; every other request
+    // is routed by the cluster named in its ApiResource.
+    let cr_client = ctx.clusters.client_of(ctx.cr_cluster);
 
     let cr_name = cr.meta().name.as_ref().ok_or_else(|| {
         Error::ShimLayerError("Custom resource misses \".metadata.name\"".to_string())
@@ -168,7 +329,7 @@ where
     let cr_key = format!("{}/{}/{}", cr_kind, cr_namespace, cr_name);
     let log_header = format!("Reconciling {}:", cr_key);
 
-    let cr_api = Api::<K>::namespaced(client.clone(), &cr_namespace);
+    let cr_api = Api::<K>::namespaced(cr_client.clone(), &cr_namespace);
     // Get the custom resource by a quorum read to Kubernetes' storage (etcd) to get the most updated custom resource
     let get_cr_resp = cr_api.get(&cr_name).await;
     match get_cr_resp {
@@ -226,8 +387,9 @@ where
                     let kube_resp: KubeAPIResponse;
                     match req {
                         KubeAPIRequest::GetRequest(get_req) => {
+                            let cluster = get_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_of(cluster).clone(),
                                 &get_req.namespace,
                                 get_req.api_resource.as_kube_ref(),
                             );
@@ -241,15 +403,16 @@ where
                                 }
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::GetResponse(KubeGetResponse {
-                                        res: Ok(DynamicObject::from_kube(obj)),
+                                        res: Ok(DynamicObject::from_kube_in(obj, cluster)),
                                     });
                                     info!("{} Get {} done", log_header, key);
                                 }
                             }
                         }
                         KubeAPIRequest::ListRequest(list_req) => {
+                            let cluster = list_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_of(cluster).clone(),
                                 &list_req.namespace,
                                 list_req.api_resource.as_kube_ref(),
                             );
@@ -267,7 +430,7 @@ where
                                         res: Ok(obj_list
                                             .items
                                             .into_iter()
-                                            .map(|obj| DynamicObject::from_kube(obj))
+                                            .map(|obj| DynamicObject::from_kube_in(obj, cluster))
                                             .collect()),
                                     });
                                     info!("{} List {} done", log_header, key);
@@ -276,8 +439,9 @@ where
                         }
                         KubeAPIRequest::CreateRequest(create_req) => {
                             check_fault_timing = true;
+                            let cluster = create_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_of(cluster).clone(),
                                 &create_req.namespace,
                                 create_req.api_resource.as_kube_ref(),
                             );
@@ -298,7 +462,7 @@ where
                                 Ok(obj) => {
                                     kube_resp =
                                         KubeAPIResponse::CreateResponse(KubeCreateResponse {
-                                            res: Ok(DynamicObject::from_kube(obj)),
+                                            res: Ok(DynamicObject::from_kube_in(obj, cluster)),
                                         });
                                     info!("{} Create {} done", log_header, key);
                                 }
@@ -307,7 +471,7 @@ where
                         KubeAPIRequest::DeleteRequest(delete_req) => {
                             check_fault_timing = true;
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_for(&delete_req.api_resource).clone(),
                                 &delete_req.namespace,
                                 delete_req.api_resource.as_kube_ref(),
                             );
@@ -340,8 +504,9 @@ where
                         }
                         KubeAPIRequest::UpdateRequest(update_req) => {
                             check_fault_timing = true;
+                            let cluster = update_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_of(cluster).clone(),
                                 &update_req.namespace,
                                 update_req.api_resource.as_kube_ref(),
                             );
@@ -362,7 +527,7 @@ where
                                 Ok(obj) => {
                                     kube_resp =
                                         KubeAPIResponse::UpdateResponse(KubeUpdateResponse {
-                                            res: Ok(DynamicObject::from_kube(obj)),
+                                            res: Ok(DynamicObject::from_kube_in(obj, cluster)),
                                         });
                                     info!("{} Update {} done", log_header, key);
                                 }
@@ -370,8 +535,9 @@ where
                         }
                         KubeAPIRequest::UpdateStatusRequest(update_status_req) => {
                             check_fault_timing = true;
+                            let cluster = update_status_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                client.clone(),
+                                ctx.clusters.client_of(cluster).clone(),
                                 &update_status_req.namespace,
                                 update_status_req.api_resource.as_kube_ref(),
                             );
@@ -402,7 +568,7 @@ where
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::UpdateStatusResponse(
                                         KubeUpdateStatusResponse {
-                                            res: Ok(DynamicObject::from_kube(obj)),
+                                            res: Ok(DynamicObject::from_kube_in(obj, cluster)),
                                         },
                                     );
                                     info!("{} UpdateStatus {} done", log_header, key);
@@ -413,7 +579,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenDeleteResponse(
                                 transactional_get_then_delete_by_retry(
-                                    client,
+                                    ctx.clusters.client_for(&req.api_resource),
                                     req,
                                     log_header.clone(),
                                 )
@@ -424,7 +590,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenUpdateResponse(
                                 transactional_get_then_update_by_retry(
-                                    client,
+                                    ctx.clusters.client_for(&req.api_resource),
                                     req,
                                     log_header.clone(),
                                 )
@@ -435,7 +601,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenUpdateStatusResponse(
                                 transactional_get_then_update_status_by_retry(
-                                    client,
+                                    ctx.clusters.client_for(&req.api_resource),
                                     req,
                                     log_header.clone(),
                                 )
@@ -456,7 +622,7 @@ where
         if check_fault_timing && fault_injection {
             // If the controller just issues create, update, delete or external request,
             // and fault injection option is on, then check whether to crash at this point
-            let result = crash_or_continue(client, &cr_key, &log_header).await;
+            let result = crash_or_continue(&ctx.clusters.primary, &cr_key, &log_header).await;
             if result.is_err() {
                 error!(
                     "{} crash_or_continue fails due to {}",
@@ -502,7 +668,7 @@ pub async fn transactional_get_then_delete_by_retry(
         // Step 2: if the object exists, perform a check using a predicate on object
         // The predicate: Is the current object owned by req.owner_ref?
         // TODO: the predicate should be provided by clients instead of the hardcoded one
-        let current_obj = DynamicObject::from_kube(get_result.unwrap());
+        let current_obj = DynamicObject::from_kube_in(get_result.unwrap(), req.api_resource.cluster());
         if !current_obj
             .metadata()
             .owner_references_contains(&req.owner_ref)
@@ -579,7 +745,7 @@ pub async fn transactional_get_then_update_by_retry(
         // Step 2: if the object exists, perform a check using a predicate on object
         // The predicate: Is the current object owned by req.owner_ref?
         // TODO: the predicate should be provided by clients instead of the hardcoded one
-        let current_obj = DynamicObject::from_kube(get_result.unwrap());
+        let current_obj = DynamicObject::from_kube_in(get_result.unwrap(), req.api_resource.cluster());
         if !current_obj
             .metadata()
             .owner_references_contains(&req.owner_ref)
@@ -617,7 +783,7 @@ pub async fn transactional_get_then_update_by_retry(
             Ok(obj) => {
                 info!("{} Update {} done", log_header, key);
                 return KubeGetThenUpdateResponse {
-                    res: Ok(DynamicObject::from_kube(obj)),
+                    res: Ok(DynamicObject::from_kube_in(obj, req.api_resource.cluster())),
                 };
             }
         }
@@ -656,7 +822,7 @@ pub async fn transactional_get_then_update_status_by_retry(
         }
         // Step 2: if the object exists, perform a check using a predicate on object
         // The predicate: Is the current object owned by req.owner_ref?
-        let current_obj = DynamicObject::from_kube(get_result.unwrap());
+        let current_obj = DynamicObject::from_kube_in(get_result.unwrap(), req.api_resource.cluster());
         if !current_obj
             .metadata()
             .owner_references_contains(&req.owner_ref)
@@ -701,7 +867,7 @@ pub async fn transactional_get_then_update_status_by_retry(
             Ok(obj) => {
                 info!("{} UpdateStatus {} done", log_header, key);
                 return KubeGetThenUpdateStatusResponse {
-                    res: Ok(DynamicObject::from_kube(obj)),
+                    res: Ok(DynamicObject::from_kube_in(obj, req.api_resource.cluster())),
                 };
             }
         }
@@ -718,9 +884,11 @@ where
 }
 
 // Data is passed to reconcile_with.
-// It carries the client that communicates with Kubernetes API.
+// It carries the clients that communicate with the Kubernetes API servers, and
+// which of them hosts the custom resource this controller reconciles.
 pub struct Data {
-    pub client: Client,
+    pub clusters: ClusterClients,
+    pub cr_cluster: ClusterId,
 }
 
 // kube_error_to_api_error translates the API error from kube-rs APIs
