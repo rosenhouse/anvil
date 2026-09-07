@@ -2,7 +2,8 @@ use crate::executable_model::common::*;
 use crate::kubernetes_api_objects::exec::dynamic::DynamicObject;
 use crate::kubernetes_api_objects::spec::{
     common::{Kind, ObjectRef},
-    dynamic::{DynamicObjectView, StoredState},
+    dynamic::DynamicObjectView,
+    resource::StoredState,
 };
 use vstd::prelude::*;
 use vstd::string::*;
@@ -49,7 +50,7 @@ impl ObjectMap {
     #[verifier(external_body)]
     pub fn insert(&mut self, key: KubeObjectRef, value: DynamicObject) -> (old_v: Option<DynamicObject>)
         ensures
-            self@ == old(self)@.insert(key@, value@),
+            final(self)@ == old(self)@.insert(key@, value@),
             old(self)@.contains_key(key@) == old_v is Some,
             old_v is Some ==> old_v->0@ == old(self)@[key@],
     {
@@ -62,7 +63,7 @@ impl ObjectMap {
     #[verifier(external_body)]
     pub fn remove(&mut self, key: &KubeObjectRef) -> (old_v: Option<DynamicObject>)
         ensures
-            self@ == old(self)@.remove(key@),
+            final(self)@ == old(self)@.remove(key@),
             old(self)@.contains_key(key@) == old_v is Some,
             old_v is Some ==> old_v->0@ == old(self)@[key@],
     {

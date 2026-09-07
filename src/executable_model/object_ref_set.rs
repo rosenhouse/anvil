@@ -46,7 +46,7 @@ impl ObjectRefSet {
     #[verifier(external_body)]
     pub fn remove(&mut self, key: &KubeObjectRef) -> (b: bool)
         ensures
-            self@ == old(self)@.remove(key@),
+            final(self)@ == old(self)@.remove(key@),
             b == old(self)@.contains(key@),
     {
         self.inner.remove(&key.clone().into_external_object_ref())
