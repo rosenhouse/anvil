@@ -972,7 +972,9 @@ Scripts under `tools/`, manifests under `deploy/outer_sync/`, mirroring
 
 Everything in the plan's phases 0 through 4 is done and verified on this
 branch; phase 5 is done for the pair and not for the union with the existing
-controllers.
+controllers. The full `cargo verus verify --lib` passes (1141 verified, 0
+errors, about an hour on the development machine; the same command was 944
+verified before the Widget example was added).
 
 | Piece | Where | Size / status |
 |---|---|---|
@@ -1021,9 +1023,9 @@ Not done, and known:
 - **D3 discharged by a verified inner implementation** rather than assumed.
   Needs an inner controller that writes status without an owner reference,
   which the Patch primitive now permits.
-- **The full-repository `cargo verus verify --lib` time** grows with the new
-  modules; staged per-module verification is what the branch was developed
-  with.
+- **The full-repository `cargo verus verify --lib` time** has grown from
+  about 25 minutes to about an hour with the new modules; staged per-module
+  verification is what the branch was developed with.
 
 ## 9. Decisions and follow-ups
 
