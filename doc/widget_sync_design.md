@@ -258,7 +258,7 @@ reconcilers.
 | Out-of-band edit that removes the mirror's label or `parent-uid` annotation | excluded by the rely | the object becomes foreign to both reconcilers, which refuse to adopt; no recovery is possible without adoption (section 1.1) |
 | A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
-| Two outer clusters feeding one inner cluster | no | assumed away; parent-cluster identity is future work (issue #10) |
+| Two outer clusters feeding one inner cluster; many outer namespaces each with its own inner cluster | no | assumed away for the single pair; the fan-out and parent-cluster identity are follow-up work (issue #15) |
 | Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
 | Two replicas of the controller | no | one replica; a second would violate the rely |
 
@@ -408,8 +408,10 @@ VReplicaSets and the RabbitMQ-managed kinds. The one fact Verus does not find
 on its own is that the custom kind names differ (`kind_strings_distinct`).
 
 The concrete instances exercise neither R2's premise nor D3: nothing in them
-writes inner status or finalizers. Verifying the echo controller as a further
-member would discharge both (issue #3). A separate concrete instance adds the
+writes inner status or finalizers. That is by decision: the inner controller is
+whatever the workload cluster runs, the sync controller stays agnostic to it,
+and D3 is an assumption about it, not a proof obligation. The echo controller
+in the testbed is an unverified stand-in. A separate concrete instance adds the
 disturber (section 2.4) as a third member with an empty ESR and no rely;
 `widget_disturbed_core_holds` composes it with the pair.
 
@@ -508,10 +510,19 @@ Full-repository verification (`cargo verus verify --lib`) passes.
 
 ## 8. Future work
 
-Tracked as issues on the fork: verified echo controller discharging D3 (#3); operability (#9) and hardening (#10);
-proof layout and solver budgets (#11); Patch in the executable model (#12,
-whose composition part landed in section 3.4); parent-cluster identity, a
-`keep` annotation, an admission policy in the inner cluster, and a spec
-projection for inner-owned fields (#10). Out-of-band edits and deletes of
-mirrors (#13) are modeled (sections 2.3 and 2.4); what remains excluded is an
-edit that strips a mirror's identity, which the design refuses to recover from.
+Tracked as issues on the fork: operability, kept small (#9); manifest and shim
+hardening (#10); proof layout and solver budgets (#11); repository hygiene
+(#14). Out-of-band edits and deletes of mirrors (#13) are modeled (sections
+2.3 and 2.4); what remains excluded is an edit that strips a mirror's
+identity, which the design refuses to recover from.
+
+Decided against, for this branch: a verified inner controller (the sync
+controller stays agnostic to the inner side; D3 is an assumption, #3), a spec
+projection for inner-owned fields (no spec field is owned by the inner side),
+and parent-cluster identity on mirrors for the single pair.
+
+Follow-ups after this branch: the fan-out to many outer namespaces, each with
+its own inner cluster, in the Cluster API shape of a management cluster and
+its workload clusters, together with parent identity on mirrors and tenancy
+(#15); and the pass that makes the branch reviewable for an upstream
+contribution (#16).
