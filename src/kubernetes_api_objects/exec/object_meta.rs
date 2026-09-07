@@ -151,6 +151,19 @@ impl ObjectMeta {
         self.inner.generation
     }
 
+    // The uid as the opaque string the API server assigned. Like resource_version,
+    // the value is only meaningful for equality comparison: the exec code must never
+    // parse or order it. See the corresponding hygiene note in the multi-cluster
+    // evaluation (discussion/multi-cluster).
+    #[verifier(external_body)]
+    pub fn uid(&self) -> (uid: Option<String>)
+        ensures
+            self@.uid is Some == uid is Some,
+            uid is Some ==> uid->0@ == int_to_string_view(self@.uid->0),
+    {
+        self.inner.uid.clone()
+    }
+
     #[verifier(external_body)]
     pub fn has_some_uid(&self) -> (b: bool)
         ensures self@.uid is Some == b,

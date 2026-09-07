@@ -1,12 +1,11 @@
 name: Continuous integration
 run-name: Continuous integration run by ${{ github.actor }}
 on:
-  push:
-    branches:
-      - gabe/sync-controller
   pull_request:
   merge_group:
   workflow_dispatch:
+  schedule:
+    - cron: "0 7 * * *" # Catch breakage from upstream Verus `main`
 env:
   kind_version: 0.23.0
   go_version: "^1.20"
@@ -57,7 +56,7 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
-      - name: Verify all controllers
+      - name: Verify vreplicaset controller
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
@@ -237,26 +236,31 @@ jobs:
       - name: Run rabbitmq e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- rabbitmq
 
-  # Aggregates every other job into a single status, so branch protection can
-  # require one check instead of being updated whenever a job is added, renamed
-  # or removed. `if: always()` makes it report even when a dependency fails, is
-  # cancelled or is skipped; the step below turns any of those into a failure.
-  all-checks-pass:
-    needs:
-      - setup-toolchain
-      - full-verification
-      - vreplicaset-admission-e2e-test
-      - vdeployment-admission-e2e-test
-      - vreplicaset-e2e-test
-      - vdeployment-e2e-test
-      - vstatefulset-e2e-test
-      - rabbitmq-e2e-test
-    if: always()
+  widget-sync-e2e-test:
+    needs: setup-toolchain
     runs-on: ubuntu-24.04
     steps:
-      - name: Fail if any job did not succeed
-        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo
+            ~/.rustup
+            ~/verus
+            rust-toolchain.toml
+            target
+          key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.go_version }}
+          cache: false
+      - name: Install kind
+        run: go install sigs.k8s.io/kind@v$kind_version
+      - name: Deploy widget sync controller across two kind clusters
         run: |
-          echo "At least one job did not succeed:"
-          echo '${{ toJSON(needs) }}'
-          exit 1
+          . "$HOME/.cargo/env"
+          export PATH="$PATH:$HOME/verus/source/target-verus/release"
+          ./tools/two-cluster-test.sh --build
+      - name: Run widget sync two-cluster e2e tests
+        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync

@@ -168,6 +168,67 @@ impl VStatefulSetSpec {
     }
 }
 
+// Widget is the custom resource mirrored between two clusters by the widget sync
+// controller. The same kind is installed in both clusters: the outer copy is
+// reconciled by the widget sync controller, the inner copy by whatever
+// implementation the inner cluster runs (in the demo, the widget echo controller).
+// `count` and `message` are opaque payload as far as the sync controller is concerned.
+#[derive(
+    kube::CustomResource,
+    Default,
+    Debug,
+    Clone,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+    PartialEq,
+)]
+#[kube(group = "anvil.dev", version = "v1", kind = "Widget")]
+#[kube(shortname = "wdg", namespaced)]
+#[kube(status = "WidgetStatus")]
+pub struct WidgetSpec {
+    pub count: i32,
+    pub message: Option<String>,
+}
+
+#[derive(
+    Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
+)]
+pub struct WidgetStatus {
+    // The generation of this object that the writer of this status last processed.
+    #[serde(rename = "observedGeneration")]
+    pub observed_generation: Option<i64>,
+    pub ready: Option<bool>,
+    #[serde(rename = "observedCount")]
+    pub observed_count: Option<i32>,
+    pub conditions: Option<Vec<WidgetCondition>>,
+}
+
+// A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted
+// because the verified controller does not read clocks.
+#[derive(
+    Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
+)]
+pub struct WidgetCondition {
+    #[serde(rename = "type")]
+    pub type_: String,
+    pub status: String,
+    #[serde(rename = "observedGeneration")]
+    pub observed_generation: Option<i64>,
+    pub reason: Option<String>,
+    pub message: Option<String>,
+}
+
+impl Default for Widget {
+    fn default() -> Self {
+        Self {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta::default(),
+            spec: WidgetSpec::default(),
+            status: None,
+        }
+    }
+}
+
 #[derive(
     kube::CustomResource,
     Default,

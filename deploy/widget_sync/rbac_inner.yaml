@@ -1,0 +1,60 @@
+# RBAC for the widget sync controller's access to the inner (remote) cluster.
+# Apply this in the inner cluster. tools/two-cluster-test.sh turns the service
+# account token into the kubeconfig the controller mounts in the outer cluster.
+# The controller creates, patches (spec) and deletes the mirrors it owns and
+# reads every Widget; it never writes Widget status in the inner cluster.
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync
+  name: widget-sync
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: widget-sync-remote
+  namespace: widget-sync
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: widget-sync-remote-token
+  namespace: widget-sync
+  annotations:
+    kubernetes.io/service-account.name: widget-sync-remote
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-remote
+  name: widget-sync-remote-role
+rules:
+  - apiGroups:
+      - anvil.dev
+    resources:
+      - widgets
+    verbs:
+      - get
+      - list
+      - watch
+      - create
+      - patch
+      - delete
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-remote
+  name: widget-sync-remote-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: widget-sync-remote-role
+subjects:
+  - kind: ServiceAccount
+    name: widget-sync-remote
+    namespace: widget-sync

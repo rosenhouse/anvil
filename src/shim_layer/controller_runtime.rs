@@ -43,11 +43,13 @@ use vstd::string::*;
 // short timeouts so a partition surfaces as an error within one reconcile, and
 // `remote_watch` for the long-lived watch stream, which must keep kube's default
 // (long) read timeout or the stream is cut every time the remote cluster is idle.
+#[derive(Clone)]
 pub struct ClusterClients {
     pub primary: Client,
     pub remote: Option<RemoteClients>,
 }
 
+#[derive(Clone)]
 pub struct RemoteClients {
     pub requests: Client,
     pub watch: Client,
@@ -231,7 +233,8 @@ where
     R::EResp: Send,
     E: ExternalShimLayer<R::EReq, R::EResp>,
 {
-    let crs = Api::<K>::all(clusters.client_of(cr_cluster)?.clone());
+    // The primary watch stream is long-lived, so it uses the watch client of its cluster.
+    let crs = Api::<K>::all(clusters.watch_client_of(cr_cluster)?.clone());
 
     let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {
         return reconcile_with::<K, R, E>(cr, ctx, fault_injection).await;
@@ -289,7 +292,7 @@ where
         + Sync
         + 'static,
 {
-    let crs = Api::<K>::all(clusters.client_of(cr_cluster)?.clone());
+    let crs = Api::<K>::all(clusters.watch_client_of(cr_cluster)?.clone());
     let watched = Api::<O>::all(clusters.watch_client_of(watched_cluster)?.clone());
 
     let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {

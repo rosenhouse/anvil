@@ -1,0 +1,39 @@
+# The widget sync controller, deployed in the outer (primary) cluster.
+# Exactly one replica: the proofs assume a single active sync controller.
+# The Secret widget-sync-remote-kubeconfig holds a kubeconfig for the inner
+# cluster (key "kubeconfig"); tools/two-cluster-test.sh creates it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: widget-sync-controller
+  namespace: widget-sync
+  labels:
+    app.kubernetes.io/name: widget-sync-controller
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: widget-sync-controller
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: widget-sync-controller
+    spec:
+      containers:
+        - image: local/widget-sync-controller:v0.1.0
+          imagePullPolicy: IfNotPresent
+          name: controller
+          env:
+            - name: REMOTE_KUBECONFIG
+              value: /etc/widget-sync/remote-kubeconfig/kubeconfig
+          volumeMounts:
+            - name: remote-kubeconfig
+              mountPath: /etc/widget-sync/remote-kubeconfig
+              readOnly: true
+      volumes:
+        - name: remote-kubeconfig
+          secret:
+            secretName: widget-sync-remote-kubeconfig
+      serviceAccountName: widget-sync-controller
