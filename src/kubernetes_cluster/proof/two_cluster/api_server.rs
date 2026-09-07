@@ -18,6 +18,7 @@ verus! {
 pub open spec fn relabel_hyps(tc: TwoCluster, r: Relabeling) -> bool {
     &&& injective(r)
     &&& installed_types_ignore_metadata(tc.cluster.installed_types)
+    &&& installed_types_coherent(tc.cluster.installed_types)
 }
 
 // s with the API server state of `side` replaced.
@@ -159,6 +160,7 @@ pub proof fn lemma_create_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
         if !st.resources.contains_key(created.object_ref()) && created_object_validity_check(created, it) is None {
             assert(s1.uid_counter > st.uid_counter);
             assert(created1 == rc);
+            lemma_created_object_unmarshallable(tc, created);
             lemma_abs_store_insert(tc, r, s, with_store(s, side, s1), side, created.object_ref(), created);
         }
     }
