@@ -462,7 +462,7 @@ ensures
         // to prove cm resource version does not change, rely conditions prevent status update request to this kind
         SubResource::ServerConfigMap | SubResource::PluginsConfigMap => s.resources()[get_request(sub_resource, rabbitmq).key] == s_prime.resources()[get_request(sub_resource, rabbitmq).key],
         _ => s.resources()[get_request(sub_resource, rabbitmq).key].spec == s_prime.resources()[get_request(sub_resource, rabbitmq).key].spec
-            && s.resources()[get_request(sub_resource, rabbitmq).key].metadata.without_resource_version() == s_prime.resources()[get_request(sub_resource, rabbitmq).key].metadata.without_resource_version(),
+            && s.resources()[get_request(sub_resource, rabbitmq).key].metadata.without_resource_version_and_generation() == s_prime.resources()[get_request(sub_resource, rabbitmq).key].metadata.without_resource_version_and_generation(),
     },
 {
     let resource_key = get_request(sub_resource, rabbitmq).key;

@@ -231,7 +231,7 @@ pub open spec fn at_after_get_resource_step_and_exists_ok_resp_in_flight(
                 SubResource::ServerConfigMap | SubResource::PluginsConfigMap => obj == s.resources()[resource_key],
                 _ => {
                     &&& obj.spec == s.resources()[resource_key].spec
-                    &&& obj.metadata.without_resource_version() == s.resources()[resource_key].metadata.without_resource_version()
+                    &&& obj.metadata.without_resource_version_and_generation() == s.resources()[resource_key].metadata.without_resource_version_and_generation()
                 }
             }
             &&& match sub_resource {
@@ -272,7 +272,7 @@ pub open spec fn resp_msg_is_the_in_flight_ok_resp_at_after_get_resource_step(
             SubResource::ServerConfigMap | SubResource::PluginsConfigMap => obj == s.resources()[resource_key],
             _ => {
                 &&& obj.spec == s.resources()[resource_key].spec
-                &&& obj.metadata.without_resource_version() == s.resources()[resource_key].metadata.without_resource_version()
+                &&& obj.metadata.without_resource_version_and_generation() == s.resources()[resource_key].metadata.without_resource_version_and_generation()
             }
         }
         &&& match sub_resource {
@@ -723,7 +723,7 @@ pub open spec fn inductive_current_state_matches(rabbitmq: RabbitmqClusterView, 
                         // maintains csm
                         &&& req_obj_matches_sub_resource_requirements(sub_resource, rabbitmq, req.obj)(s)
                         &&& update_req_obj_matches_etcd_immutable_fields(sub_resource, rabbitmq, req.obj)(s)
-                        &&& req.obj.metadata.without_resource_version() == s.resources()[resource_key].metadata.without_resource_version()
+                        &&& req.obj.metadata.without_resource_version_and_generation() == s.resources()[resource_key].metadata.without_resource_version_and_generation()
                         // maintains desired_state_is(vsts)
                         &&& sub_resource == SubResource::VStatefulSetView
                             ==> VStatefulSetView::unmarshal(req.obj)->Ok_0.spec == VStatefulSetView::unmarshal(s.resources()[resource_key])->Ok_0.spec

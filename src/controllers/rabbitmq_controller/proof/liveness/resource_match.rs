@@ -210,7 +210,7 @@ pub proof fn lemma_from_after_get_resource_step_to_resource_matches(
                     SubResource::ServerConfigMap | SubResource::PluginsConfigMap => obj == s.resources()[key],
                     _ => {
                         &&& obj.spec == s.resources()[key].spec
-                        &&& obj.metadata.without_resource_version() == s.resources()[key].metadata.without_resource_version()
+                        &&& obj.metadata.without_resource_version_and_generation() == s.resources()[key].metadata.without_resource_version_and_generation()
                     }
                 }
                 &&& match sub_resource {
