@@ -214,6 +214,7 @@ pub open spec fn sync_invariants(cluster: Cluster, controller_id: int, janitor_i
     .and(always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id))))
     .and(always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())))
     .and(always(lift_state(cluster.each_builtin_object_in_etcd_is_well_formed())))
+    .and(always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner())))
     .and(always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>())))
     .and(always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>())))
     .and(always(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id))))
@@ -259,6 +260,7 @@ pub proof fn sync_invariants_is_stable(cluster: Cluster, controller_id: int, jan
     always_p_is_stable(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id)));
     always_p_is_stable(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()));
     always_p_is_stable(lift_state(cluster.each_builtin_object_in_etcd_is_well_formed()));
+    always_p_is_stable(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()));
     always_p_is_stable(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()));
     always_p_is_stable(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()));
     always_p_is_stable(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id)));
@@ -300,6 +302,7 @@ pub proof fn sync_invariants_is_stable(cluster: Cluster, controller_id: int, jan
         always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id))),
         always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())),
         always(lift_state(cluster.each_builtin_object_in_etcd_is_well_formed())),
+        always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner())),
         always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>())),
         always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>())),
         always(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id))),
@@ -353,6 +356,7 @@ pub proof fn sync_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster
     cluster.lemma_always_every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(spec, controller_id);
     cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
     cluster.lemma_always_each_builtin_object_in_etcd_is_well_formed(spec);
+    cluster.lemma_always_each_object_in_etcd_has_at_most_one_controller_owner(spec);
     cluster.lemma_always_each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>(spec);
     cluster.lemma_always_each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>(spec);
     cluster.lemma_always_cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(spec, controller_id);
@@ -417,6 +421,7 @@ pub proof fn sync_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster
         lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id)),
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
         lift_state(cluster.each_builtin_object_in_etcd_is_well_formed()),
+        lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()),
         lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()),
         lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()),
         lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id)),
@@ -773,12 +778,15 @@ pub proof fn lemma_sync_stable_spec_facts(spec: TempPred<ClusterState>, cluster:
         spec.entails(always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()))),
         spec.entails(always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()))),
         spec.entails(always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()))),
+        spec.entails(always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()))),
         spec.entails(always(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id)))),
         spec.entails(always(lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()))),
         spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_no_replicas_and_has_unique_id()))),
         spec.entails(always(lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)))),
         spec.entails(always(lift_state(Cluster::every_ongoing_reconcile_has_lower_id_than_allocator(controller_id)))),
         spec.entails(always(lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<OuterWidgetView>(controller_id)))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_msg_from_controller_has_kind_as::<OuterWidgetView>(controller_id)))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id)))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key))))),
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
         spec.entails(always(lift_state(Cluster::there_is_no_request_msg_to_external_from_controller(controller_id)))),
@@ -835,6 +843,8 @@ pub proof fn lemma_sync_stable_spec_facts(spec: TempPred<ClusterState>, cluster:
     entails_trans(spec, inv, always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>())));
     assert(inv.entails(always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()))));
     entails_trans(spec, inv, always(lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>())));
+    assert(inv.entails(always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()))));
+    entails_trans(spec, inv, always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner())));
     assert(inv.entails(always(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id)))));
     entails_trans(spec, inv, always(lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<OuterWidgetView>(controller_id))));
     assert(inv.entails(always(lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()))));
@@ -847,6 +857,10 @@ pub proof fn lemma_sync_stable_spec_facts(spec: TempPred<ClusterState>, cluster:
     entails_trans(spec, inv, always(lift_state(Cluster::every_ongoing_reconcile_has_lower_id_than_allocator(controller_id))));
     assert(inv.entails(always(lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<OuterWidgetView>(controller_id)))));
     entails_trans(spec, inv, always(lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<OuterWidgetView>(controller_id))));
+    assert(inv.entails(always(lift_state(Cluster::every_in_flight_msg_from_controller_has_kind_as::<OuterWidgetView>(controller_id)))));
+    entails_trans(spec, inv, always(lift_state(Cluster::every_in_flight_msg_from_controller_has_kind_as::<OuterWidgetView>(controller_id))));
+    assert(inv.entails(always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id)))));
+    entails_trans(spec, inv, always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id))));
     assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key))))));
     entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)))));
     assert(inv.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))));

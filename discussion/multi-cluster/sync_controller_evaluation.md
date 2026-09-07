@@ -44,6 +44,31 @@ mass deletion. (4) Exactly one outer cluster per inner cluster is an
 explicit assumption; a parent-cluster identity and a `keep` annotation that
 freezes collection are deferred features.
 
+**Revision 5, after building and verifying it.** The controller, the
+two-cluster testbed and the proofs of R1, R2 and R3 exist and pass; both
+reconcilers are packaged as Welder controller specs and composed. Writing the
+proofs changed the specification in five places, all recorded in section 5:
+(1) *fat-finger tolerance*: the rely no longer forbids other actors from
+changing a mirror's spec (a mistaken `kubectl edit` in the inner cluster is
+not malicious and a controller must survive it); the sync reconciler
+overwrites such an edit and never copies a status the inner side computed
+for it, and R1 and R2 promise convergence for the time after such edits stop,
+exactly as they do for the time after the outer spec stops changing. (2) The
+premise of R1 and R2 fixes the outer copy's *generation* along with its spec,
+which is the same statement made precise, and is what pins
+`observedGeneration` in R2's target. (3) Mirrored status fields are copied
+only when the inner status observes the mirror's current generation;
+otherwise the previously reported fields are kept and `Synced=False/
+InnerConverging` is written. (4) R3 is stated per mirror *object* (key,
+parent uid, object uid) with the target "that object is gone", and D1 (inner
+liveness) is no longer a named assumption: R2's premise fixes the inner
+status, so D3 is the only liveness assumption about the inner side. (5) The
+sync reconciler's Welder spec names the janitor: its partial rely on the
+janitor is the janitor's guarantee, not the anonymous rely. A claim about
+Kubernetes raised in review, that a PATCH response carries the object's
+status at the instant of the write, was verified and found to be already
+modeled; using it would not change any property and was not adopted (4.1c).
+
 ## 0. The question and the short answer
 
 We want an example controller that runs in an *outer* cluster, reconciles a
@@ -64,8 +89,10 @@ uses one kind, `Widget`, in both clusters.
 
 **Does the current Anvil API support this?**
 
-- **Model and proof framework:** yes, with two enhancements, both now on
-  this branch and verified. Both clusters are modeled as one logical API
+- **Model and proof framework:** yes, with two enhancements, both on this
+  branch and verified, and nothing else: the proofs of R1, R2 and R3 and the
+  Welder composition went through with the framework's existing lemma
+  library. Both clusters are modeled as one logical API
   server whose key space is the disjoint union of the two clusters' objects.
   Keys are `(kind, namespace, name)`; the cluster is folded into the model's
   kind at the trusted exec/model boundary (the Outer copy has model kind
@@ -87,8 +114,9 @@ uses one kind, `Widget`, in both clusters.
   controller acting on its own, and it would force re-implementing API server
   semantics in a bespoke model.
 - **Optional:** an owner-less transactional update (section 4.3). Needed only
-  to compose against a *verified* inner implementation, or to remove the
-  liveness dependency from the forward-sync proof.
+  to compose against a *verified* inner implementation.
+- **Status:** everything below the line "proposed" in earlier revisions is
+  built and verified; section 8 has the inventory.
 
 ## 1. Design
 
@@ -150,26 +178,27 @@ spec/status shape work identically.
   itself gives cascading deletion: a janitor reconciler removes any labeled
   `Inner` whose `Outer` is absent or has a different uid.
 
-### 1.3 The sync reconciler (primary kind `Outer`, runs against a snapshot with generation `g`, resource version `r`, spec `σ`, uid `u`)
+### 1.3 The sync reconciler (primary kind `Outer`, runs against a snapshot with generation `g`, spec `σ`, uid `u`)
 
 ```
 Init
  └─ Get Inner{ns,name}                                   (inner cluster, quorum read)
       ├─ NotFound → Create Inner{ns,name; label; parent-uid=u; spec=σ; no ownerRefs; no finalizers}
-      │              → AfterCreateInner → PatchStatus Outer (see below, Synced=False/Creating)
-      ├─ Found, not ours (label missing or parent-uid ≠ u) → PatchStatus Outer (Synced=False/ForeignObject) → Done
-      ├─ Found, deletionTimestamp set (ours or not) → Done  (absent-in-progress: wait for the inner side to
-      │                                                      release its finalizers; Create would return AlreadyExists)
+      │              → AfterCreateInner → Done           (the watch on the mirror triggers the next reconcile)
+      ├─ Found, deletionTimestamp set (ours or not) → status Synced=False/InnerTerminating → Done
+      │                                                  (absent-in-progress: wait for the inner side to release it)
+      ├─ Found, not ours (label missing or parent-uid ≠ u) → status Synced=False/ForeignObject → Done
       ├─ Found, ours, spec ≠ σ → Patch Inner {test uid=Inner.uid, test generation=Inner.generation; add /spec := σ}
-      │              → AfterPatchInner → Done              (inner cannot be caught up yet)
-      └─ Found, ours, spec == σ
-           └─ desired := { observedGeneration: g,
-                           mirrored fields: π(Inner.status),
-                           Synced: True iff Inner.status.observedGeneration == Inner.metadata.generation,
-                                   with condition.observedGeneration = g }
-                ├─ Outer.status == desired → Done
-                └─ else PatchStatus Outer {test uid=u, test generation=g; add /status := desired}
-                       → AfterPatchOuterStatus → Done
+      │              → AfterPatchInner → Done             (covers a fat-finger edit of the mirror's spec)
+      ├─ Found, ours, spec == σ, Inner.status.observedGeneration == Inner.metadata.generation
+      │     → status { observedGeneration: g, mirrored fields: π(Inner.status),
+      │                Synced: True (reason Synced, condition.observedGeneration = g) }
+      └─ Found, ours, spec == σ, inner not caught up
+            → status { observedGeneration: g, mirrored fields: as previously reported,
+                       Synced: False/InnerConverging (condition.observedGeneration = g) }
+      where "status X" means: Outer.status == X → Done,
+                              else PatchStatus Outer {test uid=u, test generation=g; add /status := X}
+                                   → AfterPatchOuterStatus → Done
 Error (any unexpected response) → requeue with backoff
 ```
 
@@ -177,6 +206,16 @@ Error (any unexpected response) → requeue with backoff
 status type except `observedGeneration` and `conditions`). The controller
 never writes `Outer` spec or metadata, never writes `Inner` status or
 metadata, and never deletes anything.
+
+The last two branches are the status-copy rule. Mirrored fields are copied
+*only* from an inner status that observes the mirror's current generation.
+If the inner side reconciled an earlier generation of the mirror, including a
+generation produced by a mistaken edit that the reconciler has since
+overwritten, its status is for a spec the outer copy never asked for and is
+never reported; the outer copy keeps the last fields it did report and says
+`InnerConverging`. This is what makes "the outer status is the inner
+implementation's status for the outer spec" a theorem (R2) rather than a
+hope.
 
 Writes are JSON patches, not replaces. A patch carries no
 `resourceVersion`; the API server applies it to the latest object, so writes
@@ -241,13 +280,14 @@ it reconciled, meaning "the controller has processed this generation", and
 progress is reported in a condition. The status patch tests `uid == u` and
 `generation == g`, so it lands only while `Outer` is still at generation `g`
 with spec `σ`; a user spec change in between makes the patch fail and the
-next reconcile stamps the new generation. The mirrored fields are copied
-from `Inner.status` on every such write. The condition `Synced` is `True`,
+next reconcile stamps the new generation. The condition `Synced` is `True`,
 with `condition.observedGeneration == g`, exactly when the controller
 verified in that reconcile that `Inner.spec == σ` and the inner
 implementation reports `Inner.status.observedGeneration ==
-Inner.metadata.generation`; otherwise it is `False` with a reason
-(`Creating`, `Propagating`, `InnerConverging`, `ForeignObject`). So:
+Inner.metadata.generation`; the mirrored fields are copied from
+`Inner.status` in exactly that case (1.3). Otherwise `Synced` is `False`
+with a reason (`InnerConverging`, `InnerTerminating`, `ForeignObject`) and
+the previously reported fields are kept. So:
 
 > `Outer.status.observedGeneration == Outer.metadata.generation` means the
 > sync controller has acted on the current spec; `Synced == True` with the
@@ -433,9 +473,11 @@ never use `generateName`; the axiom's own TODO proposes the per-kind form).
   all our properties are per key. Consequences: the assumption "crashes
   eventually stop" also covers "lost responses eventually stop", and a stale
   request may still execute later, so every write must be safe to replay.
-  Updates and status updates carry resource versions, deletes carry uids.
-  `Create` has no precondition, and a delayed `Create Inner` can land after
-  its `Outer` is gone; the janitor collects it (5, R3).
+  The spec and status patches test uid and generation, so a replayed patch
+  either lands on the same generation it was formed for (a no-op) or is
+  rejected; deletes carry uids. `Create` has no precondition, and a delayed
+  `Create Inner` can land after its `Outer` is gone; the janitor collects it
+  (5, R3).
 - *Namespaces.* Not modeled; creates never fail for a missing namespace.
   Assume the inner namespace exists. Deleting the inner namespace deletes
   `Inner` out of band and makes creates fail; R1 does not hold in reality
@@ -458,83 +500,121 @@ never use `generateName`; the axiom's own TODO proposes the per-kind form).
 
 ### 3.3 Rely, guarantee, and dependencies
 
-**Sync guarantee.** Every in-flight API request from the sync controller is
-one of: `Get` on an `Outer` or `Inner` key; `Create` of an `Inner` with a
-provided name, no owner references, no finalizers, our label, `parent-uid`
-equal to the triggering `Outer`'s uid, and spec equal to that `Outer`'s spec;
-`Update` of an `Inner` carrying a resource version, whose object equals the
-stored object at that resource version with spec replaced and our
-label/annotation ensured (stated rv-conditionally against the store, in the
-style of `vd_rely_update_req`); `UpdateStatus` of an `Outer` carrying a
-resource version, with `status.observedGeneration == metadata.generation` of
-the sent object. Never a delete, never `Outer` spec or metadata, never `Inner`
-status, never any other kind.
+As written in `trusted/rely_guarantee.rs`. Every condition quantifies over
+the API requests a controller has in flight.
 
-**Janitor guarantee.** Only `Get` on `Outer` keys and `Delete` on labeled
-`Inner` keys with a uid precondition.
+**Sync guarantee** (`widget_sync_guarantee`). A request sent while
+reconciling the outer copy at `outer_key` is one of: `Get` of
+`inner_key_of(outer_key)`; `Create` in `outer_key`'s namespace of exactly
+`make_inner(outer)` for an outer copy `outer` at that key whose uid has been
+issued and is bound to that key (label, `parent-uid` annotation, spec `σ`, no
+owner references, no finalizers, no status); `Patch` of kind `Inner` at
+`outer_key`'s namespace and name (the spec patch); `PatchStatus` of kind
+`Outer` at that namespace and name with `test` on uid and generation and a
+status whose `observedGeneration`, and whose `Synced` condition's
+`observedGeneration`, equal the tested generation (G-gen). Nothing else: no
+`Update`, no `Delete`, no `List`, no writes to any other key.
 
-Both guarantees trivially satisfy the rely conditions of the four existing
-verified controllers, which constrain only Pods, PVCs, VReplicaSets and
-RabbitMQ-managed kinds.
+**Janitor guarantee** (`widget_janitor_guarantee`). A request sent while
+reconciling the mirror at `inner_key` is a `List` of kind `Outer` in
+`inner_key`'s namespace, or a `Delete` of `inner_key` (kind `Inner`) with a
+uid precondition.
 
-**Rely on every other controller `j`** (the janitor and sync are composed
-with each other, so "other" excludes them):
+**Sync rely on an anonymous other controller** (`widget_sync_rely`): no
+`Create` of kind `Inner`; an `Update` or `GetThenUpdate` of a mirror that is
+going to land (its resource version matches the store) changes neither the
+owner references nor the mirror's identity (`managed-by` label and
+`parent-uid` annotation), and is otherwise *free*, spec included; `Patch` of
+anything (a spec patch of a mirror is a fat-finger edit, a status patch is how
+the inner side reports); no `UpdateStatus`, `GetThenUpdateStatus` or
+`PatchStatus` of kind `Outer`; no `Delete` or `GetThenDelete` of kind
+`Inner`. Adding and removing the inner side's own finalizers, labels and
+annotations is allowed, which admits real inner implementations that
+finalize, label and annotate what they reconcile, as long as they do not
+replace metadata wholesale (merge-patch style controllers satisfy this).
 
-- On `Inner` keys: no `Create`, no `Delete`, no `GetThenDelete`, no spec
-  change; `UpdateStatus` and `GetThenUpdateStatus` allowed; `Update` allowed
-  only if it changes metadata alone, adds no owner references, and preserves
-  our label and `parent-uid` annotation. Adding and removing the inner
-  side's own finalizers is allowed. This admits real inner implementations
-  that label, annotate or finalize their objects and write status by Patch.
-  The preservation clause matters most in the same-kind case, where the
-  inner cluster's real `Widget` controller has opinions about the object's
-  metadata: a controller that replaced metadata wholesale would make the
-  janitor lose track of the mirror and the sync controller refuse it forever.
-  Merge-patch style controllers satisfy it.
-- On `Outer` keys: no `Update`, `UpdateStatus`, `Delete`, `GetThen*`.
+**Janitor rely on an anonymous other controller** (`widget_janitor_rely`): a
+`Create` of kind `Inner` at namespace `ns` and name `n` is `make_inner(outer)`
+for an outer copy at `Outer{ns, n}` whose uid is bound to that key (the sync
+reconciler's way; this is what makes every mirror's `parent-uid` a real,
+issued uid that only its parent can carry); `Update` and `GetThenUpdate` as
+in the sync rely.
 
-Users are not modeled; their influence enters through
-`always(desired_state_is(outer))`.
+**The sync reconciler's rely on the janitor is the janitor's guarantee**,
+not the anonymous rely: the janitor does delete mirrors, and the sync
+reconciler's proof needs to know *which* (only mirrors whose parent is gone,
+established from a successful `List`). The Welder `safety_partial_rely` is a
+function of the other controller's id, so the sync spec says "for the janitor
+id, the janitor's guarantee; for anyone else, `widget_sync_rely`". The
+janitor's model, not just its messages, is then in scope of the sync proof:
+the message invariant `janitor_deletes_are_sound` (a janitor `Delete` in
+flight targets an object whose parent is absent forever) is proved from the
+janitor's state machine and is what shows a janitor `Delete` never removes a
+mirror R1 is about to rely on.
 
-**D1, liveness dependency on the inner implementation (an axiom in v1),
-now needed only by R2's premise.** For every `Inner` that is not
-terminating: if its spec stops changing, `status.observedGeneration`
-eventually equals `metadata.generation` and the mirrored status fields
-eventually stop changing. This is eventual stability of the inner
-controller, the premise of ESR itself. It is *not* needed for R1 any more:
-the spec patch tests `Inner.metadata.generation`, which only our own spec
-writes change (rely), so an inner controller that writes status,
-timestamps, heartbeat annotations or finalizers on every reconcile cannot
-starve it. The earlier rv-pinned design needed D1 for R1 because every
-inner-side write bumped the resource version; that was the reviewer's
-strongest objection and the reason for the Patch primitive (4.2). Revision
-1 also claimed D1 could be discharged against the verified controllers in
-this repository; it cannot, because all of them require their CR to carry
-a controller owner reference (their status writes go through
-`GetThenUpdateStatus`, whose `well_formed` demands one) and our `Inner` has
-none. Discharging D1 against a verified inner implementation would need
-that inner implementation to write its status without an owner reference,
-which the Patch primitive now makes possible.
+The two guarantees discharge each other's relies (`compatible` in
+`composition/widget_sync_reconciler.rs`): the janitor's guarantee is the sync
+reconciler's rely on it by definition, and the sync guarantee's `Create` is
+`make_inner(outer)` at the outer copy's own namespace and name, which is the
+janitor's rely. Whether both guarantees also satisfy the rely conditions of
+the four existing verified controllers (which constrain Pods, PVCs,
+VReplicaSets and RabbitMQ-managed kinds) is expected but has *not* been
+mechanically checked; composing the pair into `compose_all.rs` is future
+work (section 8).
 
-**D2, liveness dependency of the sync controller on the janitor.** A
-stale-uid `Inner` (from a deleted and recreated `Outer`) must be removed
-before the sync controller, which refuses to adopt, can create the new
-mirror. D2 is the janitor's own liveness property R3 and *is* dischargeable
-with `compose_dep`: the janitor is ours, verified, uses no owner references
-and no transactional requests. This gives the proposal a genuine
-composition instance.
+Users are not modeled; their influence enters through the premises of R1
+and R2 (`outer_stable`, section 5).
 
-**D3, liveness dependency on the inner implementation for cleanup (an axiom
-in v1).** For every `Inner` with a deletion timestamp: the inner side
-eventually removes every finalizer it owns, and no other actor adds
-finalizers to a terminating object (the API server rejects new finalizers
-on terminating objects anyway). D3 is what lets a janitor `Delete` end in
-the object's removal. R3 depends on D3 directly; R1 depends on it through
-D2 whenever a stale or falsely-deleted mirror must disappear before the
-sync controller can recreate it. D1 and D3 together are simply "the inner
-implementation is live": it settles on stable specs and it lets go of
-terminating objects. Both are stated as one `liveness_dependency`
-predicate in the sync controller's `ControllerSpec`.
+**D1 is gone.** Earlier revisions named a liveness dependency on the inner
+implementation ("if the mirror's spec stops changing, the inner status
+eventually settles with `observedGeneration == generation`"). It was only
+ever needed to *state* R2 with a live inner side. R2 is instead stated with
+the inner status fixed in its premise (`inner_settled`), so it holds for any
+inner implementation, live or not, and the only liveness assumption about
+the inner side is D3. Discharging "the outer status eventually equals
+`f(spec)`" for a particular inner implementation is then that
+implementation's own ESR composed with R2.
+
+**D2, the sync reconciler's liveness dependency on the janitor, is R3 and is
+discharged by composition.** A stale-uid mirror (from a deleted and recreated
+`Outer`), or a delayed `Create` that landed after its parent was gone, must be
+removed before the sync reconciler, which refuses to adopt, can create the
+new mirror. R3 is the janitor's ESR; `compose_dep` consumes it as the sync
+spec's `liveness_dependency`. This is the repository's second genuine
+`compose_dep` instance after VDeployment on VReplicaSet.
+
+**D3, the environment rely, unchanged.** For every terminating mirror object
+(kind `Inner`, uid `u`, deletion timestamp set): the object with uid `u` is
+eventually gone. Interpreted: the inner side removes every finalizer it owns
+from an object it sees terminating, after which the API server removes the
+object (the model rejects new finalizers on terminating objects). R3 depends
+on it directly; R1 and R2 through R3. It is the `environment_rely` of both
+Welder specs and remains an axiom in this version; an inner implementation
+verified in Anvil would discharge it in its own guarantee.
+
+### 3.4 Packaging as Welder controller specs
+
+Welder (`kubernetes_cluster/proof/core.rs`, `composition.rs`) adds no
+verification power: `sync_eventually_synced` and
+`sync_eventually_mirrors_status` are ordinary theorems with explicit
+hypotheses (fairness, the janitor's guarantee, D3, R3). What Welder adds is
+the closed statement about the cluster running both controllers, and a
+mechanical check of the bookkeeping:
+
+- `compose_dep` consumes the janitor's *proved* ESR to discharge the sync
+  spec's liveness dependency, so `core(widget_core_cluster, {janitor, sync})`
+  assumes nothing about the janitor beyond its model. Only D3 remains an
+  assumption about the environment.
+- `compatible` forces each guarantee to be proved to imply the other's rely,
+  so a mismatch between what one reconciler promises and what the other
+  assumes is a verification failure, not a gap in a prose argument.
+- The `ControllerSpec` shape (ESR, guarantee, partial rely, environment rely,
+  liveness dependency, fairness, membership) is the same for every Anvil
+  controller, which is what will let the pair be composed with the existing
+  four without reopening any proof.
+
+The concrete instance is `widget_core_cluster()` (janitor id 1, sync id 2,
+both Widget kinds installed) and `widget_core_holds()`.
 
 ## 4. Framework enhancements
 
@@ -616,6 +696,31 @@ patching the kinds they manage, which no composed controller does, so their
 proofs and guarantees are unaffected. Merge patch, server-side apply and
 `managedFields` remain unmodeled.
 
+### 4.1c Investigated, not adopted: reading status from the PATCH response
+
+A review question asked whether a Kubernetes PATCH returns the object,
+status included, as of the instant of the write, and whether the sync
+reconciler should use that instead of re-reading. It does: the API server
+answers a PATCH on the main endpoint with the persisted object at the
+write's linearization point, `.status` included, and kube-rs's
+`Api::patch` returns it. The model already says so: `PatchResponse` carries
+`Result<DynamicObjectView, APIError>` and the API server model answers with
+the stored object after the update, so no framework change is involved.
+
+The sync reconciler does not use it, for a reason that follows from the
+status-copy rule. The response to the spec patch is the mirror with the
+*new* generation and the *old* status, whose `observedGeneration` is the
+old generation; the copy rule (rightly) refuses that status. The only line
+it could write from the response is `Synced=False/InnerConverging` at the
+outer generation, one reconcile earlier than the watch-triggered reconcile
+writes the same line; `Synced=True` cannot come sooner, because it waits on
+the inner implementation. Against that, the extra branch would add a state
+to both reconcilers and to the proof for no change in any of R1, R2 or R3.
+The response to the *status* patch on the outer copy is likewise not read:
+the reconcile ends, and the next one compares the store with the desired
+status. The reason `Propagating` reserved for such an early line is defined
+and unused.
+
 ### 4.2 Required: cluster-tagged wrappers and shim layer (done on this branch)
 
 Trusted wrappers in `src/kubernetes_api_objects/exec/`:
@@ -655,98 +760,109 @@ to `APIError::Other`, which the reconciler treats as a generic retry.
 
 `GetThenUpdate*` hard-codes the predicate "current object carries
 `owner_ref`" in the model and in the shim's retry loop, both with TODOs. An
-owner-less form (controller-runtime's `RetryOnConflict`) would let the
-forward-sync proof drop D1 for the `Update Inner` step, and would let a
-verified inner implementation write its own status without an owner, which is
-what makes D1 dischargeable by composition. Mechanical but touches the
+owner-less form (controller-runtime's `RetryOnConflict`) would let a
+verified inner implementation write its own status without an owner
+reference, which is what composing against a verified inner implementation
+(and discharging D3 from its guarantee) needs. Mechanical but touches the
 message type, `well_formed()`, the shim, and every existing construction site
 and rely clause that reads `req.owner_ref`. One to three days plus
 re-verification. Not required for v1.
 
 ## 5. Requirements and assumptions
 
-Notation as in `trusted/liveness_theorem.rs`. `π` projects a status onto the
-mirrored fields.
+As in `trusted/liveness_theorem.rs` (the file is the authority; this is a
+readable transcription). `π` is `WidgetStatusView::mirrored()`, the status
+with `observedGeneration` and `conditions` cleared. Both clusters are one
+logical store: the outer copy has kind `widget`, the mirror `widget@inner`,
+at the same namespace and name.
 
 ```rust
-pub open spec fn inner_key(outer: OuterView) -> ObjectRef { /* kind Inner, same ns and name */ }
+// Premise of R1 and R2: the outer copy `outer` (with its uid) is present, not
+// terminating, has spec outer.spec at generation outer.metadata.generation, and
+// nobody is writing anything but that spec to the mirror any more.
+outer_stable(outer)(s) :=
+    desired_state_is(outer)(s)
+ && s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
+ && mirror_spec_undisturbed(outer)(s)
 
-pub open spec fn owned_inner(outer: OuterView, obj: DynamicObjectView) -> bool {
-    &&& obj.metadata.labels->0["anvil.dev/managed-by"] == "outer-sync"
-    &&& obj.metadata.annotations->0["anvil.dev/parent-uid"] == uid_string(outer.metadata.uid->0)
-}
+// Every in-flight Update / GetThenUpdate / Patch of the mirror writes outer.spec
+// (the sync reconciler's own patches included). Other writes are unconstrained.
+mirror_spec_undisturbed(outer)(s) :=
+    forall msg in flight, msg is an API request:
+        Update(req)        with req.key() == inner_key(outer) ==> unmarshal_spec(req.obj.spec) == Ok(outer.spec)
+        GetThenUpdate(req) with req.key() == inner_key(outer) ==> same
+        Patch(req)         with req.key() == inner_key(outer) ==> unmarshal_spec(req.spec) == Ok(outer.spec)
 
 // R1 target.
-pub open spec fn spec_synced(outer: OuterView) -> StatePred<ClusterState> {
-    |s| { let obj = s.resources()[inner_key(outer)];
-          &&& s.resources().contains_key(inner_key(outer))
-          &&& obj.metadata.deletion_timestamp is None
-          &&& owned_inner(outer, obj)
-          &&& InnerView::unmarshal(obj) is Ok
-          &&& InnerView::unmarshal(obj)->Ok_0.spec == outer.spec }
-}
+spec_synced(outer)(s) :=
+    let obj = s.resources()[inner_key(outer)];
+    contains_key && obj.metadata.deletion_timestamp is None
+ && unmarshal(obj) is Ok && is_mirror_of(unmarshal(obj), outer) && unmarshal(obj).spec == outer.spec
 
-// R2 premise: the inner implementation has settled on status st for this spec.
-pub open spec fn inner_settled(outer: OuterView, st: StatusView) -> StatePred<ClusterState> {
-    |s| { let inner = InnerView::unmarshal(s.resources()[inner_key(outer)])->Ok_0;
-          &&& spec_synced(outer)(s)
-          &&& inner.status.observed_generation == inner.metadata.generation
-          &&& π(inner.status) == st }
-}
+// R2 premise (with outer_stable): the inner side has processed the mirror's
+// current spec and reports `mirrored` for it.
+inner_settled(outer, mirrored)(s) :=
+    spec_synced(outer)(s) && inner_caught_up(inner) && π(inner.status) == mirrored
+    where inner = unmarshal(s.resources()[inner_key(outer)]),
+          inner_caught_up(inner) := inner.status is Some
+                                 && inner.status.observed_generation == inner.metadata.generation
 
 // R2 target.
-pub open spec fn status_synced(outer: OuterView, st: StatusView) -> StatePred<ClusterState> {
-    |s| { let o = OuterView::unmarshal(s.resources()[outer.object_ref()])->Ok_0;
-          &&& π(o.status) == st
-          &&& o.status.observed_generation == o.metadata.generation
-          &&& o.status.synced_condition() == Some(ConditionView { status: True, observed_generation: o.metadata.generation, .. }) }
-}
+status_synced(outer, mirrored)(s) :=
+    let stored = unmarshal(s.resources()[outer.object_ref()]);  // must be Ok, status Some
+    π(stored.status) == mirrored
+ && stored.status.observed_generation == stored.metadata.generation
+ && stored.status.synced_condition() == Some { status: True, observed_generation: stored.metadata.generation, .. }
 
-// R3: per mirror key k and parent uid a.
-pub open spec fn parent_absent(k: ObjectRef, a: Uid) -> StatePred<ClusterState> {
-    |s| !(s.resources().contains_key(outer_key_of(k)) && s.resources()[outer_key_of(k)].metadata.uid == Some(a))
-}
-pub open spec fn mirror_collected(k: ObjectRef, a: Uid) -> StatePred<ClusterState> {
-    |s| !(s.resources().contains_key(k) && labeled_with_parent(s.resources()[k], a))
-}
+// R3 (per mirror object): key k of kind Inner, parent uid a, object uid u.
+mirror_object_is(k, a, u)(s) := contains_key(k) && s.resources()[k].metadata.uid == Some(u)
+                               && mirror_of_parent(s.resources()[k], a)   // label + parent-uid annotation == a
+object_is_gone(k, u)(s)      := !(contains_key(k) && s.resources()[k].metadata.uid == Some(u))
+parent_absent(k, a)(s)       := !(contains_key(outer_key_of(k)) && s.resources()[outer_key_of(k)].metadata.uid == Some(a))
+
+// D3 (environment rely): a terminating mirror object is eventually gone.
+inner_terminating_object(k, u)(s) := k.kind == Inner && contains_key(k)
+                                   && s.resources()[k].metadata.uid == Some(u)
+                                   && s.resources()[k].metadata.deletion_timestamp is Some
+inner_releases_terminating_objects := forall (k, u): inner_terminating_object(k, u) ~> object_is_gone(k, u)
 ```
 
 **R1 (forward ESR).** For every `outer`:
-`always(desired_state_is(outer)) ~> always(spec_synced(outer))`.
+`□ outer_stable(outer) ~> □ spec_synced(outer)`.
 
-**R2 (backward ESR with generation).** For every `outer` and `st`:
-`always(desired_state_is(outer) ∧ inner_settled(outer, st)) ~> always(status_synced(outer, st))`.
-The premise fixes the inner status rather than assuming the inner controller
-is live, so R2 is independent of any particular inner implementation. Under
-`always(desired_state_is(outer))` the `Outer` generation is constant (a
-generation bump implies a spec change), which is what makes the target's
-`observed_generation == generation` conjunct stable.
+**R2 (backward ESR with generation).** For every `outer` and `mirrored`:
+`□ (outer_stable(outer) ∧ inner_settled(outer, mirrored)) ~> □ status_synced(outer, mirrored)`.
 
-**R3 (cleanup, the janitor's liveness property).** For every mirror key `k`
-and uid `a`: `always(parent_absent(k, a)) ~> always(mirror_collected(k, a))`.
-Its premise is an absence, unlike every existing Anvil proof; the mechanics
-are the same (weak fairness of `schedule_controller_reconcile` for the
-janitor on key `k`, which is enabled while the `Inner` exists). Delayed
-creates for uid `a` are finitely many, because a `Create` is only sent by a
-reconcile scheduled while an `Outer` with uid `a` existed. `mirror_collected`
-counts a terminating mirror as not yet collected, so R3 holds under D3: the
-janitor's `Delete` stamps the deletion timestamp, D3 removes the finalizers,
-and the update that removes the last finalizer deletes the object
-(`handle_update_request`, the update-that-deletes branch).
+**R3 (cleanup, the janitor's ESR).** For every `(k, a, u)`:
+`□ parent_absent(k, a) ∧ mirror_object_is(k, a, u) ~> object_is_gone(k, u)`.
 
-**G-gen (safety invariant, part of the sync guarantee).** Every
-`PatchStatus Outer` sent by the sync controller tests `uid == u` and
-`generation == g` of the snapshot it reconciled, writes
-`status.observed_generation == g`, and writes `Synced == True` (with
-`condition.observed_generation == g`) only if it was formed from an `Inner`
-that satisfied `inner_settled` for that snapshot's spec. Because the patch
-lands only while the stored `Outer` still has generation `g`, this yields the
-observer property in 1.5.
+**G-gen (part of the sync guarantee, section 3.3).** Every `PatchStatus`
+of an outer copy the sync reconciler has in flight tests the copy's uid and
+generation and writes a status whose `observedGeneration`, and whose `Synced`
+condition's `observedGeneration`, equal the tested generation. With the
+generation test, this yields the observer property of 1.5.
 
-**Corollary.** R1, D1 and R2 together give: if the `Outer` spec is stable,
-then eventually and stably `π(Outer.status) == f(spec)` and
-`observedGeneration == generation`, where `f` is the inner implementation's
-function.
+*Reading the premises.* `outer_stable` says three things an operator would
+recognize: the user has stopped editing the outer copy (spec, hence
+generation, constant; not being deleted; same object, not a recreated one),
+and whoever was fat-fingering the mirror's spec in the inner cluster has
+stopped. The premise is about the *future* from some point on, which is what
+`□ ... ~>` means: convergence is promised after the disturbances stop, not
+during them. During them the reconciler still behaves (guarantee, G-gen,
+"never copy a status for a spec we did not ask for"), it just cannot be
+promised to *finish*. `inner_settled` fixes the inner implementation's
+answer instead of assuming the inner implementation is live; that is the
+reason R2 needs no D1.
+
+*Reading the targets.* R1's target includes "is a mirror of `outer`", which
+carries the *current* outer uid, so a stale mirror from a recreated outer copy
+does not count; and "not terminating", so a mirror the janitor has marked for
+deletion does not count either. R2's target is exactly what kstatus-style
+tooling reads. R3's target is that the specific object is gone; uids are
+never reused, so nothing can bring it back. Whether another mirror with the
+same parent uid appears later depends on who creates mirrors, and R1's proof
+handles that for the parent uids it cares about (reconciles triggered by an
+old copy of the outer object drain in finite time).
 
 **Assumptions**, all standard for Anvil and restated for two clusters:
 
@@ -758,16 +874,19 @@ function.
    eventually stop, and both clusters' API servers eventually stop failing
    requests.
 3. Both model kinds installed (the CRD applied in both clusters); both
-   controller models registered.
-4. The rely condition of 3.3 for every other controller id.
-5. D1 and D3 for the inner implementation (axioms in v1).
+   controller models registered under distinct ids.
+4. The rely conditions of 3.3 for every other controller id (and, for the
+   sync reconciler, that the controller at the janitor id is the janitor).
+5. D3 for the inner implementation (an axiom in this version). Nothing else
+   about the inner implementation: it may be down, slow, or wrong, and R1
+   and R3 still hold; R2 holds for whatever status it settles on.
 6. The generation semantics of 4.1 hold for both real API servers (they do
    for CRDs with the status subresource).
 7. Exec hygiene: our controllers never read rv or uid values (3.2,
    obligation 1).
 8. Out of model, operational: the inner namespace exists; CRD schema parity;
-   the CRD is installed in the outer cluster whenever its API server answers; one
-   active replica; no mutating admission on `Inner` spec.
+   the CRD is installed in the outer cluster whenever its API server answers;
+   one active replica; no mutating admission on `Inner` spec.
 
 ## 6. What the model does and does not cover
 
@@ -784,9 +903,10 @@ Stated so that a reader does not over-read the theorem.
 | Inner controller writing status, timestamps or heartbeat annotations on every reconcile | yes | spec patch tests generation, not rv, so such writes cannot starve it |
 | Two outer clusters feeding one inner cluster | no (assumed away) | a parent-cluster identity is a deferred feature; until then exactly one outer cluster per inner cluster |
 | Inner implementation changing status on its own | yes | other controller under rely |
-| Inner implementation adding labels/annotations | yes | metadata-only `Update` allowed by rely |
+| Inner implementation adding labels/annotations | yes | identity-preserving `Update` allowed by rely |
+| Mistaken (fat-finger) edit of a mirror's spec in the inner cluster; the inner controller reconciles it before we overwrite it | yes | the rely permits the edit; the reconciler overwrites it and never copies a status whose `observedGeneration` is not the mirror's current generation; R1/R2 promise convergence once such edits stop (`mirror_spec_undisturbed`) |
 | Inner implementation adding finalizers to `Inner` | yes | rely allows it; R3 (and R1 via D2) depend on D3, "the inner side releases finalizers on terminating objects" |
-| User deletes or edits `Inner` out of band; inner cluster rebuilt | no | controller recovers in exec (NotFound → Create; uid mismatch → janitor); modeling it needs an "inner monkey" step in `src/kubernetes_cluster/`, priced like `pod_monkey` |
+| User deletes `Inner` out of band; inner cluster rebuilt | no | controller recovers in exec (NotFound → Create; uid mismatch → janitor); modeling it needs an "inner monkey" step in `src/kubernetes_cluster/`, priced like `pod_monkey` (spec edits are covered by the row above) |
 | Inner namespace deleted | no | R1 false in reality while it persists; operational assumption |
 | Outer deleted and recreated with new uid while old mirror exists | yes | janitor removes stale mirror (D2), sync recreates |
 | Pre-existing foreign `Inner{ns,name}` (routine when both clusters share the kind) | vacuous in model (only our controllers create objects of the inner model kind) | exec refuses to adopt; observable only via logs and a lagging `observedGeneration` in v1 |
@@ -848,25 +968,62 @@ Scripts under `tools/`, manifests under `deploy/outer_sync/`, mirroring
 5. CI job alongside the existing e2e jobs; two single-node clusters fit on a
    standard runner.
 
-## 8. Effort and phasing (rough)
+## 8. What exists, and what it cost
 
-| Phase | Work | Estimate |
+Everything in the plan's phases 0 through 4 is done and verified on this
+branch; phase 5 is done for the pair and not for the union with the existing
+controllers.
+
+| Piece | Where | Size / status |
 |---|---|---|
-| 0 | `metadata.generation` in view, API server model, executable model, exec getter; re-verify all controllers | 1–2 weeks |
-| 1 | Cluster-tagged `ApiResource`/`DynamicObject`/CR wrappers; shim routing by tag, explicit-client entry point, dual-controller runner; CRD, views, both exec reconcilers; manifests | ~1.5 weeks |
-| 2 | Two-cluster testbed, echo controller, e2e tests, CI job | ~1 week |
-| 3 | Model reconcilers, install, trusted spec (R1–R3, G-gen, rely/guarantee, D1, D2) | ~1 week |
-| 4 | Liveness proofs: sync R1 (new lemma family for conflict-under-dependency, stale-snapshot status write), R2, janitor R3 (absence premise, no precedent) | 4–8 weeks |
-| 5 | Guarantee proofs, `ControllerSpec`s, `compose_dep` (sync on janitor) and composition with the four existing controllers | 1–2 weeks |
-| optional | Owner-less transactional update (4.3); inner-monkey model step; readiness conditions on `Outer` | 1–3 weeks |
+| `metadata.generation`, Patch primitive, cluster-tagged wrappers, shim routing | `kubernetes_api_objects/`, `kubernetes_cluster/`, `shim_layer/` | verified; all existing controllers re-verified |
+| Model reconcilers (sync, janitor), install | `widget_sync_controller/model/` | ~400 lines |
+| Exec reconcilers, binaries, echo controller | `widget_sync_controller/exec/`, `src/bin/` | ~500 lines; exec-model conformance verified |
+| Trusted spec: types, rely/guarantee, R1/R2/R3, D3 | `widget_sync_controller/trusted/` | ~1000 lines (the TCB of the example) |
+| Safety: guarantees, bound parent uids, janitor decision soundness, sync request invariants | `proof/guarantee.rs`, `helper_invariants.rs`, `janitor_invariants.rs`, `sync_invariants.rs` | ~2300 lines |
+| Termination of both reconcilers | `proof/liveness/terminate.rs` | ~350 lines |
+| R3 (janitor liveness) | `proof/liveness/janitor_proof.rs` | ~2000 lines, 29 lemmas |
+| R1 (forward sync) | `proof/liveness/sync_proof.rs` | ~2900 lines, 33 lemmas |
+| R2 (status mirroring) | `proof/liveness/sync_status_proof.rs` | ~1550 lines, 24 lemmas |
+| Welder specs, pair composition, concrete two-controller cluster | `composition/widget_janitor_reconciler.rs`, `widget_sync_reconciler.rs` | ~460 lines |
+| Testbed, manifests, e2e | `tools/two-cluster-test.sh`, `deploy/widget_sync/`, `e2e/src/widget_sync_e2e.rs` | runs on two kind clusters |
 
 For calibration, the existing `proof/` directories are 8.7k lines
-(VReplicaSet), 11.7k (VDeployment), 13.8k (VStatefulSet) and 9k (RabbitMQ).
-Both our reconcilers are smaller than any of those, but three ingredients
-have no precedent: plain `Update`/`UpdateStatus` with resource versions (all
-existing controllers use `GetThenUpdate*`), a leads-to that threads a
-liveness dependency through a conflict loop, and a deletion-side liveness
-property. Phase 4 dominates and is the least certain number.
+(VReplicaSet), 11.7k (VDeployment), 13.8k (VStatefulSet) and 9k (RabbitMQ);
+the Widget pair is about 9k for two reconcilers and three properties. The
+three ingredients without precedent each turned out to have a workable
+shape:
+
+- *A liveness dependency threaded through a conflict loop* (R1 needing the
+  janitor to remove a stale mirror first). Handled by proving, as a message
+  invariant, that a janitor `Delete` in flight targets an object whose
+  parent is absent forever, so the janitor's deletes can never race the
+  sync reconciler's creates for a live parent; R3 is then consumed as a
+  black box per object.
+- *A liveness property with an absence premise* (R3). The same WF1 mechanics
+  as every other Anvil proof, with `schedule_controller_reconcile` enabled
+  by the mirror's existence rather than the parent's; the novelty was the
+  phase structure (drops and crashes off, then per-object facts about the
+  scheduled snapshot and the janitor's `List` responses being fresh).
+- *A status target pinned to the generation* (R2). Once the premise fixes
+  the generation and the status patch tests it, the proof is a chain of
+  "every snapshot, response and in-flight status write for this key is
+  current" invariants followed by one reconcile.
+
+Not done, and known:
+
+- **Composition with the four existing controllers** (`compose_all.rs`).
+  Needs eight cross implications (each Widget guarantee against each of
+  `vrs_rely`, `vd_rely`, `vsts_rely`, `rmq_rely`, and each of the four
+  guarantees against the two Widget relies). All should follow from kind
+  disjointness, but the VRS/VSTS precedent shows some need hand-written
+  string lemmas. Estimated one to two days.
+- **D3 discharged by a verified inner implementation** rather than assumed.
+  Needs an inner controller that writes status without an owner reference,
+  which the Patch primitive now permits.
+- **The full-repository `cargo verus verify --lib` time** grows with the new
+  modules; staged per-module verification is what the branch was developed
+  with.
 
 ## 9. Decisions and follow-ups
 
@@ -887,6 +1044,19 @@ Decided:
   (revision 4).
 - **Naming.** Kind `Widget` in group `anvil.dev`; inner model kind
   `widget@inner`; `ClusterId { Primary, Remote }`.
+- **Fat-finger edits of a mirror's spec are tolerated, not forbidden**
+  (revision 5). The rely leaves the spec free; the reconciler overwrites and
+  never copies a status for a generation it did not ask for; R1/R2 hold
+  once the edits stop.
+- **The R1/R2 premise fixes the outer generation** along with the spec
+  (revision 5); that is the same premise stated precisely, and what pins
+  `observedGeneration` in R2's target.
+- **Mirrored fields are copied only from a caught-up inner status**
+  (revision 5); otherwise the last reported fields are kept with
+  `Synced=False/InnerConverging`.
+- **D1 is not an assumption** (revision 5); R2's premise fixes the inner
+  status. D3 is the only inner-side liveness assumption.
+- **The PATCH response's status is not used** (revision 5, 4.1c).
 
 Deferred features:
 

@@ -25,15 +25,25 @@ pub open spec fn widget_spec_eventually_synced_per_cr(outer: OuterWidgetView) ->
     always(lift_state(outer_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))
 }
 
-// The premise of R1 and R2: the outer copy has the spec `outer.spec` (and its uid,
-// and is not being deleted), and nobody is writing anything but that spec to the
-// mirror any more. The second half tolerates mistaken (fat-finger) edits of the
-// mirror's spec: the sync reconciler overwrites them, and convergence is promised
-// for the time after they stop, exactly as it is promised for the time after the
-// outer copy stops changing.
+// The premise of R1 and R2: the outer copy has the spec `outer.spec` at the
+// generation `outer.metadata.generation` (and its uid, and is not being deleted),
+// and nobody is writing anything but that spec to the mirror any more.
+//
+// Fixing the generation along with the spec is the same premise stated precisely:
+// the API server moves the generation exactly when the spec changes (or a deletion
+// is stamped, which desired_state_is excludes), so "the spec stopped changing" is
+// "spec and generation stopped changing". The status the sync reconciler writes is
+// pinned to that generation (observedGeneration and the Synced condition), which is
+// how observers of the outer copy tell a fresh status from a stale one.
+//
+// The second half tolerates mistaken (fat-finger) edits of the mirror's spec: the
+// sync reconciler overwrites them, and convergence is promised for the time after
+// they stop, exactly as it is promised for the time after the outer copy stops
+// changing.
 pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& Cluster::desired_state_is(outer)(s)
+        &&& s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
         &&& mirror_spec_undisturbed(outer)(s)
     }
 }
