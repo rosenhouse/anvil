@@ -100,7 +100,7 @@ pub open spec fn janitor_triggering_crs_are_sound(controller_id: int) -> StatePr
 }
 
 // Soundness of a snapshot carries over an API server step.
-proof fn lemma_snapshot_soundness_preserved_by_api_server_step(
+pub proof fn lemma_snapshot_soundness_preserved_by_api_server_step(
     cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, cr: DynamicObjectView, key: ObjectRef
 )
     requires
