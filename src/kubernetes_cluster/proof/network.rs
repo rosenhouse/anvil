@@ -393,6 +393,7 @@ pub open spec fn every_in_flight_msg_has_no_replicas_and_has_unique_id() -> Stat
     }
 }
 
+#[verifier(rlimit(50))]
 pub proof fn lemma_always_every_in_flight_msg_has_no_replicas_and_has_unique_id(self, spec: TempPred<ClusterState>)
     requires
         spec.entails(lift_state(self.init())),
