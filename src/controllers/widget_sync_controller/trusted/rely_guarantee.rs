@@ -85,8 +85,16 @@ pub open spec fn preserves_mirror_identity(old_meta: ObjectMetaView, new_meta: O
 
 // An update of a mirror by another controller carries a resource version, and if
 // it is going to land (the resource version matches the store) it changes neither
-// the spec nor the owner references and keeps the mirror's identity. Stale
-// updates, which the API server rejects, are unconstrained.
+// the owner references nor the mirror's identity. Stale updates, which the API
+// server rejects, are unconstrained.
+//
+// The spec is deliberately left free: a mistaken (fat-finger) edit of a mirror's
+// spec is something the sync reconciler must tolerate. It overwrites such an edit
+// (the mirror's spec is compared with the outer copy's on every reconcile), and it
+// never copies status fields the inner side computed for it (fields are copied only
+// when the inner status observes the mirror's current generation). Convergence
+// (R1, R2) is then stated for the time after such edits stop, see
+// mirror_spec_undisturbed in liveness_theorem.rs.
 pub open spec fn mirror_update_req(req: UpdateRequest) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let etcd_obj = s.resources()[req.key()];
@@ -94,7 +102,6 @@ pub open spec fn mirror_update_req(req: UpdateRequest) -> StatePred<ClusterState
             &&& req.obj.metadata.resource_version is Some
             &&& (s.resources().contains_key(req.key())
                 && etcd_obj.metadata.resource_version == req.obj.metadata.resource_version) ==> {
-                &&& req.obj.spec == etcd_obj.spec
                 &&& req.obj.metadata.owner_references == etcd_obj.metadata.owner_references
                 &&& preserves_mirror_identity(etcd_obj.metadata, req.obj.metadata)
             }
@@ -110,7 +117,6 @@ pub open spec fn mirror_get_then_update_req(req: GetThenUpdateRequest) -> StateP
         let etcd_obj = s.resources()[req.key()];
         req.obj.kind == InnerWidgetView::kind() ==> {
             s.resources().contains_key(req.key()) ==> {
-                &&& req.obj.spec == etcd_obj.spec
                 &&& req.obj.metadata.owner_references == etcd_obj.metadata.owner_references
                 &&& preserves_mirror_identity(etcd_obj.metadata, req.obj.metadata)
             }
@@ -130,9 +136,10 @@ pub open spec fn widget_sync_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::CreateRequest(req) => req.obj.kind != InnerWidgetView::kind(),
             APIRequest::UpdateRequest(req) => mirror_update_req(req)(s),
             APIRequest::GetThenUpdateRequest(req) => mirror_get_then_update_req(req)(s),
-            // Nobody else patches the spec of a mirror. (Status patches are free:
-            // that is how the inner implementation is expected to report.)
-            APIRequest::PatchRequest(req) => req.kind != InnerWidgetView::kind(),
+            // Patches of a mirror's spec are tolerated (fat-finger edits, see
+            // mirror_update_req); a patch never changes identity. Status patches are
+            // how the inner implementation is expected to report.
+            APIRequest::PatchRequest(_) => true,
             // Nobody else writes the status of an outer copy.
             APIRequest::UpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),
             APIRequest::GetThenUpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),

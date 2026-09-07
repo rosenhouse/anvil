@@ -108,6 +108,8 @@ pub open spec fn mirror_is_bound(key: ObjectRef) -> StatePred<ClusterState> {
         &&& has_mirror_identity(inner)
         &&& obj.metadata.owner_references is None
         &&& parent_uid_string_is_bound_to_key(parent_uid_annotation(inner), outer_key_of(key))(s)
+        // The annotation is the string form of some uid (the parent's).
+        &&& exists |p: Uid| parent_uid_annotation(inner) == #[trigger] int_to_string_view(p)
     }
 }
 
@@ -449,6 +451,8 @@ proof fn lemma_mirror_is_bound_preserved_by_other_requests(cluster: Cluster, s: 
     let new_inner = InnerWidgetView::unmarshal(new_obj)->Ok_0;
     assert(has_mirror_identity(new_inner));
     assert(parent_uid_annotation(new_inner) == parent_uid_annotation(old_inner));
+    let p = choose |p: Uid| parent_uid_annotation(old_inner) == #[trigger] int_to_string_view(p);
+    assert(parent_uid_annotation(new_inner) == int_to_string_view(p));
     lemma_string_bound_preserved(parent_uid_annotation(old_inner), outer_key_of(key), s, s_prime);
 }
 

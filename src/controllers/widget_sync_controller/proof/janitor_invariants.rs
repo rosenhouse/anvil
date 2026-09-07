@@ -656,4 +656,250 @@ proof fn lemma_janitor_decision_soundness_preserved_by_controller_step(
     }
 }
 
+
+// ---------------------------------------------------------------------------
+// The janitor's Deletes in flight are sound. This is the fact the sync
+// reconciler's proof needs about the janitor: a Delete lands only on an object
+// (identified by the uid it tests) whose parent is absent for good, so it never
+// lands on the mirror of an existing outer copy.
+// ---------------------------------------------------------------------------
+
+pub open spec fn janitor_delete_is_sound(msg: Message, s: ClusterState) -> bool {
+    let req = msg.content.get_delete_request();
+    let obj = s.resources()[req.key];
+    &&& req.preconditions is Some
+    &&& req.preconditions->0.uid is Some
+    &&& req.preconditions->0.uid->0 < s.api_server.uid_counter
+    &&& (s.resources().contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
+        ==> parent_absent_forever(snapshot_parent(obj))(s)
+}
+
+pub open spec fn janitor_deletes_are_sound(controller_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |msg: Message| {
+            &&& #[trigger] s.in_flight().contains(msg)
+            &&& msg.src.is_controller_id(controller_id)
+            &&& msg.content is APIRequest
+            &&& msg.content.is_delete_request()
+        } ==> janitor_delete_is_sound(msg, s)
+    }
+}
+
+#[verifier(rlimit(400))]
+#[verifier(spinoff_prover)]
+pub proof fn lemma_always_janitor_deletes_are_sound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
+    requires
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        spec.entails(always(lift_state(every_mirror_is_bound()))),
+        spec.entails(always(lift_state(every_in_flight_inner_update_preserves_identity()))),
+        spec.entails(always(lift_state(widget_janitor_guarantee(controller_id)))),
+    ensures spec.entails(always(lift_state(janitor_deletes_are_sound(controller_id)))),
+{
+    let inv = janitor_deletes_are_sound(controller_id);
+    cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
+    cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
+    cluster.lemma_always_each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>(spec);
+    cluster.lemma_always_cr_states_are_unmarshallable::<WidgetJanitorReconciler, WidgetJanitorReconcileState, InnerWidgetView, VoidEReqView, VoidERespView>(spec, controller_id);
+    lemma_always_janitor_crs_are_sound(spec, cluster, controller_id);
+    lemma_always_janitor_decisions_are_sound(spec, cluster, controller_id);
+    let stronger_next = |s: ClusterState, s_prime: ClusterState| {
+        &&& cluster.next()(s, s_prime)
+        &&& Cluster::there_is_the_controller_state(controller_id)(s)
+        &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
+        &&& cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()(s)
+        &&& every_mirror_is_bound()(s)
+        &&& every_in_flight_inner_update_preserves_identity()(s)
+        &&& widget_janitor_guarantee(controller_id)(s)
+        &&& Cluster::cr_states_are_unmarshallable::<WidgetJanitorReconcileState, InnerWidgetView>(controller_id)(s)
+        &&& janitor_triggering_crs_are_sound(controller_id)(s)
+        &&& janitor_decisions_are_sound(controller_id)(s)
+    };
+    combine_spec_entails_always_n!(
+        spec, lift_action(stronger_next),
+        lift_action(cluster.next()),
+        lift_state(Cluster::there_is_the_controller_state(controller_id)),
+        lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
+        lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()),
+        lift_state(every_mirror_is_bound()),
+        lift_state(every_in_flight_inner_update_preserves_identity()),
+        lift_state(widget_janitor_guarantee(controller_id)),
+        lift_state(Cluster::cr_states_are_unmarshallable::<WidgetJanitorReconcileState, InnerWidgetView>(controller_id)),
+        lift_state(janitor_triggering_crs_are_sound(controller_id)),
+        lift_state(janitor_decisions_are_sound(controller_id))
+    );
+    assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
+        assert forall |msg: Message| {
+            &&& #[trigger] s_prime.in_flight().contains(msg)
+            &&& msg.src.is_controller_id(controller_id)
+            &&& msg.content is APIRequest
+            &&& msg.content.is_delete_request()
+        } implies janitor_delete_is_sound(msg, s_prime) by {
+            let step = choose |step| cluster.next_step(s, s_prime, step);
+            match step {
+                Step::APIServerStep(input) => {
+                    let handled = input->0;
+                    // The API server only adds a response, so the Delete was already in flight.
+                    assert(s.in_flight().contains(msg));
+                    assert(janitor_delete_is_sound(msg, s));
+                    lemma_janitor_delete_soundness_preserved_by_api_server_step(cluster, controller_id, s, s_prime, handled, msg);
+                },
+                Step::ControllerStep(input) => {
+                    assert(s_prime.api_server == s.api_server);
+                    if s.in_flight().contains(msg) {
+                        assert(janitor_delete_is_sound(msg, s));
+                    } else {
+                        lemma_new_janitor_delete_is_sound(cluster, controller_id, s, s_prime, input, msg);
+                    }
+                },
+                _ => {
+                    // No other step sends a request on behalf of the janitor, and none changes the store.
+                    assert(s_prime.api_server == s.api_server);
+                    assert(s.in_flight().contains(msg));
+                    assert(janitor_delete_is_sound(msg, s));
+                },
+            }
+        }
+    }
+    init_invariant(spec, cluster.init(), stronger_next, inv);
+}
+
+#[verifier(rlimit(400))]
+#[verifier(spinoff_prover)]
+proof fn lemma_janitor_delete_soundness_preserved_by_api_server_step(
+    cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState, handled: Message, msg: Message
+)
+    requires
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(handled))),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
+        cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()(s),
+        every_mirror_is_bound()(s),
+        every_in_flight_inner_update_preserves_identity()(s),
+        widget_janitor_guarantee(controller_id)(s),
+        s.in_flight().contains(msg),
+        msg.src.is_controller_id(controller_id),
+        msg.content is APIRequest,
+        msg.content.is_delete_request(),
+        janitor_delete_is_sound(msg, s),
+    ensures janitor_delete_is_sound(msg, s_prime),
+{
+    lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, handled);
+    let req = msg.content.get_delete_request();
+    let m = req.preconditions->0.uid->0;
+    assert(req.key.kind == InnerWidgetView::kind());
+    if s_prime.resources().contains_key(req.key)
+        && s_prime.resources()[req.key].metadata.uid == Some(m)
+        && snapshot_is_mirror(s_prime.resources()[req.key])
+    {
+        // The object was there at s with the same uid: a fresh uid is above m.
+        assert(s.resources().contains_key(req.key) && s.resources()[req.key].metadata.uid == Some(m)) by {
+            if !(s.resources().contains_key(req.key) && s_prime.resources()[req.key].metadata.uid == s.resources()[req.key].metadata.uid) {
+                assert(s_prime.resources()[req.key].metadata.uid == Some(s.api_server.uid_counter));
+                assert(false);
+            }
+        }
+        let cr = s.resources()[req.key];
+        lemma_well_formed_inner_unmarshals(cluster, s, req.key);
+        assert(mirror_is_bound(req.key)(s));
+        assert(snapshot_is_mirror(cr));
+        assert(Cluster::etcd_object_is_weakly_well_formed(req.key)(s));
+        assert(janitor_snapshot_is_sound(cr, req.key)(s));
+        lemma_snapshot_soundness_preserved_by_api_server_step(cluster, s, s_prime, handled, cr, req.key);
+        let new_obj = s_prime.resources()[req.key];
+        assert(preserves_mirror_identity(cr.metadata, new_obj.metadata));
+        assert(snapshot_parent(new_obj) == snapshot_parent(cr));
+        assert(parent_absent_forever(snapshot_parent(cr))(s));
+        lemma_parent_absent_forever_is_stable(snapshot_parent(cr), s, s_prime);
+    }
+}
+
+// A Delete the janitor just sent: it comes from AfterListOuter, after a List that
+// answered without the parent.
+#[verifier(rlimit(400))]
+#[verifier(spinoff_prover)]
+proof fn lemma_new_janitor_delete_is_sound(
+    cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
+    input: (int, Option<Message>, Option<ObjectRef>), msg: Message
+)
+    requires
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        cluster.next_step(s, s_prime, Step::ControllerStep(input)),
+        Cluster::there_is_the_controller_state(controller_id)(s),
+        Cluster::cr_states_are_unmarshallable::<WidgetJanitorReconcileState, InnerWidgetView>(controller_id)(s),
+        janitor_triggering_crs_are_sound(controller_id)(s),
+        janitor_decisions_are_sound(controller_id)(s),
+        s_prime.in_flight().contains(msg),
+        !s.in_flight().contains(msg),
+        msg.src.is_controller_id(controller_id),
+        msg.content is APIRequest,
+        msg.content.is_delete_request(),
+    ensures janitor_delete_is_sound(msg, s_prime),
+{
+    InnerWidgetView::marshal_preserves_integrity();
+    WidgetJanitorReconcileState::marshal_preserves_integrity();
+    assert(s_prime.api_server == s.api_server);
+    let (id, resp_msg_opt, cr_key_opt) = input;
+    // The new message is the request sent by the reconcile that stepped.
+    assert(id == controller_id);
+    assert(cr_key_opt is Some);
+    let key = cr_key_opt->0;
+    assert(msg.src == HostId::Controller(controller_id, key));
+    assert(s.ongoing_reconciles(controller_id).contains_key(key));
+    let reconcile = s.ongoing_reconciles(controller_id)[key];
+    let reconcile_prime = s_prime.ongoing_reconciles(controller_id)[key];
+    assert(reconcile_prime.pending_req_msg == Some(msg));
+    assert(janitor_snapshot_is_sound(reconcile.triggering_cr, key)(s));
+    let inner = InnerWidgetView::unmarshal(reconcile.triggering_cr)->Ok_0;
+    assert(inner.metadata == reconcile.triggering_cr.metadata);
+    assert(inner.object_ref() == key);
+    let state = WidgetJanitorReconcileState::unmarshal(reconcile.local_state)->Ok_0;
+    let resp_o = if resp_msg_opt is Some {
+        if resp_msg_opt->0.content is APIResponse {
+            Some(ResponseView::<VoidERespView>::KResponse(resp_msg_opt->0.content->APIResponse_0))
+        } else {
+            Some(ResponseView::<VoidERespView>::ExternalResponse(VoidERespView::unmarshal(resp_msg_opt->0.content->ExternalResponse_0)->Ok_0))
+        }
+    } else {
+        None
+    };
+    let (state_prime, req_o) = reconcile_core(inner, resp_o, state);
+    assert(req_o is Some);
+    let parent = snapshot_parent(reconcile.triggering_cr);
+    match state.reconcile_step {
+        WidgetJanitorStepView::Init => {
+            // Sends a List, not a Delete.
+            assert(false);
+        },
+        WidgetJanitorStepView::AfterListOuter => {
+            assert(janitor_reconcile_is_sound(controller_id, key)(s));
+            assert(snapshot_is_mirror(reconcile.triggering_cr));
+            assert(state_prime.reconcile_step is AfterDeleteInner);
+            let resp_msg = resp_msg_opt->0;
+            assert(s.in_flight().contains(resp_msg));
+            assert(resp_msg_matches_req_msg(resp_msg, reconcile.pending_req_msg->0));
+            assert(resp_msg.content.get_list_response().res is Ok);
+            let objs = resp_msg.content.get_list_response().res->Ok_0;
+            assert(!parent_listed(objs, parent_uid_annotation(inner)));
+            assert(parent_uid_annotation(inner) == parent);
+            assert(parent_absent_forever(parent)(s));
+            let req = msg.content.get_delete_request();
+            assert(req.key == key);
+            assert(req.preconditions == Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)));
+            assert(req.preconditions->0.uid == inner.metadata.uid);
+            assert(inner.metadata.uid is Some);
+            assert(inner.metadata.uid->0 < s.api_server.uid_counter);
+            if s.resources().contains_key(key) && s.resources()[key].metadata.uid == inner.metadata.uid && snapshot_is_mirror(s.resources()[key]) {
+                assert(preserves_mirror_identity(reconcile.triggering_cr.metadata, s.resources()[key].metadata));
+                assert(snapshot_parent(s.resources()[key]) == parent);
+            }
+        },
+        _ => {
+            assert(false);
+        },
+    }
+}
+
 }
