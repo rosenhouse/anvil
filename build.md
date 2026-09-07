@@ -33,20 +33,20 @@ Run `./tools/setup-verus.sh` to fetch, build, and wire up a local Verus binary.
 
 ## Build and verify
 
-Most verification targets are library modules (under `src/controllers/`, `src/kubernetes_cluster/`, etc.), so combine `--lib` with `--verify-only-module <mod>` to narrow scope:
+Most verification targets are library modules (under `src/controllers/`, `src/kubernetes_cluster/`, etc.), so combine `--lib` with `--verify-only-module <mod>` to narrow scope. Current `cargo verus` rejects partial-verification flags under `verify`; use `focus` for them:
 
 ```sh
 # Verify the entire Anvil framework + every controller and proof:
 cargo verus verify --lib
 
 # Verify a single controller, scoped to its module:
-cargo verus verify --lib -- --verify-only-module vreplicaset_controller
+cargo verus focus --lib -- --verify-only-module vreplicaset_controller
 
 # Verify the composition proofs:
-cargo verus verify --lib -- --verify-only-module composition
+cargo verus focus --lib -- --verify-only-module composition
 
 # Verify the TLA demo (proof code lives in src/tla_demo.rs):
-cargo verus verify --lib -- --verify-only-module tla_demo
+cargo verus focus --lib -- --verify-only-module tla_demo
 ```
 
 Pass extra Verus flags after `--`. Replace `--lib` with `--bin <name>` to verify a specific binary's own source.
