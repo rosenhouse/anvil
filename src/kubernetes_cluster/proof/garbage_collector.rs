@@ -261,6 +261,17 @@ pub proof fn lemma_eventually_objects_owner_references_satisfies(
                 if resource_update_request_msg(key)(req) {} else {}
                 if resource_get_then_update_request_msg(key)(req) {} else {}
                 if resource_create_request_msg_without_name(key.kind, key.namespace)(req) {} else {}
+                // A patch keeps the stored metadata (and hence the owner references) as they are.
+                if resource_patch_request_msg(key)(req) {
+                    if s_prime.resources().contains_key(key) && s_prime.resources()[key] != s.resources()[key] {
+                        assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                    }
+                } else {}
+                if resource_patch_status_request_msg(key)(req) {
+                    if s_prime.resources().contains_key(key) && s_prime.resources()[key] != s.resources()[key] {
+                        assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                    }
+                } else {}
             },
             _ => {}
         }
@@ -520,6 +531,11 @@ pub proof fn lemma_eventually_objects_owner_references_satisfies_for_all(
                             if resource_create_request_msg_without_name(k.kind, k.namespace)(req) {}
                             if resource_update_request_msg(k)(req) {}
                             if resource_get_then_update_request_msg(k)(req) {}
+                            // A patch keeps the stored metadata (and hence the owner references) as they are.
+                            if resource_patch_request_msg(k)(req) || resource_patch_status_request_msg(k)(req) {
+                                assert(s.resources().contains_key(k));
+                                assert(s_prime.resources()[k].metadata.owner_references == s.resources()[k].metadata.owner_references);
+                            }
                         },
                         _ => {}
                     }

@@ -72,6 +72,8 @@ pub proof fn lemma_eventually_always_no_other_pending_request_interferes_with_vr
             APIRequest::DeleteRequest(req) => no_other_pending_delete_request_interferes_with_vrs_reconcile(req, vrs)(s),
             APIRequest::GetThenDeleteRequest(req) => no_other_pending_get_then_delete_request_interferes_with_vrs_reconcile(req, vrs)(s),
             APIRequest::GetThenUpdateStatusRequest(req) => no_other_pending_get_then_update_status_request_interferes_with_vrs_reconcile(req, vrs)(s),
+            APIRequest::PatchRequest(req) => no_other_pending_patch_request_interferes_with_vrs_reconcile(req, vrs),
+            APIRequest::PatchStatusRequest(req) => no_other_pending_patch_status_request_interferes_with_vrs_reconcile(req, vrs),
             _ => true,
         }
     };
@@ -690,6 +692,8 @@ pub proof fn lemma_eventually_always_no_pending_mutation_request_not_from_contro
             &&& msg.content.is_delete_request() ==> msg.content.get_delete_request().key.kind != PodView::kind()
             &&& msg.content.is_get_then_delete_request() ==> msg.content.get_get_then_delete_request().key.kind != PodView::kind()
             &&& msg.content.is_get_then_update_request() ==> msg.content.get_get_then_update_request().key().kind != PodView::kind()
+            &&& msg.content.is_patch_request() ==> msg.content.get_patch_request().key().kind != PodView::kind()
+            &&& msg.content.is_patch_status_request() ==> msg.content.get_patch_status_request().key().kind != PodView::kind()
         })
     };
 

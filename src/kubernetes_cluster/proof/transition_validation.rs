@@ -116,6 +116,14 @@ proof fn lemma_always_transition_rule_applies_to_etcd_and_scheduled_cr<T: Custom
                         } else if input->0.content.is_update_status_request() {
                             assert(T::unmarshal(input->0.content.get_update_status_request().obj) is Ok);
                             assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
+                        } else if input->0.content.is_patch_request() {
+                            // A patch is admitted as an update of the stored object with the new spec.
+                            assert(T::unmarshal(s.resources()[key].with_spec(input->0.content.get_patch_request().spec)) is Ok);
+                            assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
+                        } else if input->0.content.is_patch_status_request() {
+                            // A status patch is admitted as a status update of the stored object with the new status.
+                            assert(T::unmarshal(s.resources()[key].with_status(input->0.content.get_patch_status_request().status)) is Ok);
+                            assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
                         } else {
                             assert(input->0.content.is_get_then_update_status_request());
                             assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
@@ -203,6 +211,14 @@ proof fn lemma_always_triggering_cr_is_in_correct_order<T: CustomResourceView>(s
                             assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
                         } else if input->0.content.is_update_status_request() {
                             assert(T::unmarshal(input->0.content.get_update_status_request().obj) is Ok);
+                            assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
+                        } else if input->0.content.is_patch_request() {
+                            // A patch is admitted as an update of the stored object with the new spec.
+                            assert(T::unmarshal(s.resources()[key].with_spec(input->0.content.get_patch_request().spec)) is Ok);
+                            assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
+                        } else if input->0.content.is_patch_status_request() {
+                            // A status patch is admitted as a status update of the stored object with the new status.
+                            assert(T::unmarshal(s.resources()[key].with_status(input->0.content.get_patch_status_request().status)) is Ok);
                             assert(T::unmarshal(s_prime.resources()[key])->Ok_0.transition_validation(T::unmarshal(s.resources()[key])->Ok_0));
                         } else {
                             assert(input->0.content.is_get_then_update_status_request());
