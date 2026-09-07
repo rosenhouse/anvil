@@ -11,7 +11,6 @@ use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::{spec_types::*, step::*};
-pub use crate::widget_sync_controller::trusted::spec_types::{has_mirror_identity, parent_uid_annotation};
 use vstd::prelude::*;
 
 verus! {

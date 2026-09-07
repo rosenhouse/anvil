@@ -23,10 +23,10 @@ use crate::kubernetes_cluster::spec::{
 use crate::reconciler::spec::io::*;
 use crate::vstd_ext::{set_lib::*, string_view::*};
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler, sync_reconciler::*},
+    model::{install::*, sync_reconciler::*},
     proof::{
         guarantee::*, helper_invariants::*, janitor_invariants::*,
-        liveness::{janitor_proof::{entails_and_split, phase_i, lemma_true_leads_to_always_phase_i}, sync_proof::*, terminate},
+        liveness::{janitor_proof::*, sync_proof::*, terminate},
         predicate::*, sync_invariants::*,
     },
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},

@@ -6,6 +6,7 @@ use crate::reconciler::exec::{io::*, reconciler::*};
 use crate::reconciler::spec::io::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::model::janitor_reconciler as model;
+use crate::widget_sync_controller::trusted::spec_types;
 use crate::widget_sync_controller::trusted::{exec_types::*, spec_types::*, step::*};
 use vstd::prelude::*;
 use vstd::seq_lib::*;
@@ -145,9 +146,9 @@ pub fn reconcile_core(inner: &InnerWidget, resp_o: Option<Response<VoidEResp>>, 
     }
 }
 
-// Whether `inner` carries the label and annotation of a mirror. See model::has_mirror_identity.
+// Whether `inner` carries the label and annotation of a mirror. See spec_types::has_mirror_identity.
 pub fn has_mirror_identity(inner: &InnerWidget) -> (b: bool)
-    ensures b == model::has_mirror_identity(inner@),
+    ensures b == spec_types::has_mirror_identity(inner@),
 {
     let labels = inner.metadata().labels();
     let annotations = inner.metadata().annotations();
@@ -162,10 +163,10 @@ pub fn has_mirror_identity(inner: &InnerWidget) -> (b: bool)
         && annotations.unwrap().contains_key(&"anvil.dev/parent-uid".to_string())
 }
 
-// The parent-uid annotation of a mirror. See model::parent_uid_annotation.
+// The parent-uid annotation of a mirror. See spec_types::parent_uid_annotation.
 pub fn parent_uid_annotation(inner: &InnerWidget) -> (parent_uid: String)
-    requires model::has_mirror_identity(inner@),
-    ensures parent_uid@ == model::parent_uid_annotation(inner@),
+    requires spec_types::has_mirror_identity(inner@),
+    ensures parent_uid@ == spec_types::parent_uid_annotation(inner@),
 {
     inner.metadata().annotations().unwrap().get(&"anvil.dev/parent-uid".to_string()).unwrap()
 }
