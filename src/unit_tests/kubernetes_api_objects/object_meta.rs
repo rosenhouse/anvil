@@ -82,7 +82,7 @@ pub fn test_owner_references_only_contains() {
     let mut object_meta = ObjectMeta::default();
     assert_eq!(
         false,
-        object_meta.owner_references_only_contains(OwnerReference::from_kube(
+        object_meta.owner_references_only_contains(&OwnerReference::from_kube(
             k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference::default()
         ))
     );
@@ -96,7 +96,7 @@ pub fn test_owner_references_only_contains() {
     object_meta.set_owner_references(own_refs_gen());
     assert_eq!(
         true,
-        object_meta.owner_references_only_contains(OwnerReference::from_kube(
+        object_meta.owner_references_only_contains(&OwnerReference::from_kube(
             k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference::default()
         ))
     );
