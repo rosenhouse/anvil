@@ -213,6 +213,50 @@ macro_rules! is_some_k_get_then_update_status_resp {
 }
 
 #[macro_export]
+macro_rules! is_some_k_patch_resp {
+    ($r:expr) => {
+        $r.is_some() && $r.as_ref().unwrap().is_k_response()
+        && $r.as_ref().unwrap().as_k_response_ref().is_patch_response()
+    };
+}
+
+#[macro_export]
+macro_rules! is_some_k_patch_status_resp {
+    ($r:expr) => {
+        $r.is_some() && $r.as_ref().unwrap().is_k_response()
+        && $r.as_ref().unwrap().as_k_response_ref().is_patch_status_response()
+    };
+}
+
+#[macro_export]
+macro_rules! extract_some_k_patch_resp {
+    ($r:expr) => {
+        $r.unwrap().into_k_response().into_patch_response().res
+    };
+}
+
+#[macro_export]
+macro_rules! extract_some_k_patch_status_resp {
+    ($r:expr) => {
+        $r.unwrap().into_k_response().into_patch_status_response().res
+    };
+}
+
+#[macro_export]
+macro_rules! extract_some_k_patch_resp_as_ref {
+    ($r:expr) => {
+        $r.as_ref().unwrap().as_k_response_ref().as_patch_response_ref().res
+    };
+}
+
+#[macro_export]
+macro_rules! extract_some_k_patch_status_resp_as_ref {
+    ($r:expr) => {
+        $r.as_ref().unwrap().as_k_response_ref().as_patch_status_response_ref().res
+    };
+}
+
+#[macro_export]
 macro_rules! extract_some_k_get_resp {
     ($r:expr) => {
         $r.unwrap().into_k_response().into_get_response().res
@@ -348,5 +392,11 @@ pub use extract_some_k_delete_resp_as_ref;
 pub use extract_some_k_get_then_update_resp_as_ref;
 pub use extract_some_k_get_then_delete_resp_as_ref;
 pub use extract_some_k_get_then_update_status_resp_as_ref;
+pub use is_some_k_patch_resp;
+pub use is_some_k_patch_status_resp;
+pub use extract_some_k_patch_resp;
+pub use extract_some_k_patch_status_resp;
+pub use extract_some_k_patch_resp_as_ref;
+pub use extract_some_k_patch_status_resp_as_ref;
 
 }

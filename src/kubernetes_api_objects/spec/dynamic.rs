@@ -75,6 +75,20 @@ impl DynamicObjectView {
         }
     }
 
+    pub open spec fn with_spec(self, spec: Value) -> DynamicObjectView {
+        DynamicObjectView {
+            spec: spec,
+            ..self
+        }
+    }
+
+    pub open spec fn with_status(self, status: Value) -> DynamicObjectView {
+        DynamicObjectView {
+            status: status,
+            ..self
+        }
+    }
+
     pub open spec fn with_generation(self, generation: Option<Generation>) -> DynamicObjectView {
         DynamicObjectView {
             metadata: ObjectMetaView {

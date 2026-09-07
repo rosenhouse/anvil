@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: MIT
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::exec::{
-    api_resource::*, dynamic::*, owner_reference::*, preconditions::*, resource::*,
+    api_resource::*, dynamic::*, owner_reference::*, patch_tests::*, preconditions::*, resource::*,
 };
 use crate::kubernetes_api_objects::spec::{api_method::*, common::ObjectRef};
 use vstd::prelude::*;
@@ -32,6 +32,68 @@ pub enum KubeAPIRequest {
     GetThenDeleteRequest(KubeGetThenDeleteRequest),
     GetThenUpdateRequest(KubeGetThenUpdateRequest),
     GetThenUpdateStatusRequest(KubeGetThenUpdateStatusRequest),
+    PatchRequest(KubePatchRequest),
+    PatchStatusRequest(KubePatchStatusRequest),
+}
+
+// KubePatchRequest carries the tests and the object whose spec the JSON patch applies
+// (only obj's spec is used; see PatchRequest). name and namespace select the object.
+pub struct KubePatchRequest {
+    pub api_resource: ApiResource,
+    pub name: String,
+    pub namespace: String,
+    pub tests: PatchTests,
+    pub obj: DynamicObject,
+}
+
+impl KubePatchRequest {
+    #[verifier(external)]
+    pub fn key(&self) -> std::string::String {
+        format!("{}/{}/{}", self.api_resource.as_kube_ref().kind, self.namespace, self.name)
+    }
+}
+
+impl View for KubePatchRequest {
+    type V = PatchRequest;
+    open spec fn view(&self) -> PatchRequest {
+        PatchRequest {
+            namespace: self.namespace@,
+            name: self.name@,
+            kind: self.api_resource@.kind,
+            tests: self.tests@,
+            spec: self.obj@.spec,
+        }
+    }
+}
+
+// KubePatchStatusRequest carries the tests and the object whose status the JSON patch
+// applies to the status subresource (only obj's status is used; see PatchStatusRequest).
+pub struct KubePatchStatusRequest {
+    pub api_resource: ApiResource,
+    pub name: String,
+    pub namespace: String,
+    pub tests: PatchTests,
+    pub obj: DynamicObject,
+}
+
+impl KubePatchStatusRequest {
+    #[verifier(external)]
+    pub fn key(&self) -> std::string::String {
+        format!("{}/{}/{}", self.api_resource.as_kube_ref().kind, self.namespace, self.name)
+    }
+}
+
+impl View for KubePatchStatusRequest {
+    type V = PatchStatusRequest;
+    open spec fn view(&self) -> PatchStatusRequest {
+        PatchStatusRequest {
+            namespace: self.namespace@,
+            name: self.name@,
+            kind: self.api_resource@.kind,
+            tests: self.tests@,
+            status: self.obj@.status,
+        }
+    }
 }
 
 // KubeGetRequest has the name as the parameter of Api.get(), and namespace to instantiate an Api.
@@ -324,6 +386,8 @@ impl View for KubeAPIRequest {
             KubeAPIRequest::GetThenDeleteRequest(req) => APIRequest::GetThenDeleteRequest(req@),
             KubeAPIRequest::GetThenUpdateRequest(req) => APIRequest::GetThenUpdateRequest(req@),
             KubeAPIRequest::GetThenUpdateStatusRequest(req) => APIRequest::GetThenUpdateStatusRequest(req@),
+            KubeAPIRequest::PatchRequest(req) => APIRequest::PatchRequest(req@),
+            KubeAPIRequest::PatchStatusRequest(req) => APIRequest::PatchStatusRequest(req@),
         }
     }
 }
@@ -350,6 +414,38 @@ pub enum KubeAPIResponse {
     GetThenDeleteResponse(KubeGetThenDeleteResponse),
     GetThenUpdateResponse(KubeGetThenUpdateResponse),
     GetThenUpdateStatusResponse(KubeGetThenUpdateStatusResponse),
+    PatchResponse(KubePatchResponse),
+    PatchStatusResponse(KubePatchStatusResponse),
+}
+
+// KubePatchResponse has the object as stored after KubePatchRequest was applied.
+pub struct KubePatchResponse {
+    pub res: Result<DynamicObject, APIError>,
+}
+
+impl View for KubePatchResponse {
+    type V = PatchResponse;
+    open spec fn view(&self) -> PatchResponse {
+        match self.res {
+            Ok(o) => PatchResponse { res: Ok(o@) },
+            Err(e) => PatchResponse { res: Err(e) },
+        }
+    }
+}
+
+// KubePatchStatusResponse has the object as stored after KubePatchStatusRequest was applied.
+pub struct KubePatchStatusResponse {
+    pub res: Result<DynamicObject, APIError>,
+}
+
+impl View for KubePatchStatusResponse {
+    type V = PatchStatusResponse;
+    open spec fn view(&self) -> PatchStatusResponse {
+        match self.res {
+            Ok(o) => PatchStatusResponse { res: Ok(o@) },
+            Err(e) => PatchStatusResponse { res: Err(e) },
+        }
+    }
 }
 
 // KubeGetResponse has the object returned by KubeGetRequest.
@@ -509,6 +605,8 @@ impl View for KubeAPIResponse {
             KubeAPIResponse::GetThenDeleteResponse(resp) => APIResponse::GetThenDeleteResponse(resp@),
             KubeAPIResponse::GetThenUpdateResponse(resp) => APIResponse::GetThenUpdateResponse(resp@),
             KubeAPIResponse::GetThenUpdateStatusResponse(resp) => APIResponse::GetThenUpdateStatusResponse(resp@),
+            KubeAPIResponse::PatchResponse(resp) => APIResponse::PatchResponse(resp@),
+            KubeAPIResponse::PatchStatusResponse(resp) => APIResponse::PatchStatusResponse(resp@),
         }
     }
 }
@@ -606,6 +704,24 @@ declare_kube_api_response_helper_methods!(
     UpdateStatusResponse,
     KubeUpdateStatusResponse,
     arrow_UpdateStatusResponse_0
+);
+
+declare_kube_api_response_helper_methods!(
+    is_patch_response,
+    as_patch_response_ref,
+    into_patch_response,
+    PatchResponse,
+    KubePatchResponse,
+    arrow_PatchResponse_0
+);
+
+declare_kube_api_response_helper_methods!(
+    is_patch_status_response,
+    as_patch_status_response_ref,
+    into_patch_status_response,
+    PatchStatusResponse,
+    KubePatchStatusResponse,
+    arrow_PatchStatusResponse_0
 );
 
 declare_kube_api_response_helper_methods!(

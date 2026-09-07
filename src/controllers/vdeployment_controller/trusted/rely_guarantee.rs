@@ -130,9 +130,20 @@ pub open spec fn vd_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::UpdateStatusRequest(req) => vd_rely_update_status_req(req)(s),
             APIRequest::DeleteRequest(req) => vd_rely_delete_req(req)(s),
             APIRequest::GetThenDeleteRequest(req) => vd_rely_get_then_delete_req(req)(s),
+            APIRequest::PatchRequest(req) => vd_rely_patch_req(req),
+            APIRequest::PatchStatusRequest(req) => vd_rely_patch_status_req(req),
             _ => true,
         }
     }
+}
+
+// Other controllers don't patch VReplicaSets (spec or status) at all.
+pub open spec fn vd_rely_patch_req(req: PatchRequest) -> bool {
+    req.kind != VReplicaSetView::kind()
+}
+
+pub open spec fn vd_rely_patch_status_req(req: PatchStatusRequest) -> bool {
+    req.kind != VReplicaSetView::kind()
 }
 
 // VD Guarantee Condition

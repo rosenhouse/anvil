@@ -65,7 +65,8 @@ verus! {
 // The TODO list:
 // + Support more expressive list operation
 //
-// + Model Patch (if needed)
+// + Model Patch beyond the JSON-patch form in handle_patch_request (merge patch,
+//   server-side apply, managedFields) if needed
 //
 // + Model uniqueness of generated name using spec ensures (when supported)
 //
@@ -847,6 +848,70 @@ pub open spec fn handle_get_then_update_status_request_msg(installed_types: Inst
     }
 }
 
+// A patch is a JSON patch of `test` operations (see PatchTestsView) followed by an
+// `add` of /spec (or /status for the status subresource). The API server applies
+// it to the object as currently stored, in one etcd transaction, so it is modeled
+// as one step: the tests are checked against the stored object and, if they pass,
+// the stored object with the new spec (status) goes through exactly the same
+// admission and validity checks as an update carrying the right resourceVersion.
+// A failed `test` is reported by the API server as 422 Unprocessable Entity with
+// reason Invalid, which the shim maps to APIError::Invalid.
+//
+// Because the request carries no resourceVersion, a patch never fails with Conflict
+// merely because another writer touched fields it does not test: that is the
+// property a controller wants when it shares an object with other controllers.
+pub open spec fn handle_patch_request(installed_types: InstalledTypes, req: PatchRequest, s: APIServerState) -> (APIServerState, PatchResponse) {
+    if !s.resources.contains_key(req.key()) {
+        (s, PatchResponse{res: Err(APIError::ObjectNotFound)})
+    } else if !req.tests.pass(s.resources[req.key()]) {
+        (s, PatchResponse{res: Err(APIError::Invalid)})
+    } else {
+        let old_obj = s.resources[req.key()];
+        let update_req = UpdateRequest {
+            namespace: req.namespace,
+            name: req.name,
+            obj: old_obj.with_spec(req.spec),
+        };
+        let (s_prime, update_resp) = handle_update_request(installed_types, update_req, s);
+        (s_prime, PatchResponse{res: update_resp.res})
+    }
+}
+
+pub open spec fn handle_patch_status_request(installed_types: InstalledTypes, req: PatchStatusRequest, s: APIServerState) -> (APIServerState, PatchStatusResponse) {
+    if !s.resources.contains_key(req.key()) {
+        (s, PatchStatusResponse{res: Err(APIError::ObjectNotFound)})
+    } else if !req.tests.pass(s.resources[req.key()]) {
+        (s, PatchStatusResponse{res: Err(APIError::Invalid)})
+    } else {
+        let old_obj = s.resources[req.key()];
+        let update_status_req = UpdateStatusRequest {
+            namespace: req.namespace,
+            name: req.name,
+            obj: old_obj.with_status(req.status),
+        };
+        let (s_prime, update_status_resp) = handle_update_status_request(installed_types, update_status_req, s);
+        (s_prime, PatchStatusResponse{res: update_status_resp.res})
+    }
+}
+
+pub open spec fn handle_patch_request_msg(installed_types: InstalledTypes, msg: Message, s: APIServerState) -> (APIServerState, Message)
+    recommends
+        msg.content.is_patch_request(),
+{
+    let req = msg.content.get_patch_request();
+    let (s_prime, resp) = handle_patch_request(installed_types, req, s);
+    (s_prime, form_patch_resp_msg(msg, resp))
+}
+
+pub open spec fn handle_patch_status_request_msg(installed_types: InstalledTypes, msg: Message, s: APIServerState) -> (APIServerState, Message)
+    recommends
+        msg.content.is_patch_status_request(),
+{
+    let req = msg.content.get_patch_status_request();
+    let (s_prime, resp) = handle_patch_status_request(installed_types, req, s);
+    (s_prime, form_patch_status_resp_msg(msg, resp))
+}
+
 pub open spec fn transition_by_etcd(installed_types: InstalledTypes, msg: Message, s: APIServerState) -> (APIServerState, Message)
     recommends
         msg.content is APIRequest,
@@ -861,6 +926,8 @@ pub open spec fn transition_by_etcd(installed_types: InstalledTypes, msg: Messag
         APIRequest::GetThenDeleteRequest(_) => handle_get_then_delete_request_msg(msg, s),
         APIRequest::GetThenUpdateRequest(_) => handle_get_then_update_request_msg(installed_types, msg, s),
         APIRequest::GetThenUpdateStatusRequest(_) => handle_get_then_update_status_request_msg(installed_types, msg, s),
+        APIRequest::PatchRequest(_) => handle_patch_request_msg(installed_types, msg, s),
+        APIRequest::PatchStatusRequest(_) => handle_patch_status_request_msg(installed_types, msg, s),
     }
 }
 

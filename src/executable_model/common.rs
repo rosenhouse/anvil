@@ -136,19 +136,7 @@ impl DynamicObjectView {
         }
     }
 
-    pub open spec fn with_spec(self, spec: Value) -> DynamicObjectView {
-        DynamicObjectView {
-            spec: spec,
-            ..self
-        }
-    }
-
-    pub open spec fn with_status(self, status: Value) -> DynamicObjectView {
-        DynamicObjectView {
-            status: status,
-            ..self
-        }
-    }
+    // with_spec and with_status now live in kubernetes_api_objects::spec::dynamic.
 }
 
 impl DynamicObject {

@@ -162,9 +162,24 @@ pub open spec fn vrs_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::DeleteRequest(req) => vrs_rely_delete_req(req)(s),
             APIRequest::GetThenDeleteRequest(req) => vrs_rely_get_then_delete_req(req)(s),
             APIRequest::GetThenUpdateStatusRequest(req) => vrs_rely_get_then_update_status_req(req)(s), // treat get-then-update-status as update-status for rely
+            APIRequest::PatchRequest(req) => vrs_rely_patch_req(req),
+            APIRequest::PatchStatusRequest(req) => vrs_rely_patch_status_req(req),
             _ => true,
         }
     }
+}
+
+// Other controllers don't patch pods at all (stronger than the update clauses,
+// which permit rv-carrying updates of unowned pods; nothing composed with the
+// VReplicaSet controller patches pods).
+pub open spec fn vrs_rely_patch_req(req: PatchRequest) -> bool {
+    req.kind != Kind::PodKind
+}
+
+// Other controllers don't patch the status of pods or of VReplicaSets.
+pub open spec fn vrs_rely_patch_status_req(req: PatchStatusRequest) -> bool {
+    &&& req.kind != Kind::PodKind
+    &&& req.kind != VReplicaSetView::kind()
 }
 
 // VRS Guarantee Condition
