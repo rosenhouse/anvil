@@ -508,6 +508,90 @@ pub fn handle_update_status_request(req: &KubeUpdateStatusRequest, s: &mut ApiSe
     }
 }
 
+// A patch is checked against, and applied to, the object as stored: a failed
+// `test` is Invalid; otherwise the stored object with its spec replaced goes
+// through the update path, so the no-op rule, the rv bump and the generation
+// rule are the update path's.
+pub fn handle_patch_request(req: &KubePatchRequest, s: &mut ApiServerState) -> (ret: KubePatchResponse)
+    requires
+        // No integer overflow
+        old(s).resource_version_counter < i64::MAX,
+        // The old version is marshallable
+        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object(old(s)@.resources[req@.key()], Self::installed_types()),
+        // The old version passes state validation
+        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object(old(s)@.resources[req@.key()], Self::installed_types()),
+        // The old version has the right key (name, namespace, kind)
+        old(s)@.resources.contains_key(req@.key()) ==> old(s)@.resources[req@.key()].object_ref() == req@.key(),
+        // All the three preconditions above are proved by the invariant lemma_always_each_object_in_etcd_is_well_formed
+        req@.kind is CustomResourceKind ==> req@.kind == K::V::kind(),
+    ensures (final(s)@, ret@) == model::handle_patch_request(Self::installed_types(), req@, old(s)@)
+{
+    let req_key = KubeObjectRef {
+        kind: req.api_resource.kind(),
+        namespace: req.namespace.clone(),
+        name: req.name.clone(),
+    };
+    if !s.resources.contains_key(&req_key) {
+        KubePatchResponse{res: Err(APIError::ObjectNotFound)}
+    } else {
+        let old_obj = s.resources.get(&req_key).unwrap();
+        if !req.tests.pass(&old_obj) {
+            KubePatchResponse{res: Err(APIError::Invalid)}
+        } else {
+            let mut patched_obj = old_obj;
+            patched_obj.set_spec_from(&req.obj);
+            let update_req = KubeUpdateRequest {
+                api_resource: req.api_resource.clone(),
+                name: req.name.clone(),
+                namespace: req.namespace.clone(),
+                obj: patched_obj,
+            };
+            let update_resp = Self::handle_update_request(&update_req, s);
+            KubePatchResponse{res: update_resp.res}
+        }
+    }
+}
+
+pub fn handle_patch_status_request(req: &KubePatchStatusRequest, s: &mut ApiServerState) -> (ret: KubePatchStatusResponse)
+    requires
+        // No integer overflow
+        old(s).resource_version_counter < i64::MAX,
+        // The old version is marshallable
+        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object(old(s)@.resources[req@.key()], Self::installed_types()),
+        // The old version passes state validation
+        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object(old(s)@.resources[req@.key()], Self::installed_types()),
+        // The old version has the right key (name, namespace, kind)
+        old(s)@.resources.contains_key(req@.key()) ==> old(s)@.resources[req@.key()].object_ref() == req@.key(),
+        // All the three preconditions above are proved by the invariant lemma_always_each_object_in_etcd_is_well_formed
+        req@.kind is CustomResourceKind ==> req@.kind == K::V::kind(),
+    ensures (final(s)@, ret@) == model::handle_patch_status_request(Self::installed_types(), req@, old(s)@)
+{
+    let req_key = KubeObjectRef {
+        kind: req.api_resource.kind(),
+        namespace: req.namespace.clone(),
+        name: req.name.clone(),
+    };
+    if !s.resources.contains_key(&req_key) {
+        KubePatchStatusResponse{res: Err(APIError::ObjectNotFound)}
+    } else {
+        let old_obj = s.resources.get(&req_key).unwrap();
+        if !req.tests.pass(&old_obj) {
+            KubePatchStatusResponse{res: Err(APIError::Invalid)}
+        } else {
+            let mut patched_obj = old_obj;
+            patched_obj.set_status_from(&req.obj);
+            let update_status_req = KubeUpdateStatusRequest {
+                api_resource: req.api_resource.clone(),
+                name: req.name.clone(),
+                namespace: req.namespace.clone(),
+                obj: patched_obj,
+            };
+            let update_status_resp = Self::handle_update_status_request(&update_status_req, s);
+            KubePatchStatusResponse{res: update_status_resp.res}
+        }
+    }
+}
+
 }
 
 }
