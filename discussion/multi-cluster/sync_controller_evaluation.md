@@ -515,6 +515,28 @@ Scope:
   constructed with `generation: None`, so they are unaffected. Plus a full
   re-verification. (An earlier draft estimated 107 literal sites; that count
   was an artifact of line-based grep over multi-line `..self` helpers.)
+- **Status: done on this branch.** Re-verifying the existing controllers
+  surfaced three kinds of fallout, all mechanical, all now fixed:
+  1. *Proof-side replicas of the create literal* (six sites across
+     VReplicaSet, VDeployment and VStatefulSet) needed the new field so they
+     stay syntactically identical to the model's created object.
+  2. *Identity-modulo-server-churn comparisons* in VDeployment and RabbitMQ
+     used `metadata.without_resource_version()`. Both controllers update a
+     custom resource (VReplicaSet, VStatefulSet) whose spec change now also
+     bumps generation, so those comparisons became false after an update.
+     They now use `without_resource_version_and_generation()`. This is the
+     same lesson the sync controller must apply: the identity of an object
+     across its own updates excludes every server-owned counter.
+  3. *Solver budgets*: four large lemmas crossed the default rlimit with the
+     slightly larger metadata term and needed an explicit `rlimit`; one
+     framework lemma (at-most-one-controller-owner) was restructured with a
+     per-key case split instead.
+  The well-formedness invariant `etcd_object_is_well_formed` now also
+  records that custom resources always carry a generation and built-in
+  kinds never do; RabbitMQ's no-op ConfigMap update needed exactly that
+  fact. Staged verification of `kubernetes_cluster` and all four controllers
+  plus `composition` passes; the full `cargo verus verify --lib` result is
+  recorded in the commit that follows.
 
 ### 4.2 Required: cluster-tagged wrappers and shim layer
 
