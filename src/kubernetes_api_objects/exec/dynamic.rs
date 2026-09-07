@@ -1,6 +1,6 @@
 // Copyright 2022 VMware, Inc.
 // SPDX-License-Identifier: MIT
-use crate::kubernetes_api_objects::exec::{object_meta::*, resource::*};
+use crate::kubernetes_api_objects::exec::{api_resource::*, object_meta::*, resource::*};
 use crate::kubernetes_api_objects::spec::dynamic::*;
 use vstd::prelude::*;
 
@@ -9,16 +9,46 @@ verus! {
 // DynamicObject is mainly used to pass requests/response between reconcile_core and the shim layer.
 // We use DynamicObject in KubeAPIRequest and KubeAPIResponse so that they can carry the requests and responses
 // for all kinds of Kubernetes resource objects without exhaustive pattern matching.
+//
+// A DynamicObject also carries the ClusterId it came from or is bound for (see
+// api_resource::ClusterId). The shim layer tags every object it returns with the
+// cluster of the client that produced it, and the typed wrappers only unmarshal
+// objects whose tag matches their own cluster, which is what keeps the view's kind
+// (and hence the model's key) consistent with the real cluster the object lives in.
 
 #[verifier(external_body)]
 pub struct DynamicObject {
     inner: kube::api::DynamicObject,
+    cluster: ClusterId,
 }
 
 implement_view_trait!(DynamicObject, DynamicObjectView);
 implement_deep_view_trait!(DynamicObject, DynamicObjectView);
-implement_clone_trait!(DynamicObject);
-implement_resource_wrapper_trait!(DynamicObject, kube::api::DynamicObject);
+
+#[verifier(external)]
+impl ResourceWrapper<kube::api::DynamicObject> for DynamicObject {
+    // from_kube tags the object as belonging to the primary cluster.
+    fn from_kube(inner: kube::api::DynamicObject) -> DynamicObject {
+        DynamicObject { inner: inner, cluster: ClusterId::Primary }
+    }
+
+    fn into_kube(self) -> kube::api::DynamicObject {
+        self.inner
+    }
+
+    fn as_kube_ref(&self) -> &kube::api::DynamicObject {
+        &self.inner
+    }
+}
+
+impl std::clone::Clone for DynamicObject {
+    #[verifier(external_body)]
+    fn clone(&self) -> (res: DynamicObject)
+        ensures res@ == self@
+    {
+        DynamicObject { inner: self.inner.clone(), cluster: self.cluster }
+    }
+}
 
 impl DynamicObject {
     #[verifier(external_body)]
@@ -26,6 +56,22 @@ impl DynamicObject {
         ensures metadata@ == self@.metadata,
     {
         ObjectMeta::from_kube(self.inner.metadata.clone())
+    }
+
+    // cluster has no spec-level meaning on its own; see ApiResource::cluster.
+    #[verifier(external_body)]
+    pub fn cluster(&self) -> ClusterId {
+        self.cluster
+    }
+}
+
+#[verifier(external)]
+impl DynamicObject {
+    // from_kube_in tags the object with the given cluster. Called by the shim
+    // layer (with the cluster of the client that returned the object) and by the
+    // typed wrappers' marshal.
+    pub fn from_kube_in(inner: kube::api::DynamicObject, cluster: ClusterId) -> DynamicObject {
+        DynamicObject { inner: inner, cluster: cluster }
     }
 }
 

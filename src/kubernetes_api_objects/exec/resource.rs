@@ -24,8 +24,20 @@ macro_rules! implement_field_wrapper_type {
 pub use implement_field_wrapper_type;
 
 #[macro_export]
+// implement_object_wrapper_type!(T, KubeT, TView) generates the exec wrapper T of
+// the kube type KubeT whose ghost view is TView, bound to the primary cluster.
+//
+// implement_object_wrapper_type!(T, KubeT, TView, cluster) binds the wrapper to the
+// given ClusterId instead. Two wrappers of the same kube type bound to different
+// clusters must have view types with different kinds (e.g. "widget" and
+// "widget@inner"): api_resource() and marshal() tag their outputs with the
+// cluster, and unmarshal() accepts only objects carrying the same tag, so the
+// tag and the view's kind always agree. These three postconditions are trusted.
 macro_rules! implement_object_wrapper_type {
     ($t:ident, $it:ty, $vt:ty) => {
+        implement_object_wrapper_type!($t, $it, $vt, $crate::kubernetes_api_objects::exec::api_resource::ClusterId::Primary);
+    };
+    ($t:ident, $it:ty, $vt:ty, $cluster:expr) => {
         implement_field_wrapper_type!($t, $it, $vt);
 
         verus! {
@@ -49,14 +61,14 @@ macro_rules! implement_object_wrapper_type {
             pub fn api_resource() -> (res: ApiResource)
                 ensures res@.kind == $vt::kind(),
             {
-                ApiResource::from_kube(kube::api::ApiResource::erase::<$it>(&()))
+                ApiResource::from_kube_in(kube::api::ApiResource::erase::<$it>(&()), $cluster)
             }
 
             #[verifier(external_body)]
             pub fn marshal(self) -> (obj: DynamicObject)
                 ensures obj@ == self@.marshal(),
             {
-                DynamicObject::from_kube(k8s_openapi::serde_json::from_str(&k8s_openapi::serde_json::to_string(&self.inner).unwrap()).unwrap())
+                DynamicObject::from_kube_in(k8s_openapi::serde_json::from_str(&k8s_openapi::serde_json::to_string(&self.inner).unwrap()).unwrap(), $cluster)
             }
 
             #[verifier(external_body)]
@@ -65,6 +77,9 @@ macro_rules! implement_object_wrapper_type {
                     res is Ok == $vt::unmarshal(obj@) is Ok,
                     res is Ok ==> res->Ok_0@ == $vt::unmarshal(obj@)->Ok_0,
             {
+                if !obj.cluster().eq(&$cluster) {
+                    return Err(());
+                }
                 let parse_result = obj.into_kube().try_parse::<$it>();
                 if parse_result.is_ok() {
                     let res = Self { inner: parse_result.unwrap() };
@@ -84,7 +99,10 @@ pub use implement_object_wrapper_type;
 #[macro_export]
 macro_rules! implement_custom_object_wrapper_type {
     ($t:ident, $it:ty, $vt:ty) => {
-        implement_object_wrapper_type!($t, $it, $vt);
+        implement_custom_object_wrapper_type!($t, $it, $vt, $crate::kubernetes_api_objects::exec::api_resource::ClusterId::Primary);
+    };
+    ($t:ident, $it:ty, $vt:ty, $cluster:expr) => {
+        implement_object_wrapper_type!($t, $it, $vt, $cluster);
 
         verus! {
 
