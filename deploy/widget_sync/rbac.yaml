@@ -2,6 +2,13 @@
 # The controller reads Widgets and writes only their status subresource here;
 # its access to the inner cluster comes from the kubeconfig in the
 # widget-sync-remote-kubeconfig Secret (see rbac_inner.yaml).
+# Not granted here, on purpose:
+# - configmaps get,update in namespace default: needed only by the crash
+#   testing mode (`controller crash`, src/shim_layer/fault_injection.rs), which
+#   reads and replaces default/fault-injection-config through the primary
+#   client. There is no crash-testing manifest for this controller; one would
+#   add a Role/RoleBinding in default for the widget-sync-controller account.
+# - events: the controller emits none.
 apiVersion: v1
 kind: Namespace
 metadata:
