@@ -7,3 +7,7 @@ pub mod object_map;
 pub mod object_ref_set;
 pub mod prelude;
 pub mod string_set;
+
+use vstd::prelude::*;
+
+verus! { spec fn trivial() -> bool { true } } // to enable --verify-module

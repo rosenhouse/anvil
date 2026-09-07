@@ -7,7 +7,7 @@ use crate::executable_model::{
 };
 use crate::kubernetes_api_objects::{error::*, exec::prelude::*, spec::prelude::*};
 use crate::kubernetes_cluster::spec::{
-    api_server::state_machine as model, api_server::types as model_types,
+    api_server::state_machine as model, api_server::types as model_types, cluster::Cluster,
 };
 use vstd::{multiset::*, prelude::*};
 
@@ -33,9 +33,15 @@ pub type SimpleExecutableApiServerModel = ExecutableApiServerModel<SimpleCR>;
 
 impl <K> ExecutableApiServerModel<K> where K: View + CustomResource, K::V: CustomResourceView {
 
+// The installed types the exec model refines the spec model against:
+// exactly one custom resource type, K's.
+pub open spec fn installed_types() -> model_types::InstalledTypes {
+    Map::empty().insert(K::V::kind()->CustomResourceKind_0, Cluster::installed_type::<K::V>())
+}
+
 #[verifier(external_body)]
 fn unmarshallable_object(obj: &DynamicObject) -> (b: bool)
-    ensures b == model::unmarshallable_object::<K::V>(obj@),
+    ensures b == model::unmarshallable_object(obj@, Self::installed_types()),
 { true }
 
 fn metadata_validity_check(obj: &DynamicObject) -> (ret: Option<APIError>)
@@ -66,9 +72,9 @@ fn metadata_transition_validity_check(obj: &DynamicObject, old_obj: &DynamicObje
 
 fn valid_object(obj: &DynamicObject) -> (ret: bool)
     requires
-        model::unmarshallable_object::<K::V>(obj@),
+        model::unmarshallable_object(obj@, Self::installed_types()),
         obj@.kind is CustomResourceKind ==> obj@.kind == K::V::kind(),
-    ensures ret == model::valid_object::<K::V>(obj@)
+    ensures ret == model::valid_object(obj@, Self::installed_types())
 {
     match obj.kind() {
         KindExec::ConfigMapKind => ConfigMap::unmarshal(obj.clone()).unwrap().state_validation(),
@@ -93,9 +99,9 @@ fn valid_object(obj: &DynamicObject) -> (ret: bool)
 
 fn object_validity_check(obj: &DynamicObject) -> (ret: Option<APIError>)
     requires
-        model::unmarshallable_object::<K::V>(obj@),
+        model::unmarshallable_object(obj@, Self::installed_types()),
         obj@.kind is CustomResourceKind ==> obj@.kind == K::V::kind(),
-    ensures ret == model::object_validity_check::<K::V>(obj@)
+    ensures ret == model::object_validity_check(obj@, Self::installed_types())
 {
     if !Self::valid_object(obj) {
         Some(APIError::Invalid)
@@ -106,13 +112,13 @@ fn object_validity_check(obj: &DynamicObject) -> (ret: Option<APIError>)
 
 fn valid_transition(obj: &DynamicObject, old_obj: &DynamicObject) -> (ret: bool)
     requires
-        model::unmarshallable_object::<K::V>(obj@),
-        model::unmarshallable_object::<K::V>(old_obj@),
+        model::unmarshallable_object(obj@, Self::installed_types()),
+        model::unmarshallable_object(old_obj@, Self::installed_types()),
         old_obj@.kind == obj@.kind,
-        model::valid_object::<K::V>(obj@),
-        model::valid_object::<K::V>(old_obj@),
+        model::valid_object(obj@, Self::installed_types()),
+        model::valid_object(old_obj@, Self::installed_types()),
         obj@.kind is CustomResourceKind ==> obj@.kind == K::V::kind(),
-    ensures ret == model::valid_transition::<K::V>(obj@, old_obj@)
+    ensures ret == model::valid_transition(obj@, old_obj@, Self::installed_types())
 {
     match obj.kind() {
         KindExec::ConfigMapKind => ConfigMap::unmarshal(obj.clone()).unwrap().transition_validation(&ConfigMap::unmarshal(old_obj.clone()).unwrap()),
@@ -137,13 +143,13 @@ fn valid_transition(obj: &DynamicObject, old_obj: &DynamicObject) -> (ret: bool)
 
 fn object_transition_validity_check(obj: &DynamicObject, old_obj: &DynamicObject) -> (ret: Option<APIError>)
     requires
-        model::unmarshallable_object::<K::V>(obj@),
-        model::unmarshallable_object::<K::V>(old_obj@),
+        model::unmarshallable_object(obj@, Self::installed_types()),
+        model::unmarshallable_object(old_obj@, Self::installed_types()),
         old_obj@.kind == obj@.kind,
-        model::valid_object::<K::V>(obj@),
-        model::valid_object::<K::V>(old_obj@),
+        model::valid_object(obj@, Self::installed_types()),
+        model::valid_object(old_obj@, Self::installed_types()),
         obj@.kind is CustomResourceKind ==> obj@.kind == K::V::kind(),
-    ensures ret == model::object_transition_validity_check::<K::V>(obj@, old_obj@)
+    ensures ret == model::object_transition_validity_check(obj@, old_obj@, Self::installed_types())
 {
     if !Self::valid_transition(obj, old_obj) {
         Some(APIError::Invalid)
@@ -168,9 +174,9 @@ pub fn handle_get_request(req: &KubeGetRequest, s: &ApiServerState) -> (ret: Kub
 }
 
 fn create_request_admission_check(req: &KubeCreateRequest, s: &ApiServerState) -> (ret: Option<APIError>)
-    ensures ret == model::create_request_admission_check::<K::V>(req@, s@),
+    ensures ret == model::create_request_admission_check(Self::installed_types(), req@, s@),
 {
-    if req.obj.metadata().name().is_none() && req.obj.metadata().generate_name().is_none() {
+    if req.obj.metadata().name().is_none() && req.obj.metadata().generated_name().is_none() {
         Some(APIError::Invalid)
     } else if req.obj.metadata().namespace().is_some() && !req.namespace.eq(&req.obj.metadata().namespace().unwrap()) {
         Some(APIError::BadRequest)
@@ -189,9 +195,9 @@ fn create_request_admission_check(req: &KubeCreateRequest, s: &ApiServerState) -
 
 fn created_object_validity_check(created_obj: &DynamicObject) -> (ret: Option<APIError>)
     requires
-        model::unmarshallable_object::<K::V>(created_obj@),
+        model::unmarshallable_object(created_obj@, Self::installed_types()),
         created_obj@.kind is CustomResourceKind ==> created_obj@.kind == K::V::kind(),
-    ensures ret == model::created_object_validity_check::<K::V>(created_obj@)
+    ensures ret == model::created_object_validity_check(created_obj@, Self::installed_types())
 {
     if Self::metadata_validity_check(created_obj).is_some() {
         Self::metadata_validity_check(created_obj)
@@ -205,8 +211,8 @@ fn created_object_validity_check(created_obj: &DynamicObject) -> (ret: Option<AP
 // No plan to run conformance test on create requests without names
 // so just panic here
 #[verifier(external_body)]
-fn generated_name(s: &ApiServerState) -> (ret: String)
-    ensures ret@ == model::generated_name(s@)
+fn generated_name(s: &ApiServerState, generate_name: &String) -> (ret: String)
+    ensures ret@ == model::generated_name(s@, generate_name@)
 {
     panic!()
 }
@@ -217,7 +223,7 @@ pub fn handle_create_request(req: &KubeCreateRequest, s: &mut ApiServerState) ->
         old(s).resource_version_counter < i64::MAX,
         old(s).uid_counter < i64::MAX,
         req@.obj.kind is CustomResourceKind ==> req@.obj.kind == K::V::kind(),
-    ensures (s@, ret@) == model::handle_create_request::<K::V>(req@, old(s)@)
+    ensures (final(s)@, ret@) == model::handle_create_request(Self::installed_types(), req@, old(s)@)
 {
     // TODO: use if-let?
     let request_check_error = Self::create_request_admission_check(req, s);
@@ -226,14 +232,14 @@ pub fn handle_create_request(req: &KubeCreateRequest, s: &mut ApiServerState) ->
     } else {
         let mut created_obj = req.obj.clone();
         if req.obj.metadata().name().is_none() {
-            created_obj.set_name(Self::generated_name(s));
+            created_obj.set_name(Self::generated_name(s, &req.obj.metadata().generated_name().unwrap()));
         }
         created_obj.set_namespace(req.namespace.clone());
         created_obj.set_resource_version(s.resource_version_counter);
         created_obj.set_uid(s.uid_counter);
         created_obj.set_initial_generation();
         created_obj.unset_deletion_timestamp();
-        created_obj.set_default_status::<K::V>();
+        created_obj.set_default_status(Ghost(Self::installed_types()));
         let object_check_error = Self::created_object_validity_check(&created_obj);
         if s.resources.contains_key(&created_obj.object_ref()) {
             KubeCreateResponse{res: Err(APIError::ObjectAlreadyExists)}
@@ -241,7 +247,6 @@ pub fn handle_create_request(req: &KubeCreateRequest, s: &mut ApiServerState) ->
             KubeCreateResponse{res: Err(object_check_error.unwrap())}
         } else {
             s.resources.insert(created_obj.object_ref(), created_obj.clone());
-            s.stable_resources.remove(&created_obj.object_ref());
             s.uid_counter = s.uid_counter + 1;
             s.resource_version_counter = s.resource_version_counter + 1;
             KubeCreateResponse{res: Ok(created_obj)}
@@ -249,9 +254,8 @@ pub fn handle_create_request(req: &KubeCreateRequest, s: &mut ApiServerState) ->
     }
 }
 
-pub fn handle_delete_request(req: &KubeDeleteRequest, s: &mut ApiServerState) -> (ret: KubeDeleteResponse)
-    requires old(s).resource_version_counter < i64::MAX // No integer overflow
-    ensures (s@, ret@) == model::handle_delete_request(req@, old(s)@)
+fn delete_request_admission_check(req: &KubeDeleteRequest, s: &ApiServerState) -> (ret: Option<APIError>)
+    ensures ret == model::delete_request_admission_check(req@, s@)
 {
     let req_key = KubeObjectRef {
         kind: req.api_resource.kind(),
@@ -259,8 +263,37 @@ pub fn handle_delete_request(req: &KubeDeleteRequest, s: &mut ApiServerState) ->
         namespace: req.namespace.clone(),
     };
     if !s.resources.contains_key(&req_key) {
-        KubeDeleteResponse{res: Err(APIError::ObjectNotFound)}
+        Some(APIError::ObjectNotFound)
     } else {
+        match &req.preconditions {
+            Some(preconditions) => {
+                let stored_metadata = s.resources.get(&req_key).unwrap().metadata();
+                if preconditions.has_some_uid() && !preconditions.uid_eq(&stored_metadata) {
+                    Some(APIError::Conflict)
+                } else if preconditions.has_some_resource_version() && !preconditions.resource_version_eq(&stored_metadata) {
+                    Some(APIError::Conflict)
+                } else {
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+}
+
+pub fn handle_delete_request(req: &KubeDeleteRequest, s: &mut ApiServerState) -> (ret: KubeDeleteResponse)
+    requires old(s).resource_version_counter < i64::MAX // No integer overflow
+    ensures (final(s)@, ret@) == model::handle_delete_request(req@, old(s)@)
+{
+    let request_check_error = Self::delete_request_admission_check(req, s);
+    if request_check_error.is_some() {
+        KubeDeleteResponse{res: Err(request_check_error.unwrap())}
+    } else {
+        let req_key = KubeObjectRef {
+            kind: req.api_resource.kind(),
+            name: req.name.clone(),
+            namespace: req.namespace.clone(),
+        };
         let mut obj = s.resources.get(&req_key).unwrap();
         if obj.metadata().finalizers().is_some() && obj.metadata().finalizers().unwrap().len() > 0 {
             if obj.metadata().has_deletion_timestamp() {
@@ -292,7 +325,7 @@ fn allow_unconditional_update(kind: &KindExec) -> (ret: bool)
 }
 
 fn update_request_admission_check_helper(name: &String, namespace: &String, obj: &DynamicObject, s: &ApiServerState) -> (ret: Option<APIError>)
-    ensures ret == model::update_request_admission_check_helper::<K::V>(name@, namespace@, obj@, s@)
+    ensures ret == model::update_request_admission_check_helper(Self::installed_types(), name@, namespace@, obj@, s@)
 {
     let key = KubeObjectRef {
         kind: obj.kind(),
@@ -318,19 +351,20 @@ fn update_request_admission_check_helper(name: &String, namespace: &String, obj:
         Some(APIError::Conflict)
     } else if obj.metadata().has_some_uid()
     && !obj.metadata().uid_eq(&s.resources.get(&key).unwrap().metadata()) {
-        Some(APIError::InternalError)
+        Some(APIError::Conflict)
     } else {
         None
     }
 }
 
 fn update_request_admission_check(req: &KubeUpdateRequest, s: &ApiServerState) -> (ret: Option<APIError>)
-    ensures ret == model::update_request_admission_check::<K::V>(req@, s@)
+    ensures ret == model::update_request_admission_check(Self::installed_types(), req@, s@)
 {
     Self::update_request_admission_check_helper(&req.name, &req.namespace, &req.obj, s)
 }
 
 fn updated_object(req: &KubeUpdateRequest, old_obj: &DynamicObject) -> (ret: DynamicObject)
+    requires old_obj@.kind == req@.obj.kind, // the model takes the kind from old_obj; the caller looked old_obj up by req's kind
     ensures ret@ == model::updated_object(req@, old_obj@)
 {
     let mut updated_obj = req.obj.clone();
@@ -345,12 +379,12 @@ fn updated_object(req: &KubeUpdateRequest, old_obj: &DynamicObject) -> (ret: Dyn
 
 fn updated_object_validity_check(updated_obj: &DynamicObject, old_obj: &DynamicObject) -> (ret: Option<APIError>)
     requires
-        model::unmarshallable_object::<K::V>(updated_obj@),
-        model::unmarshallable_object::<K::V>(old_obj@),
+        model::unmarshallable_object(updated_obj@, Self::installed_types()),
+        model::unmarshallable_object(old_obj@, Self::installed_types()),
         old_obj@.kind == updated_obj@.kind,
-        model::valid_object::<K::V>(old_obj@),
+        model::valid_object(old_obj@, Self::installed_types()),
         updated_obj@.kind is CustomResourceKind ==> updated_obj@.kind == K::V::kind(),
-    ensures ret == model::updated_object_validity_check::<K::V>(updated_obj@, old_obj@)
+    ensures ret == model::updated_object_validity_check(updated_obj@, old_obj@, Self::installed_types())
 {
     if Self::metadata_validity_check(updated_obj).is_some() {
         Self::metadata_validity_check(updated_obj)
@@ -370,14 +404,14 @@ pub fn handle_update_request(req: &KubeUpdateRequest, s: &mut ApiServerState) ->
         // No integer overflow
         old(s).resource_version_counter < i64::MAX,
         // The old version is marshallable
-        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object::<K::V>(old(s)@.resources[req@.key()]),
+        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object(old(s)@.resources[req@.key()], Self::installed_types()),
         // The old version passes state validation
-        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object::<K::V>(old(s)@.resources[req@.key()]),
+        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object(old(s)@.resources[req@.key()], Self::installed_types()),
         // The old version has the right key (name, namespace, kind)
         old(s)@.resources.contains_key(req@.key()) ==> old(s)@.resources[req@.key()].object_ref() == req@.key(),
         // All the three preconditions above are proved by the invariant lemma_always_each_object_in_etcd_is_well_formed
         req@.obj.kind is CustomResourceKind ==> req@.obj.kind == K::V::kind(),
-    ensures (s@, ret@) == model::handle_update_request::<K::V>(req@, old(s)@)
+    ensures (final(s)@, ret@) == model::handle_update_request(Self::installed_types(), req@, old(s)@)
 {
     let request_check_error = Self::update_request_admission_check(req, s);
     if request_check_error.is_some() {
@@ -403,7 +437,6 @@ pub fn handle_update_request(req: &KubeUpdateRequest, s: &mut ApiServerState) ->
                     || (updated_obj_with_new_rv.metadata().finalizers().is_some()
                         && updated_obj_with_new_rv.metadata().finalizers().unwrap().len() > 0)
                 {
-                    s.stable_resources.remove(&req_key);
                     s.resources.insert(req_key, updated_obj_with_new_rv.clone());
                     s.resource_version_counter = s.resource_version_counter + 1;
                     KubeUpdateResponse{res: Ok(updated_obj_with_new_rv)}
@@ -418,12 +451,13 @@ pub fn handle_update_request(req: &KubeUpdateRequest, s: &mut ApiServerState) ->
 }
 
 fn update_status_request_admission_check(req: &KubeUpdateStatusRequest, s: &ApiServerState) -> (ret: Option<APIError>)
-    ensures ret == model::update_status_request_admission_check::<K::V>(req@, s@)
+    ensures ret == model::update_status_request_admission_check(Self::installed_types(), req@, s@)
 {
     Self::update_request_admission_check_helper(&req.name, &req.namespace, &req.obj, s)
 }
 
 fn status_updated_object(req: &KubeUpdateStatusRequest, old_obj: &DynamicObject) -> (ret: DynamicObject)
+    requires old_obj@.kind == req@.obj.kind, // see updated_object
     ensures ret@ == model::status_updated_object(req@, old_obj@)
 {
     let mut status_updated_object = req.obj.clone();
@@ -437,14 +471,14 @@ pub fn handle_update_status_request(req: &KubeUpdateStatusRequest, s: &mut ApiSe
         // No integer overflow
         old(s).resource_version_counter < i64::MAX,
         // The old version is marshallable
-        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object::<K::V>(old(s)@.resources[req@.key()]),
+        old(s)@.resources.contains_key(req@.key()) ==> model::unmarshallable_object(old(s)@.resources[req@.key()], Self::installed_types()),
         // The old version passes state validation
-        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object::<K::V>(old(s)@.resources[req@.key()]),
+        old(s)@.resources.contains_key(req@.key()) ==> model::valid_object(old(s)@.resources[req@.key()], Self::installed_types()),
         // The old version has the right key (name, namespace, kind)
         old(s)@.resources.contains_key(req@.key()) ==> old(s)@.resources[req@.key()].object_ref() == req@.key(),
         // All the three preconditions above are proved by the invariant lemma_always_each_object_in_etcd_is_well_formed
         req@.obj.kind is CustomResourceKind ==> req@.obj.kind == K::V::kind(),
-    ensures (s@, ret@) == model::handle_update_status_request::<K::V>(req@, old(s)@)
+    ensures (final(s)@, ret@) == model::handle_update_status_request(Self::installed_types(), req@, old(s)@)
 {
     let request_check_error = Self::update_status_request_admission_check(req, s);
     if request_check_error.is_some() {

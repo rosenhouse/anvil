@@ -2,6 +2,7 @@
 
 pub mod crds;
 
+pub mod executable_model;
 pub mod external_shim_layer;
 pub mod kubernetes_api_objects;
 pub mod kubernetes_cluster;

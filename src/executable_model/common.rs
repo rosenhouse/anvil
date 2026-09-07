@@ -61,25 +61,61 @@ impl std::clone::Clone for KubeObjectRef {
     }
 }
 
+// Maps a kind string to KindExec.
+// Not a perfect implementation but sufficient for conformance tests.
+#[verifier(external)]
+fn kind_exec_from_str(kind: &str) -> KindExec {
+    match kind {
+        "ConfigMap" => KindExec::ConfigMapKind,
+        "DaemonSet" => KindExec::DaemonSetKind,
+        "PersistentVolumeClaim" => KindExec::PersistentVolumeClaimKind,
+        "Pod" => KindExec::PodKind,
+        "Role" => KindExec::RoleKind,
+        "RoleBinding" => KindExec::RoleBindingKind,
+        "StatefulSet" => KindExec::StatefulSetKind,
+        "Service" => KindExec::ServiceKind,
+        "ServiceAccount" => KindExec::ServiceAccountKind,
+        "Secret" => KindExec::SecretKind,
+        _ => panic!(), // We assume the DynamicObject won't be a custom object
+    }
+}
+
 impl ApiResource {
-    // This kind() is not a perfect implementation but it is sufficient for conformance tests.
     #[verifier(external_body)]
     pub fn kind(&self) -> (kind: KindExec)
         ensures kind@ == self@.kind,
     {
-        match self.as_kube_ref().kind.as_str() {
-            "ConfigMap" => KindExec::ConfigMapKind,
-            "DaemonSet" => KindExec::DaemonSetKind,
-            "PersistentVolumeClaim" => KindExec::PersistentVolumeClaimKind,
-            "Pod" => KindExec::PodKind,
-            "Role" => KindExec::RoleKind,
-            "RoleBinding" => KindExec::RoleBindingKind,
-            "StatefulSet" => KindExec::StatefulSetKind,
-            "Service" => KindExec::ServiceKind,
-            "ServiceAccount" => KindExec::ServiceAccountKind,
-            "Secret" => KindExec::SecretKind,
-            _ => panic!(), // We assume the DynamicObject won't be a custom object
-        }
+        kind_exec_from_str(self.as_kube_ref().kind.as_str())
+    }
+}
+
+impl Preconditions {
+    #[verifier(external_body)]
+    pub fn has_some_uid(&self) -> (b: bool)
+        ensures b == self@.uid is Some,
+    {
+        self.as_kube_ref().uid.is_some()
+    }
+
+    #[verifier(external_body)]
+    pub fn uid_eq(&self, metadata: &ObjectMeta) -> (b: bool)
+        ensures b == (self@.uid == metadata@.uid),
+    {
+        self.as_kube_ref().uid == metadata.as_kube_ref().uid
+    }
+
+    #[verifier(external_body)]
+    pub fn has_some_resource_version(&self) -> (b: bool)
+        ensures b == self@.resource_version is Some,
+    {
+        self.as_kube_ref().resource_version.is_some()
+    }
+
+    #[verifier(external_body)]
+    pub fn resource_version_eq(&self, metadata: &ObjectMeta) -> (b: bool)
+        ensures b == (self@.resource_version == metadata@.resource_version),
+    {
+        self.as_kube_ref().resource_version == metadata.as_kube_ref().resource_version
     }
 }
 
@@ -140,7 +176,6 @@ impl DynamicObjectView {
 }
 
 impl DynamicObject {
-    // This kind() is not a perfect implementation but it is sufficient for conformance tests.
     #[verifier(external_body)]
     pub fn kind(&self) -> (kind: KindExec)
         ensures kind@ == self@.kind,
@@ -148,19 +183,7 @@ impl DynamicObject {
         if self.as_kube_ref().types.is_none() {
             panic!();
         }
-        match self.as_kube_ref().types.as_ref().unwrap().kind.as_str() {
-            "ConfigMap" => KindExec::ConfigMapKind,
-            "DaemonSet" => KindExec::DaemonSetKind,
-            "PersistentVolumeClaim" => KindExec::PersistentVolumeClaimKind,
-            "Pod" => KindExec::PodKind,
-            "Role" => KindExec::RoleKind,
-            "RoleBinding" => KindExec::RoleBindingKind,
-            "StatefulSet" => KindExec::StatefulSetKind,
-            "Service" => KindExec::ServiceKind,
-            "ServiceAccount" => KindExec::ServiceAccountKind,
-            "Secret" => KindExec::SecretKind,
-            _ => panic!(), // We assume the DynamicObject won't be a custom object
-        }
+        kind_exec_from_str(self.as_kube_ref().types.as_ref().unwrap().kind.as_str())
     }
 
     // We implement getter and setter functions of the DynamicObject
@@ -182,49 +205,49 @@ impl DynamicObject {
 
     #[verifier(external_body)]
     pub fn set_name(&mut self, name: String)
-        ensures self@ == old(self)@.with_name(name@),
+        ensures final(self)@ == old(self)@.with_name(name@),
     {
         self.as_kube_mut_ref().metadata.name = Some(name);
     }
 
     #[verifier(external_body)]
     pub fn set_namespace(&mut self, namespace: String)
-        ensures self@ == old(self)@.with_namespace(namespace@),
+        ensures final(self)@ == old(self)@.with_namespace(namespace@),
     {
         self.as_kube_mut_ref().metadata.namespace = Some(namespace);
     }
 
     #[verifier(external_body)]
     pub fn set_resource_version(&mut self, resource_version: i64)
-        ensures self@ == old(self)@.with_resource_version(resource_version as int),
+        ensures final(self)@ == old(self)@.with_resource_version(resource_version as int),
     {
         self.as_kube_mut_ref().metadata.resource_version = Some(resource_version.to_string());
     }
 
     #[verifier(external_body)]
     pub fn set_resource_version_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.overwrite_resource_version(other@.metadata.resource_version),
+        ensures final(self)@ == old(self)@.overwrite_resource_version(other@.metadata.resource_version),
     {
         self.as_kube_mut_ref().metadata.resource_version = other.as_kube_ref().metadata.resource_version.clone();
     }
 
     #[verifier(external_body)]
     pub fn set_uid(&mut self, uid: i64)
-        ensures self@ == old(self)@.with_uid(uid as int),
+        ensures final(self)@ == old(self)@.with_uid(uid as int),
     {
         self.as_kube_mut_ref().metadata.uid = Some(uid.to_string());
     }
 
     #[verifier(external_body)]
     pub fn set_uid_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.overwrite_uid(other@.metadata.uid),
+        ensures final(self)@ == old(self)@.overwrite_uid(other@.metadata.uid),
     {
         self.as_kube_mut_ref().metadata.uid = other.as_kube_ref().metadata.uid.clone();
     }
 
     #[verifier(external_body)]
     pub fn unset_deletion_timestamp(&mut self)
-        ensures self@ == old(self)@.without_deletion_timestamp(),
+        ensures final(self)@ == old(self)@.without_deletion_timestamp(),
     {
         self.as_kube_mut_ref().metadata.deletion_timestamp = None;
     }
@@ -248,14 +271,14 @@ impl DynamicObject {
 
     #[verifier(external_body)]
     pub fn set_initial_generation(&mut self)
-        ensures self@ == old(self)@.with_generation(model::initial_generation(old(self)@.kind)),
+        ensures final(self)@ == old(self)@.with_generation(model::initial_generation(old(self)@.kind)),
     {
         self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() { None } else { Some(1) };
     }
 
     #[verifier(external_body)]
     pub fn set_bumped_generation(&mut self)
-        ensures self@ == old(self)@.with_generation(model::bumped_generation(old(self)@)),
+        ensures final(self)@ == old(self)@.with_generation(model::bumped_generation(old(self)@)),
     {
         self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() {
             None
@@ -268,7 +291,7 @@ impl DynamicObject {
     // replaces other's spec: bumped iff the spec changed.
     #[verifier(external_body)]
     pub fn set_next_generation_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.with_generation(model::next_generation(other@, old(self)@.spec)),
+        ensures final(self)@ == old(self)@.with_generation(model::next_generation(other@, old(self)@.spec)),
     {
         self.as_kube_mut_ref().metadata.generation = if self.is_builtin_kind() {
             None
@@ -281,7 +304,7 @@ impl DynamicObject {
 
     #[verifier(external_body)]
     pub fn set_deletion_timestamp_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.overwrite_deletion_stamp(other@.metadata.deletion_timestamp),
+        ensures final(self)@ == old(self)@.overwrite_deletion_stamp(other@.metadata.deletion_timestamp),
     {
         self.as_kube_mut_ref().metadata.deletion_timestamp = other.as_kube_ref().metadata.deletion_timestamp.clone();
     }
@@ -293,7 +316,7 @@ impl DynamicObject {
     // However, this function is actually closer to Kubernetes' real behavior.
     #[verifier(external_body)]
     pub fn set_current_deletion_timestamp(&mut self)
-        ensures self@ == old(self)@.with_deletion_timestamp(model::deletion_timestamp()),
+        ensures final(self)@ == old(self)@.with_deletion_timestamp(model::deletion_timestamp()),
     {
         self.as_kube_mut_ref().metadata.deletion_timestamp = Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()));
     }
@@ -307,7 +330,7 @@ impl DynamicObject {
 
     #[verifier(external_body)]
     pub fn set_metadata_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.with_metadata(other@.metadata)
+        ensures final(self)@ == old(self)@.with_metadata(other@.metadata)
     {
         self.as_kube_mut_ref().metadata = other.as_kube_ref().metadata.clone()
     }
@@ -320,21 +343,21 @@ impl DynamicObject {
     // the content of the spec and status.
     #[verifier(external_body)]
     pub fn set_spec_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.with_spec(other@.spec)
+        ensures final(self)@ == old(self)@.with_spec(other@.spec)
     {
         self.as_kube_mut_ref().data = other.as_kube_ref().data.clone()
     }
 
     #[verifier(external_body)]
     pub fn set_status_from(&mut self, other: &DynamicObject)
-        ensures self@ == old(self)@.with_status(other@.status)
+        ensures final(self)@ == old(self)@.with_status(other@.status)
     {}
 
     #[verifier(external_body)]
-    pub fn set_default_status<K: CustomResourceView>(&mut self)
+    pub fn set_default_status(&mut self, Ghost(installed_types): Ghost<model_types::InstalledTypes>)
         ensures
-            self@ == old(self)@.with_status(model::marshalled_default_status::<K>(self@.kind)),
-            model::unmarshallable_status::<K>(self@),
+            final(self)@ == old(self)@.with_status(model::marshalled_default_status(old(self)@.kind, installed_types)),
+            model::unmarshallable_status(final(self)@, installed_types),
     {}
 }
 
@@ -406,14 +429,13 @@ impl Role {
         if self.rules().is_some() {
             let policy_rules = self.rules().unwrap();
             let mut all_valid = true;
-            let mut i = 0;
             for i in 0..policy_rules.len()
                 invariant
-                    all_valid == (forall |j| #![trigger policy_rules[j]] 0 <= j < i ==> policy_rules@.map_values(|policy_rule: PolicyRule| policy_rule@)[j].state_validation()),
-                    i <= policy_rules.len(),
+                    all_valid == (forall |j| 0 <= j < i ==> #[trigger] policy_rules.deep_view()[j].state_validation()),
             {
-                all_valid = all_valid && policy_rules[i].state_validation();
-                i += 1;
+                let valid = policy_rules[i].state_validation();
+                proof { assert(policy_rules.deep_view()[i as int] == policy_rules@[i as int]@); }
+                all_valid = all_valid && valid;
             }
             all_valid
         } else {
@@ -490,44 +512,29 @@ impl StatefulSet {
             old_obj@.state_validation(),
         ensures ret == self@.transition_validation(old_obj@)
     {
-        self.spec().unwrap().selector().eq(&old_obj.spec().unwrap().selector())
-        && self.spec().unwrap().service_name().eq(&old_obj.spec().unwrap().service_name())
-        && (self.spec().unwrap().pod_management_policy().is_none() == old_obj.spec().unwrap().pod_management_policy().is_none()
-            && if self.spec().unwrap().pod_management_policy().is_some() {
-                self.spec().unwrap().pod_management_policy().unwrap().eq(&old_obj.spec().unwrap().pod_management_policy().unwrap())
-            } else {
-                true
-            }
-        )
-        && (self.spec().unwrap().volume_claim_templates().is_none() == old_obj.spec().unwrap().volume_claim_templates().is_none()
-            && if self.spec().unwrap().volume_claim_templates().is_some() {
-                let new_volume_claim_templates = self.spec().unwrap().volume_claim_templates().unwrap();
-                let old_volume_claim_templates = old_obj.spec().unwrap().volume_claim_templates().unwrap();
-                let mut all_equal = true;
-                let mut i = 0;
-                if new_volume_claim_templates.len() != old_volume_claim_templates.len() {
-                    proof { assert(self@.spec->0.volume_claim_templates->0.len() != old_obj@.spec->0.volume_claim_templates->0.len()) }
-                    proof { assert(!(self@.spec->0.volume_claim_templates->0 =~= old_obj@.spec->0.volume_claim_templates->0)) }
-                    false
-                } else {
-                    for i in 0..new_volume_claim_templates.len()
-                        invariant
-                            all_equal == (forall |j| #![trigger new_volume_claim_templates[j]]
-                                0 <= j < i
-                                    ==> new_volume_claim_templates@.map_values(|p: PersistentVolumeClaim| p@)[j] == old_volume_claim_templates@.map_values(|p: PersistentVolumeClaim| p@)[j]
-                            ),
-                            i <= new_volume_claim_templates.len(),
-                            new_volume_claim_templates.len() == old_volume_claim_templates.len(),
-                    {
-                        all_equal = all_equal && new_volume_claim_templates[i].eq(&old_volume_claim_templates[i]);
-                    }
-                    proof { assert(all_equal == (self@.spec->0.volume_claim_templates =~= old_obj@.spec->0.volume_claim_templates)) }
-                    all_equal
-                }
-            } else {
-                true
-            }
-        )
+        self.spec().unwrap().immutable_fields_eq(&old_obj.spec().unwrap())
+    }
+}
+
+impl StatefulSetSpec {
+    // Every field other than replicas, template and
+    // persistent_volume_claim_retention_policy is immutable (see
+    // StatefulSetView::_transition_validation): the check is that old_spec
+    // equals self with those three fields taken from old_spec.
+    #[verifier(external_body)]
+    pub fn immutable_fields_eq(&self, old_spec: &StatefulSetSpec) -> (b: bool)
+        ensures b == (old_spec@ == StatefulSetSpecView {
+            replicas: old_spec@.replicas,
+            template: old_spec@.template,
+            persistent_volume_claim_retention_policy: old_spec@.persistent_volume_claim_retention_policy,
+            ..self@
+        }),
+    {
+        let mut normalized = self.as_kube_ref().clone();
+        normalized.replicas = old_spec.as_kube_ref().replicas.clone();
+        normalized.template = old_spec.as_kube_ref().template.clone();
+        normalized.persistent_volume_claim_retention_policy = old_spec.as_kube_ref().persistent_volume_claim_retention_policy.clone();
+        normalized == *old_spec.as_kube_ref()
     }
 }
 
@@ -691,7 +698,7 @@ impl CustomResource for SimpleCR {
 
 #[verifier(external_body)]
 pub fn filter_controller_references(owner_references: Vec<OwnerReference>) -> (ret: Vec<OwnerReference>)
-    ensures ret@.map_values(|o: OwnerReference| o@) == owner_references@.map_values(|o: OwnerReference| o@).filter(|o: OwnerReferenceView| o.controller is Some && o.controller->0)
+    ensures ret.deep_view() == owner_references.deep_view().filter(|o: OwnerReferenceView| o.controller is Some && o.controller->0)
 {
     // TODO: is there a way to prove postconditions involving filter?
     // TODO: clone the entire Vec instead of clone in map()
@@ -700,7 +707,7 @@ pub fn filter_controller_references(owner_references: Vec<OwnerReference>) -> (r
 
 #[verifier(external_body)]
 pub fn string_vec_to_string_set(s: Vec<String>) -> (ret: StringSet)
-    ensures ret@ == s@.map_values(|s: String| s@).to_set()
+    ensures ret@ == s.deep_view().to_set()
 {
     StringSet::from_rust_set(s.into_iter().collect())
 }

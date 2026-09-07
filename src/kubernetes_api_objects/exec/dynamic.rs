@@ -70,6 +70,12 @@ impl DynamicObject {
     pub fn from_kube_in(inner: kube::api::DynamicObject, cluster: ClusterId) -> DynamicObject {
         DynamicObject { inner: inner, cluster: cluster }
     }
+
+    // as_kube_mut_ref is for the executable API server model's setters
+    // (executable_model::common), not for controller code.
+    pub fn as_kube_mut_ref(&mut self) -> &mut kube::api::DynamicObject {
+        &mut self.inner
+    }
 }
 
 #[verifier(external)]
