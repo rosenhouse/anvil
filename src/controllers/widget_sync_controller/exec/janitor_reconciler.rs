@@ -102,6 +102,9 @@ pub fn reconcile_core(inner: &InnerWidget, resp_o: Option<Response<VoidEResp>>, 
             return (at_step(WidgetJanitorStep::AfterListOuter), Some(Request::KRequest(req)));
         },
         WidgetJanitorStep::AfterListOuter => {
+            if !has_mirror_identity(inner) {
+                return (at_step(WidgetJanitorStep::Error), None);
+            }
             if !(is_some_k_list_resp!(resp_o) && extract_some_k_list_resp_as_ref!(resp_o).is_ok()) {
                 // Any failure, including a type-level NotFound, is a retry, never a deletion.
                 return (at_step(WidgetJanitorStep::Error), None);

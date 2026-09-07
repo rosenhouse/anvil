@@ -82,18 +82,44 @@ pub open spec fn status_synced(outer: OuterWidgetView, mirrored: WidgetStatusVie
     }
 }
 
-// R3, cleanup: once no outer copy with the parent uid exists at the mirror's
-// namespace and name, the mirror is eventually and stably gone.
+// R3, cleanup (the janitor's own property): once no outer copy with the parent
+// uid exists at the mirror's namespace and name, a mirror object pointing at that
+// parent is eventually gone.
 //
-// A terminating mirror counts as not yet collected, so R3 needs D3 below: the
-// janitor's Delete stamps the deletion timestamp, the inner side then removes its
-// finalizers, and the update that removes the last finalizer removes the object.
+// The property is stated per mirror object (its uid): the janitor's job is to
+// remove that object, and it does so even if the inner side holds the object with
+// finalizers for a while. Whether another mirror with the same parent uid can be
+// created afterwards depends on whoever creates mirrors (the sync reconciler,
+// whose reconciles triggered by an older copy of the outer object drain in finite
+// time), not on the janitor; the stable form is a property of the two reconcilers
+// together and is what R1's proof establishes for the parent uids it cares about.
+//
+// R3 needs D3 below: the janitor's Delete stamps the deletion timestamp of an
+// object with finalizers, the inner side then removes its finalizers, and the
+// update that removes the last finalizer removes the object.
 pub open spec fn widget_mirrors_eventually_collected() -> TempPred<ClusterState> {
-    tla_forall(|i: (ObjectRef, Uid)| widget_mirror_eventually_collected_per_key(i.0, i.1))
+    tla_forall(|i: (ObjectRef, Uid, Uid)| widget_mirror_eventually_collected_per_object(i.0, i.1, i.2))
 }
 
-pub open spec fn widget_mirror_eventually_collected_per_key(key: ObjectRef, parent_uid: Uid) -> TempPred<ClusterState> {
-    always(lift_state(parent_absent(key, parent_uid))).leads_to(always(lift_state(mirror_collected(key, parent_uid))))
+pub open spec fn widget_mirror_eventually_collected_per_object(key: ObjectRef, parent_uid: Uid, uid: Uid) -> TempPred<ClusterState> {
+    always(lift_state(parent_absent(key, parent_uid))).and(lift_state(mirror_object_is(key, parent_uid, uid)))
+        .leads_to(lift_state(object_is_gone(key, uid)))
+}
+
+// The object at `key` is the mirror with uid `uid` pointing at `parent_uid`.
+pub open spec fn mirror_object_is(key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& s.resources().contains_key(key)
+        &&& s.resources()[key].metadata.uid == Some(uid)
+        &&& mirror_of_parent(s.resources()[key], parent_uid)
+    }
+}
+
+// No object with uid `uid` is at `key` (it was removed; uids are never reused).
+pub open spec fn object_is_gone(key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        !(s.resources().contains_key(key) && s.resources()[key].metadata.uid == Some(uid))
+    }
 }
 
 // The key of the outer copy a mirror at `key` would belong to.
@@ -122,21 +148,23 @@ pub open spec fn mirror_collected(key: ObjectRef, parent_uid: Uid) -> StatePred<
     }
 }
 
-// D3, the liveness dependency on the inner side: a terminating mirror is eventually
-// released, that is, the inner side removes every finalizer it owns from an object
-// with a deletion timestamp (and nothing adds finalizers to such an object; the API
-// server rejects that anyway). An axiom in this version; an inner implementation
-// verified in Anvil would discharge it in its own guarantee.
-pub open spec fn inner_terminating(key: ObjectRef) -> StatePred<ClusterState> {
+// D3, the liveness dependency on the inner side: a terminating mirror object is
+// eventually removed, that is, the inner side removes every finalizer it owns from
+// an object with a deletion timestamp (and nothing adds finalizers to such an
+// object; the API server rejects that anyway), after which the API server removes
+// the object. An axiom in this version; an inner implementation verified in Anvil
+// would discharge it in its own guarantee.
+pub open spec fn inner_terminating_object(key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& key.kind == InnerWidgetView::kind()
         &&& s.resources().contains_key(key)
+        &&& s.resources()[key].metadata.uid == Some(uid)
         &&& s.resources()[key].metadata.deletion_timestamp is Some
     }
 }
 
 pub open spec fn inner_releases_terminating_objects() -> TempPred<ClusterState> {
-    tla_forall(|key: ObjectRef| lift_state(inner_terminating(key)).leads_to(lift_state(|s: ClusterState| !inner_terminating(key)(s))))
+    tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
 }
 
 }

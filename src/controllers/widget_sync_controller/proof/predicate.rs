@@ -16,12 +16,19 @@ use vstd::prelude::*;
 
 verus! {
 
-// The rely condition of every other controller, as one state predicate. `ours`
-// is the set of controller ids that are ours (the sync and janitor reconcilers).
-pub open spec fn lifted_widget_rely_condition(cluster: Cluster, ours: Set<int>) -> TempPred<ClusterState> {
+// The rely conditions of every other controller, as one state predicate each.
+
+pub open spec fn lifted_sync_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
     lift_state(|s| {
-        forall |other_id| cluster.controller_models.contains_key(other_id) && !ours.contains(other_id)
-            ==> #[trigger] widget_rely(other_id)(s)
+        forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
+            ==> #[trigger] widget_sync_rely(other_id)(s)
+    })
+}
+
+pub open spec fn lifted_janitor_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
+    lift_state(|s| {
+        forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
+            ==> #[trigger] widget_janitor_rely(other_id)(s)
     })
 }
 
