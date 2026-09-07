@@ -8,7 +8,9 @@
 // Two verified reconcilers run in one process: the sync reconciler (triggered by
 // outer Widgets, and by same-named inner Widgets as a latency optimization) and
 // the janitor reconciler (triggered by inner Widgets).
-use anyhow::Result;
+use anyhow::{bail, Result};
+use k8s_openapi::api::authorization::v1::{ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec};
+use kube::api::{Api, PostParams};
 use kube::{Client, CustomResourceExt};
 use std::env;
 use std::time::Duration;
@@ -29,6 +31,49 @@ const DEFAULT_REMOTE_KUBECONFIG: &str = "/etc/widget-sync/remote-kubeconfig/kube
 // a failed reconcile (which is retried) instead of a hung one.
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+// The verbs the sync and janitor reconcilers issue on Widgets in the remote
+// cluster (see deploy/widget_sync/rbac_inner.yaml).
+const REMOTE_WIDGET_VERBS: [&str; 6] = ["get", "list", "watch", "create", "patch", "delete"];
+
+// check_remote_access asks the remote cluster, through a SelfSubjectAccessReview
+// per verb, whether the mounted credential may perform every verb the reconcilers
+// need on widgets.anvil.dev in all namespaces. A missing verb is a deployment
+// error: the controller reports it and exits instead of running reconciles that
+// can never succeed.
+async fn check_remote_access(remote: &Client) -> Result<()> {
+    let reviews: Api<SelfSubjectAccessReview> = Api::all(remote.clone());
+    let mut denied = Vec::new();
+    for verb in REMOTE_WIDGET_VERBS {
+        let review = SelfSubjectAccessReview {
+            spec: SelfSubjectAccessReviewSpec {
+                resource_attributes: Some(ResourceAttributes {
+                    group: Some("anvil.dev".to_string()),
+                    resource: Some("widgets".to_string()),
+                    verb: Some(verb.to_string()),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let status = reviews.create(&PostParams::default(), &review).await?.status.unwrap_or_default();
+        if status.allowed {
+            info!("remote cluster allows {} on widgets.anvil.dev", verb);
+        } else {
+            error!(
+                "remote cluster denies {} on widgets.anvil.dev: {}",
+                verb,
+                status.reason.unwrap_or_else(|| "no reason given".to_string())
+            );
+            denied.push(verb);
+        }
+    }
+    if !denied.is_empty() {
+        bail!("remote credential lacks {} on widgets.anvil.dev", denied.join(", "));
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -48,6 +93,7 @@ async fn main() -> Result<()> {
             env::var("REMOTE_KUBECONFIG").unwrap_or_else(|_| DEFAULT_REMOTE_KUBECONFIG.to_string());
         let primary = Client::try_default().await?;
         let remote = remote_clients_from_kubeconfig(&remote_kubeconfig, REMOTE_REQUEST_TIMEOUT).await?;
+        check_remote_access(&remote.requests).await?;
         let clusters = ClusterClients { primary, remote: Some(remote) };
 
         let sync = run_controller_with_same_name_watch::<Widget, WidgetSyncReconciler, VoidExternalShimLayer, Widget>(
