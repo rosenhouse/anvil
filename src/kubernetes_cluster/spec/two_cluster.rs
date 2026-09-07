@@ -18,8 +18,8 @@
 // is what lets a property proved on Cluster be read as a property of two
 // clusters. It needs every object written to a store to be of a kind the cluster
 // knows and to refer, through its owner references, only to kinds of its own
-// side (object_ok below); the pod monkey is held to that here, controllers are
-// held to it by a hypothesis of the refinement.
+// side (object_ok below); controllers are held to that by a hypothesis of the
+// refinement, the pod monkey by its precondition here.
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{
@@ -212,10 +212,12 @@ impl TwoCluster {
         self.on_side(Side::Primary, self.cluster.disable_req_drop())
     }
 
-    // The pod monkey writes only named pods whose owner references stay on the
-    // pods' side: a pod with an owner reference to a kind of the other side would
-    // be collected by the garbage collector of its own side, which the one-store
-    // model cannot express.
+    // The pod monkey writes only named pods that carry no server-assigned field
+    // and no owner reference: such a pod reads the same in both models. (A pod
+    // with an owner reference to a kind of the other side would be collected by
+    // the garbage collector of its own side, which the one-store model cannot
+    // express; and which of the monkey's actions runs is chosen from the pod, so
+    // the pod must not change under the abstraction.)
     pub open spec fn pod_monkey_next(self) -> Action<TwoClusterState, PodView, ()> {
         let base = self.on_side(Side::Primary, self.cluster.pod_monkey_next());
         Action {
@@ -268,7 +270,10 @@ impl TwoCluster {
 
     pub open spec fn pod_ok(self, pod: PodView) -> bool {
         &&& pod.metadata.name is Some
-        &&& self.object_ok(pod.marshal())
+        &&& pod.metadata.uid is None
+        &&& pod.metadata.resource_version is None
+        &&& pod.metadata.owner_references is None
+        &&& pod.metadata.annotations is None
     }
 
     pub open spec fn init(self) -> StatePred<TwoClusterState> {
