@@ -260,9 +260,9 @@ pub open spec fn abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next
     }
 }
 
-// Every object of a store is of a kind of that store's side, under a key of its own kind.
+// Every object of a store is of a known kind of that store's side, under a key of its own kind.
 pub open spec fn store_sided(tc: TwoCluster, side: Side, store: StoredState) -> bool {
-    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && store[k].kind == k.kind
+    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && tc.kind_ok(k.kind) && store[k].kind == k.kind
 }
 
 pub open spec fn stores_sided(tc: TwoCluster, s: TwoClusterState) -> bool {
@@ -767,17 +767,15 @@ pub proof fn lemma_add_empty<V>(ms: Multiset<V>)
 // ---------------------------------------------------------------------------
 
 // The installed custom types validate objects and transitions without looking at
-// the relabeled fields. (A type that put a uid in its spec would violate this.)
-pub open spec fn installed_types_relabel_invariant(tc: TwoCluster, r: Relabeling) -> bool {
-    let it = tc.cluster.installed_types;
-    &&& forall |name: StringView, o: DynamicObjectView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
-        ==> (#[trigger] (it[name].valid_object)(relabel_obj(tc, r, o))) == (it[name].valid_object)(o)
-    &&& forall |name: StringView, o: DynamicObjectView, old: DynamicObjectView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
-        ==> (#[trigger] (it[name].valid_transition)(relabel_obj(tc, r, o), relabel_obj(tc, r, old))) == (it[name].valid_transition)(o, old)
-}
-
-pub open spec fn kind_is_known(tc: TwoCluster, kind: Kind) -> bool {
-    kind is CustomResourceKind ==> tc.cluster.installed_types.contains_key(kind->CustomResourceKind_0)
+// the metadata. (CustomResourceView promises this for state validation; a type
+// whose transition validation read a uid would violate it.)
+pub open spec fn installed_types_ignore_metadata(it: InstalledTypes) -> bool {
+    &&& forall |name: StringView, o: DynamicObjectView, m: ObjectMetaView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
+        ==> (#[trigger] (it[name].valid_object)(DynamicObjectView { metadata: m, ..o })) == (it[name].valid_object)(o)
+    &&& forall |name: StringView, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView|
+        it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
+        ==> (#[trigger] (it[name].valid_transition)(DynamicObjectView { metadata: m, ..o }, DynamicObjectView { metadata: m_old, ..old }))
+            == (it[name].valid_transition)(o, old)
 }
 
 pub proof fn lemma_owner_refs_filter_relabel(tc: TwoCluster, r: Relabeling, refs: Seq<OwnerReferenceView>)
@@ -821,14 +819,14 @@ pub proof fn lemma_unmarshallable_object_relabel(tc: TwoCluster, r: Relabeling, 
 {
 }
 
-pub proof fn lemma_valid_object_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+pub proof fn lemma_valid_object_ignores_metadata(tc: TwoCluster, o: DynamicObjectView, m: ObjectMetaView)
     requires
-        installed_types_relabel_invariant(tc, r),
-        kind_is_known(tc, o.kind),
-    ensures valid_object(relabel_obj(tc, r, o), tc.cluster.installed_types) == valid_object(o, tc.cluster.installed_types),
+        installed_types_ignore_metadata(tc.cluster.installed_types),
+        tc.kind_ok(o.kind),
+    ensures valid_object(DynamicObjectView { metadata: m, ..o }, tc.cluster.installed_types) == valid_object(o, tc.cluster.installed_types),
 {
     let it = tc.cluster.installed_types;
-    let o1 = relabel_obj(tc, r, o);
+    let o1 = DynamicObjectView { metadata: m, ..o };
     match o.kind {
         Kind::CustomResourceKind(name) => {
             assert((it[name].valid_object)(o1) == (it[name].valid_object)(o));
@@ -837,19 +835,39 @@ pub proof fn lemma_valid_object_relabel(tc: TwoCluster, r: Relabeling, o: Dynami
     }
 }
 
-pub proof fn lemma_valid_transition_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView, old: DynamicObjectView)
+pub proof fn lemma_valid_transition_ignores_metadata(tc: TwoCluster, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView)
     requires
-        installed_types_relabel_invariant(tc, r),
-        kind_is_known(tc, o.kind),
-    ensures valid_transition(relabel_obj(tc, r, o), relabel_obj(tc, r, old), tc.cluster.installed_types) == valid_transition(o, old, tc.cluster.installed_types),
+        installed_types_ignore_metadata(tc.cluster.installed_types),
+        tc.kind_ok(o.kind),
+    ensures valid_transition(DynamicObjectView { metadata: m, ..o }, DynamicObjectView { metadata: m_old, ..old }, tc.cluster.installed_types)
+        == valid_transition(o, old, tc.cluster.installed_types),
 {
     let it = tc.cluster.installed_types;
     match o.kind {
         Kind::CustomResourceKind(name) => {
-            assert((it[name].valid_transition)(relabel_obj(tc, r, o), relabel_obj(tc, r, old)) == (it[name].valid_transition)(o, old));
+            assert((it[name].valid_transition)(DynamicObjectView { metadata: m, ..o }, DynamicObjectView { metadata: m_old, ..old })
+                == (it[name].valid_transition)(o, old));
         },
         _ => {},
     }
+}
+
+pub proof fn lemma_valid_object_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+    requires
+        installed_types_ignore_metadata(tc.cluster.installed_types),
+        tc.kind_ok(o.kind),
+    ensures valid_object(relabel_obj(tc, r, o), tc.cluster.installed_types) == valid_object(o, tc.cluster.installed_types),
+{
+    lemma_valid_object_ignores_metadata(tc, o, relabel_obj(tc, r, o).metadata);
+}
+
+pub proof fn lemma_valid_transition_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView, old: DynamicObjectView)
+    requires
+        installed_types_ignore_metadata(tc.cluster.installed_types),
+        tc.kind_ok(o.kind),
+    ensures valid_transition(relabel_obj(tc, r, o), relabel_obj(tc, r, old), tc.cluster.installed_types) == valid_transition(o, old, tc.cluster.installed_types),
+{
+    lemma_valid_transition_ignores_metadata(tc, o, old, relabel_obj(tc, r, o).metadata, relabel_obj(tc, r, old).metadata);
 }
 
 }
