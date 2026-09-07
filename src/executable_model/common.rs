@@ -87,6 +87,26 @@ impl ApiResource {
     {
         kind_exec_from_str(self.as_kube_ref().kind.as_str())
     }
+
+    #[verifier(external_body)]
+    pub fn clone(&self) -> (res: ApiResource)
+        ensures res@ == self@,
+    {
+        ApiResource::from_kube_in(self.as_kube_ref().clone(), self.cluster())
+    }
+}
+
+impl PatchTests {
+    // pass checks the `test` operations against the stored object, the way the
+    // API server evaluates them before applying the rest of the JSON patch.
+    #[verifier(external_body)]
+    pub fn pass(&self, obj: &DynamicObject) -> (b: bool)
+        ensures b == self@.pass(obj@),
+    {
+        let metadata = &obj.as_kube_ref().metadata;
+        (self.uid_value().is_none() || self.uid_value() == metadata.uid)
+        && (self.generation_value().is_none() || self.generation_value() == metadata.generation)
+    }
 }
 
 impl Preconditions {
@@ -335,23 +355,40 @@ impl DynamicObject {
         self.as_kube_mut_ref().metadata = other.as_kube_ref().metadata.clone()
     }
 
-    // We intentionally leave set_spec_from overly sets the data and
-    // set_status_from does not set any data because they are rather
-    // difficult to implement: we'll have to unmarshal other.inner and extract
-    // the spec/status part from the json representation.
-    // Since these two are left empty, the conformance test should not check
-    // the content of the spec and status.
+    // In a kube DynamicObject everything but the type and object metadata lives
+    // in `data`, a JSON object. The model's `status` is data["status"] and the
+    // model's `spec` is everything else in data (a built-in kind such as
+    // ConfigMap has no "spec" key; its payload is still the model's spec).
+    #[verifier(external)]
+    fn status_json(&self) -> Option<serde_json::Value> {
+        self.as_kube_ref().data.get("status").cloned()
+    }
+
+    #[verifier(external)]
+    fn set_status_json(&mut self, status: Option<serde_json::Value>) {
+        let data = &mut self.as_kube_mut_ref().data;
+        match status {
+            // serde_json turns a Null `data` into an object on insertion
+            Some(status) => data["status"] = status,
+            None => if let Some(data) = data.as_object_mut() { data.remove("status"); },
+        }
+    }
+
     #[verifier(external_body)]
     pub fn set_spec_from(&mut self, other: &DynamicObject)
         ensures final(self)@ == old(self)@.with_spec(other@.spec)
     {
-        self.as_kube_mut_ref().data = other.as_kube_ref().data.clone()
+        let status = self.status_json();
+        self.as_kube_mut_ref().data = other.as_kube_ref().data.clone();
+        self.set_status_json(status);
     }
 
     #[verifier(external_body)]
     pub fn set_status_from(&mut self, other: &DynamicObject)
         ensures final(self)@ == old(self)@.with_status(other@.status)
-    {}
+    {
+        self.set_status_json(other.status_json());
+    }
 
     #[verifier(external_body)]
     pub fn set_default_status(&mut self, Ghost(installed_types): Ghost<model_types::InstalledTypes>)
