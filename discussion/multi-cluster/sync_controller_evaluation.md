@@ -506,10 +506,15 @@ Scope:
   them wrong.
 - `src/executable_model/api_server.rs` and the conformance tests follow the
   same rules.
-- Blast radius measured on the current tree: 107 `ObjectMetaView { .. }`
-  literals without a rest pattern that need the field, 38 whole-metadata
-  equality sites in existing proofs that need inspection, plus a full
-  re-verification. Estimate one to two weeks.
+- Blast radius, measured by making the change: the struct and its
+  `default()`, the create and update literals in the API server model, the
+  delete-with-finalizers branch, three proof sites that replicate the create
+  literal (VReplicaSet and VDeployment helper invariants), the executable
+  model's create/update/delete paths, one exec getter, and one unit test.
+  Whole-metadata equalities in existing proofs compare objects that are both
+  constructed with `generation: None`, so they are unaffected. Plus a full
+  re-verification. (An earlier draft estimated 107 literal sites; that count
+  was an artifact of line-based grep over multi-line `..self` helpers.)
 
 ### 4.2 Required: cluster-tagged wrappers and shim layer
 
