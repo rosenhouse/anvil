@@ -81,7 +81,7 @@ pub open spec fn ru_resp_msg_is_ok_list_resp_containing_matched_vrs(
         &&& VReplicaSetView::unmarshal(etcd_obj) is Ok
         // weakly equal to etcd object
         &&& valid_owned_obj_key(vd, s)(key)
-        &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
         &&& etcd_vrs.spec == vrs.spec
     }
     &&& exists |i: int| #![trigger managed_vrs_list[i]] {
@@ -152,7 +152,7 @@ pub open spec fn local_state_at_after_scale_vrs(vd: VDeploymentView, controller_
         &&& valid_owned_obj_key(vd, s)(key)
         &&& filter_new_vrs_keys(vd.spec.template, s)(key)
         &&& vrs.object_ref() == key
-        &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
         &&& etcd_vrs.spec.without_replicas() == vrs.spec.without_replicas()
         // branch condition for scale_new_vrs
         &&& if get_replicas(vd.spec.replicas) > get_replicas(etcd_vrs.spec.replicas) {
@@ -197,7 +197,7 @@ pub open spec fn ru_req_msg_is_scale_new_vrs_by_one_req(
         //// Q: do we really need this?
         // &&& filter_new_vrs_keys(vd.spec.template, s)(key)
         // spec hasn't been updated here
-        &&& etcd_vrs.metadata.without_resource_version() == req_vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == req_vrs.metadata.without_resource_version_and_generation()
         &&& req_vrs.spec == VReplicaSetSpecView { // eq w/o replicas
             replicas: Some(req_vrs_replicas),
             ..etcd_vrs.spec

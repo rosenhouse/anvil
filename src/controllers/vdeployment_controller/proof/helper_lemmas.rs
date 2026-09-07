@@ -408,7 +408,7 @@ requires
         &&& s.resources().contains_key(key)
         &&& etcd_obj.kind == VReplicaSetView::kind()
         &&& VReplicaSetView::unmarshal(etcd_obj) is Ok
-        &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
         &&& etcd_vrs.spec == vrs.spec
     },
     managed_vrs_list.map_values(|vrs: VReplicaSetView| vrs.object_ref()).to_set()

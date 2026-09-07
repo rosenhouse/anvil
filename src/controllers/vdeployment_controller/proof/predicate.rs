@@ -160,7 +160,7 @@ pub open spec fn resp_msg_is_ok_list_resp_containing_matched_vrs(
         &&& VReplicaSetView::unmarshal(etcd_obj) is Ok
         // weakly equal to etcd object
         &&& valid_owned_obj_key(vd, s)(key)
-        &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
         &&& etcd_vrs.spec == vrs.spec
     }
 }
@@ -287,7 +287,7 @@ pub open spec fn resp_msg_is_ok_create_resp_containing_new_vrs(
     // weakly equal to etcd object
     &&& valid_owned_obj_key(vd, s)(key)
     &&& filter_new_vrs_keys(vd.spec.template, s)(key)
-    &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+    &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
     &&& etcd_vrs.spec == vrs.spec
     // new_vrs uid does not match any old_vrs uid. TODO: find a better way to not talk about local state
     &&& forall |i| #![trigger vds.old_vrs_list[i]] 0 <= i < vds.old_vrs_list.len() ==>
@@ -320,7 +320,7 @@ pub open spec fn req_msg_is_scale_old_vrs_req(
         &&& s.resources().contains_key(key)
         &&& valid_owned_obj_key(vd, s)(key)
         // the scaled down vrs can previously pass old vrs filter
-        &&& etcd_vrs.metadata.without_resource_version() == req_vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == req_vrs.metadata.without_resource_version_and_generation()
         // owned by vd
         &&& req_vrs.metadata.owner_references is Some
         &&& req_vrs.metadata.owner_references->0.filter(controller_owner_filter()) == seq![vd.controller_owner_ref()]
@@ -329,7 +329,7 @@ pub open spec fn req_msg_is_scale_old_vrs_req(
         // stronger than local_state_is_valid_and_coherent_with_etcd
         &&& state.old_vrs_index < state.old_vrs_list.len()
         // of course, replica isn't updated locally
-        &&& req_vrs.metadata.without_resource_version() == local_vrs.metadata.without_resource_version()
+        &&& req_vrs.metadata.without_resource_version_and_generation() == local_vrs.metadata.without_resource_version_and_generation()
         // this is important, then we know etcd_vrs can pass old_vrs_filter from the coherence predicate
         &&& pre_update ==> get_replicas(etcd_vrs.spec.replicas) > 0
         // derive from no_duplicates(), coherence isn't affected
@@ -372,7 +372,7 @@ pub open spec fn req_msg_is_scale_new_vrs_req(
         //// Q: do we really need this?
         // &&& filter_new_vrs_keys(vd.spec.template, s)(key)
         // spec hasn't been updated here
-        &&& etcd_vrs.metadata.without_resource_version() == req_vrs.metadata.without_resource_version()
+        &&& etcd_vrs.metadata.without_resource_version_and_generation() == req_vrs.metadata.without_resource_version_and_generation()
         &&& req_vrs.spec == VReplicaSetSpecView { // eq w/o replicas
             replicas: Some(req_vrs_replicas),
             ..etcd_vrs.spec
@@ -599,7 +599,7 @@ pub open spec fn local_state_is_coherent_with_etcd(vd: VDeploymentView, controll
             let etcd_vrs = VReplicaSetView::unmarshal(s.resources()[vrs.object_ref()])->Ok_0;
             &&& s.resources().contains_key(vrs.object_ref())
             &&& valid_owned_obj_key(vd, s)(vrs.object_ref())
-            &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+            &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
         }
         &&& forall |i| #![trigger vds.old_vrs_list[i]] 0 <= i < vds.old_vrs_index ==> {
             let vrs = vds.old_vrs_list[i];
@@ -615,7 +615,7 @@ pub open spec fn local_state_is_coherent_with_etcd(vd: VDeploymentView, controll
             &&& valid_owned_obj_key(vd, s)(key)
             &&& filter_new_vrs_keys(vd.spec.template, s)(key)
             &&& vrs.object_ref() == key
-            &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+            &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
             // we don't need to check unless MaxSurge | MaxUnavailable is supported
             // &&& etcd_vrs.spec == new_vrs.spec
         }
