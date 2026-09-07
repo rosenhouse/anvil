@@ -140,8 +140,6 @@ pub open spec fn outer_status_without_inner(outer_generation: Option<int>, previ
 }
 
 // Reasons reported in the Synced condition.
-pub open spec fn reason_creating() -> StringView { "Creating"@ }
-pub open spec fn reason_propagating() -> StringView { "Propagating"@ }
 pub open spec fn reason_inner_converging() -> StringView { "InnerConverging"@ }
 pub open spec fn reason_foreign_object() -> StringView { "ForeignObject"@ }
 pub open spec fn reason_inner_terminating() -> StringView { "InnerTerminating"@ }
@@ -222,5 +220,74 @@ macro_rules! implement_widget_view_methods {
 
 implement_widget_view_methods!(OuterWidgetView, "widget");
 implement_widget_view_methods!(InnerWidgetView, "widget@inner");
+
+
+// ---------------------------------------------------------------------------
+// The mirror relation between an outer copy and an inner object. Used by the
+// reconcilers and by the theorems in liveness_theorem.rs.
+// ---------------------------------------------------------------------------
+
+// The key of the mirror of `outer` in the inner cluster: same namespace and name,
+// the inner cluster's model kind.
+pub open spec fn inner_key(outer: OuterWidgetView) -> ObjectRef {
+    ObjectRef {
+        kind: InnerWidgetView::kind(),
+        namespace: outer.metadata.namespace->0,
+        name: outer.metadata.name->0,
+    }
+}
+
+// The parent-uid annotation value: the outer copy's uid, copied as a string. Uids
+// are opaque tokens; the controller only ever compares them for equality.
+pub open spec fn parent_uid_of(outer: OuterWidgetView) -> StringView {
+    int_to_string_view(outer.metadata.uid->0)
+}
+
+// The mirror the sync controller creates: same name and namespace, the identifying
+// label and annotation, the outer spec, no owner references, no finalizers.
+pub open spec fn make_inner(outer: OuterWidgetView) -> InnerWidgetView {
+    InnerWidgetView {
+        metadata: ObjectMetaView::default()
+            .with_name(outer.metadata.name->0)
+            .with_namespace(outer.metadata.namespace->0)
+            .add_label(managed_by_key(), managed_by_value())
+            .add_annotation(parent_uid_key(), parent_uid_of(outer)),
+        spec: outer.spec,
+        status: None,
+    }
+}
+
+// An inner object is the mirror of `outer` iff it carries the managed-by label and
+// its parent-uid annotation equals the outer copy's uid. Anything else is refused.
+pub open spec fn is_mirror_of(inner: InnerWidgetView, outer: OuterWidgetView) -> bool {
+    &&& inner.metadata.labels is Some
+    &&& inner.metadata.labels->0.contains_key(managed_by_key())
+    &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
+    &&& inner.metadata.annotations is Some
+    &&& inner.metadata.annotations->0.contains_key(parent_uid_key())
+    &&& inner.metadata.annotations->0[parent_uid_key()] == parent_uid_of(outer)
+}
+
+// The inner implementation has processed the mirror's current spec.
+pub open spec fn inner_caught_up(inner: InnerWidgetView) -> bool {
+    &&& inner.status is Some
+    &&& inner.status->0.observed_generation is Some
+    &&& inner.metadata.generation is Some
+    &&& inner.status->0.observed_generation == inner.metadata.generation
+}
+
+// A mirror is one the sync controller created: it carries the managed-by label and
+// a parent-uid annotation. Objects without both are left alone.
+pub open spec fn has_mirror_identity(inner: InnerWidgetView) -> bool {
+    &&& inner.metadata.labels is Some
+    &&& inner.metadata.labels->0.contains_key(managed_by_key())
+    &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
+    &&& inner.metadata.annotations is Some
+    &&& inner.metadata.annotations->0.contains_key(parent_uid_key())
+}
+
+pub open spec fn parent_uid_annotation(inner: InnerWidgetView) -> StringView {
+    inner.metadata.annotations->0[parent_uid_key()]
+}
 
 }

@@ -204,7 +204,7 @@ pub fn make_inner(outer: &OuterWidget) -> (inner: InnerWidget)
     metadata.set_name(outer.metadata().name().unwrap());
     metadata.set_namespace(outer.metadata().namespace().unwrap());
     metadata.add_label("anvil.dev/managed-by".to_string(), "widget-sync".to_string());
-    metadata.add_annotation("anvil.dev/parent-uid".to_string(), outer.metadata().uid().unwrap());
+    metadata.add_annotation("anvil.dev/parent-uid".to_string(), outer.metadata().uid().unwrap().as_annotation_value());
     inner.set_metadata(metadata);
     inner.set_spec(outer.spec());
     inner
@@ -226,7 +226,7 @@ pub fn is_mirror_of(inner: &InnerWidget, outer: &OuterWidget) -> (b: bool)
         return false;
     }
     managed_by.unwrap().eq(&"widget-sync".to_string())
-        && parent_uid.unwrap().eq(&outer.metadata().uid().unwrap())
+        && outer.metadata().uid().unwrap().matches_annotation_value(&parent_uid.unwrap())
 }
 
 // Whether the inner implementation has processed the mirror's current spec.

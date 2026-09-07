@@ -2031,4 +2031,30 @@ pub proof fn janitor_eventually_collects_mirrors(spec: TempPred<ClusterState>, c
     spec_entails_tla_forall(spec, per_object);
 }
 
+// The janitor's ESR as a whole: R3 and sound deletes.
+pub proof fn janitor_satisfies_its_spec(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
+    requires
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(janitor_next_with_wf(cluster, controller_id)),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        spec.entails(always(lifted_janitor_rely_condition(cluster, controller_id))),
+        spec.entails(inner_releases_terminating_objects()),
+    ensures spec.entails(widget_janitor_esr(controller_id)),
+{
+    janitor_eventually_collects_mirrors(spec, cluster, controller_id);
+    assert(janitor_next_with_wf(cluster, controller_id).entails(always(lift_action(cluster.next()))));
+    entails_trans(spec, janitor_next_with_wf(cluster, controller_id), always(lift_action(cluster.next())));
+    cluster.lemma_always_every_in_flight_req_msg_from_controller_has_valid_controller_id(spec);
+    cluster.lemma_always_no_pending_request_to_api_server_from_api_server_or_external(spec);
+    cluster.lemma_always_all_requests_from_pod_monkey_are_api_pod_requests(spec);
+    cluster.lemma_always_all_requests_from_builtin_controllers_are_api_delete_requests(spec);
+    lemma_always_widget_janitor_guarantee(spec, cluster, controller_id);
+    lemma_janitor_rely_implies_mirror_write_facts(spec, cluster, controller_id);
+    lemma_always_every_mirror_is_bound(spec, cluster);
+    lemma_always_janitor_deletes_are_sound(spec, cluster, controller_id);
+    entails_and(spec, widget_mirrors_eventually_collected(), always(lift_state(janitor_deletes_are_sound(controller_id))));
+}
+
 }

@@ -1,23 +1,17 @@
 // The Widget sync reconciler as a Welder controller spec, its singleton core, and
 // the composition of the sync reconciler with the janitor.
 //
-// The sync reconciler's spec differs from the other controllers' in two ways:
-//
-// * its partial rely names the janitor: from the janitor it relies on the
-//   janitor's own guarantee (List outer copies, Delete a mirror with a uid
-//   precondition), from anyone else on widget_sync_rely;
-// * its liveness dependency is the janitor's ESR (R3, mirrors of absent parents
-//   are collected) and its environment rely is D3 (the inner side releases
-//   terminating mirrors).
-//
-// Both are discharged by composing the janitor (which has no liveness dependency)
-// with the sync reconciler through compose_dep.
+// The sync reconciler depends on the janitor only through the janitor's
+// ControllerSpec: on its guarantee (the partial rely for the janitor's id) and on
+// its ESR (the liveness dependency: R3, and that the janitor's Deletes are sound).
+// Its environment rely is D3 (the inner side releases terminating mirrors).
+// compose_dep discharges the dependency with the janitor's proved ESR.
 use crate::composition::widget_janitor_reconciler::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
-use crate::widget_sync_controller::model::{install::*, sync_reconciler};
+use crate::widget_sync_controller::model::install::*;
 use crate::widget_sync_controller::proof::{guarantee::*, liveness::sync_proof::*, liveness::sync_status_proof::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
@@ -42,8 +36,8 @@ pub open spec fn widget_sync_partial_rely(janitor_id: int) -> spec_fn(int) -> Te
 pub open spec fn widget_sync_controller_spec(id: int, janitor_id: int) -> ControllerSpec {
     ControllerSpec {
         esr: widget_sync_esr(),
-        // R3, the janitor's ESR.
-        liveness_dependency: widget_mirrors_eventually_collected(),
+        // The janitor's ESR: R3 and sound deletes.
+        liveness_dependency: widget_janitor_esr(janitor_id),
         safety_guarantee: always(lift_state(widget_sync_guarantee(id))),
         // D3: the inner side releases terminating mirrors.
         environment_rely: inner_releases_terminating_objects(),
@@ -53,10 +47,10 @@ pub open spec fn widget_sync_controller_spec(id: int, janitor_id: int) -> Contro
     }
 }
 
-pub open spec fn widget_sync_core_set(id: int) -> CoreSet {
+pub open spec fn widget_sync_core_set(id: int, janitor_id: int) -> CoreSet {
     CoreSet {
         members: Set::empty().insert(id),
-        liveness_dependency: widget_mirrors_eventually_collected(),
+        liveness_dependency: widget_janitor_esr(janitor_id),
     }
 }
 
@@ -89,11 +83,11 @@ pub proof fn sync_rely_facts_imply_lifted_condition(spec: TempPred<ClusterState>
 pub proof fn widget_sync_singleton_core_holds(cluster: CoreCluster, id: int, janitor_id: int)
     requires
         cluster.registry.contains_pair(id, widget_sync_controller_spec(id, janitor_id)),
-        well_formed(cluster, widget_sync_core_set(id)),
+        well_formed(cluster, widget_sync_core_set(id, janitor_id)),
     ensures
-        core(cluster, widget_sync_core_set(id)),
+        core(cluster, widget_sync_core_set(id, janitor_id)),
 {
-    let s = widget_sync_core_set(id);
+    let s = widget_sync_core_set(id, janitor_id);
     let spec = cluster_model(cluster);
     let inner = cluster.cluster;
 
@@ -141,7 +135,7 @@ pub proof fn widget_sync_singleton_core_holds(cluster: CoreCluster, id: int, jan
             tla_forall_apply(env_fn, id);
             entails_trans(spec_rde, tla_forall(env_fn), env_fn(id));
             assert(env_fn(id) == inner_releases_terminating_objects());
-            assert(s.liveness_dependency == widget_mirrors_eventually_collected());
+            assert(s.liveness_dependency == widget_janitor_esr(janitor_id));
             entails_trans(spec_rde, spec, lift_state(inner.init()));
             entails_trans(spec_rde, spec, sync_next_with_wf(inner, id));
             sync_eventually_synced(spec_rde, inner, id, janitor_id);
@@ -190,11 +184,11 @@ pub proof fn sync_guarantee_implies_janitor_rely(id: int)
                         &&& outer.object_ref() == outer_key
                         &&& outer.metadata.uid is Some
                         &&& req.namespace == outer_key.namespace
-                        &&& req.obj == #[trigger] sync_reconciler::make_inner(outer).marshal()
+                        &&& req.obj == #[trigger] make_inner(outer).marshal()
                         &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
                     };
                     InnerWidgetView::marshal_preserves_metadata();
-                    assert(req.obj.metadata == sync_reconciler::make_inner(outer).metadata);
+                    assert(req.obj.metadata == make_inner(outer).metadata);
                     assert(req.obj.metadata.name == Some(outer.metadata.name->0));
                     let key2 = ObjectRef { kind: OuterWidgetView::kind(), namespace: req.namespace, name: req.obj.metadata.name->0 };
                     assert(key2 == outer_key);
@@ -213,13 +207,13 @@ pub proof fn widget_pair_core_holds(cluster: CoreCluster, janitor_id: int, sync_
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(sync_id, janitor_id)),
         janitor_id != sync_id,
         well_formed(cluster, widget_janitor_core_set(janitor_id)),
-        well_formed(cluster, widget_sync_core_set(sync_id)),
+        well_formed(cluster, widget_sync_core_set(sync_id, janitor_id)),
     ensures
-        well_formed(cluster, union_coreset(widget_janitor_core_set(janitor_id), widget_sync_core_set(sync_id), true_pred())),
-        core(cluster, union_coreset(widget_janitor_core_set(janitor_id), widget_sync_core_set(sync_id), true_pred())),
+        well_formed(cluster, union_coreset(widget_janitor_core_set(janitor_id), widget_sync_core_set(sync_id, janitor_id), true_pred())),
+        core(cluster, union_coreset(widget_janitor_core_set(janitor_id), widget_sync_core_set(sync_id, janitor_id), true_pred())),
 {
     let s1 = widget_janitor_core_set(janitor_id);
-    let s2 = widget_sync_core_set(sync_id);
+    let s2 = widget_sync_core_set(sync_id, janitor_id);
     let spec = cluster_model(cluster);
 
     widget_janitor_singleton_core_holds(cluster, janitor_id);
@@ -230,7 +224,7 @@ pub proof fn widget_pair_core_holds(cluster: CoreCluster, janitor_id: int, sync_
         let esr_s1 = tla_forall(esr_fn_s1);
         assert(s1.members.contains(janitor_id));
         tla_forall_apply(esr_fn_s1, janitor_id);
-        assert(esr_fn_s1(janitor_id) == widget_mirrors_eventually_collected());
+        assert(esr_fn_s1(janitor_id) == widget_janitor_esr(janitor_id));
         entails_trans(spec.and(esr_s1), esr_s1, s2.liveness_dependency);
         entails_implies(spec, esr_s1, s2.liveness_dependency);
     }
@@ -307,7 +301,7 @@ pub open spec fn widget_core_cluster() -> CoreCluster {
 }
 
 pub open spec fn widget_core_set() -> CoreSet {
-    union_coreset(widget_janitor_core_set(widget_janitor_id()), widget_sync_core_set(widget_sync_id()), true_pred())
+    union_coreset(widget_janitor_core_set(widget_janitor_id()), widget_sync_core_set(widget_sync_id(), widget_janitor_id()), true_pred())
 }
 
 proof fn widget_kind_strings_distinct()
@@ -328,7 +322,7 @@ pub proof fn widget_core_holds()
     assert(cluster.cluster.type_is_installed_in_cluster::<OuterWidgetView>());
     assert(cluster.cluster.type_is_installed_in_cluster::<InnerWidgetView>());
     assert(well_formed(cluster, widget_janitor_core_set(widget_janitor_id())));
-    assert(well_formed(cluster, widget_sync_core_set(widget_sync_id())));
+    assert(well_formed(cluster, widget_sync_core_set(widget_sync_id(), widget_janitor_id())));
     widget_pair_core_holds(cluster, widget_janitor_id(), widget_sync_id());
 }
 

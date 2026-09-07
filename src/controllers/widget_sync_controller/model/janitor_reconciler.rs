@@ -11,6 +11,7 @@ use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::{spec_types::*, step::*};
+pub use crate::widget_sync_controller::trusted::spec_types::{has_mirror_identity, parent_uid_annotation};
 use vstd::prelude::*;
 
 verus! {
@@ -55,20 +56,6 @@ pub open spec fn reconcile_error(state: WidgetJanitorReconcileState) -> bool {
 
 pub open spec fn at_step(step: WidgetJanitorStepView) -> WidgetJanitorReconcileState {
     WidgetJanitorReconcileState { reconcile_step: step }
-}
-
-// A mirror is one the sync controller created: it carries the managed-by label and
-// a parent-uid annotation. Objects without both are left alone.
-pub open spec fn has_mirror_identity(inner: InnerWidgetView) -> bool {
-    &&& inner.metadata.labels is Some
-    &&& inner.metadata.labels->0.contains_key(managed_by_key())
-    &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
-    &&& inner.metadata.annotations is Some
-    &&& inner.metadata.annotations->0.contains_key(parent_uid_key())
-}
-
-pub open spec fn parent_uid_annotation(inner: InnerWidgetView) -> StringView {
-    inner.metadata.annotations->0[parent_uid_key()]
 }
 
 // The listed outer copies contain the mirror's parent: some object's uid, as a

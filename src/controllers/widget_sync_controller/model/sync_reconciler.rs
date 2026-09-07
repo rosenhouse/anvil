@@ -6,6 +6,7 @@ use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::{spec_types::*, step::*};
+pub use crate::widget_sync_controller::trusted::spec_types::{inner_key, parent_uid_of, make_inner, is_mirror_of, inner_caught_up};
 use vstd::prelude::*;
 
 verus! {
@@ -50,55 +51,6 @@ pub open spec fn reconcile_error(state: WidgetSyncReconcileState) -> bool {
 
 pub open spec fn at_step(step: WidgetSyncStepView) -> WidgetSyncReconcileState {
     WidgetSyncReconcileState { reconcile_step: step }
-}
-
-// The key of the mirror of `outer` in the inner cluster: same namespace and name,
-// the inner cluster's model kind.
-pub open spec fn inner_key(outer: OuterWidgetView) -> ObjectRef {
-    ObjectRef {
-        kind: InnerWidgetView::kind(),
-        namespace: outer.metadata.namespace->0,
-        name: outer.metadata.name->0,
-    }
-}
-
-// The parent-uid annotation value: the outer copy's uid, copied as a string. Uids
-// are opaque tokens; the controller only ever compares them for equality.
-pub open spec fn parent_uid_of(outer: OuterWidgetView) -> StringView {
-    int_to_string_view(outer.metadata.uid->0)
-}
-
-// The mirror the sync controller creates: same name and namespace, the identifying
-// label and annotation, the outer spec, no owner references, no finalizers.
-pub open spec fn make_inner(outer: OuterWidgetView) -> InnerWidgetView {
-    InnerWidgetView {
-        metadata: ObjectMetaView::default()
-            .with_name(outer.metadata.name->0)
-            .with_namespace(outer.metadata.namespace->0)
-            .add_label(managed_by_key(), managed_by_value())
-            .add_annotation(parent_uid_key(), parent_uid_of(outer)),
-        spec: outer.spec,
-        status: None,
-    }
-}
-
-// An inner object is the mirror of `outer` iff it carries the managed-by label and
-// its parent-uid annotation equals the outer copy's uid. Anything else is refused.
-pub open spec fn is_mirror_of(inner: InnerWidgetView, outer: OuterWidgetView) -> bool {
-    &&& inner.metadata.labels is Some
-    &&& inner.metadata.labels->0.contains_key(managed_by_key())
-    &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
-    &&& inner.metadata.annotations is Some
-    &&& inner.metadata.annotations->0.contains_key(parent_uid_key())
-    &&& inner.metadata.annotations->0[parent_uid_key()] == parent_uid_of(outer)
-}
-
-// The inner implementation has processed the mirror's current spec.
-pub open spec fn inner_caught_up(inner: InnerWidgetView) -> bool {
-    &&& inner.status is Some
-    &&& inner.status->0.observed_generation is Some
-    &&& inner.metadata.generation is Some
-    &&& inner.status->0.observed_generation == inner.metadata.generation
 }
 
 // The JSON patch that replaces the mirror's spec, pinned to the mirror's uid and

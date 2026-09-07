@@ -189,7 +189,7 @@ pub fn parent_listed(objs: &Vec<DynamicObject>, parent_uid: &String) -> (b: bool
         proof {
             assert(objs.deep_view()[i as int] == objs[i as int]@);
         }
-        if uid.is_some() && uid.unwrap().eq(parent_uid) {
+        if uid.is_some() && uid.unwrap().matches_annotation_value(parent_uid) {
             found = true;
         }
         i = i + 1;

@@ -35,24 +35,6 @@ verus! {
 // Snapshots of mirrors.
 // ---------------------------------------------------------------------------
 
-pub open spec fn snapshot_is_mirror(cr: DynamicObjectView) -> bool {
-    &&& InnerWidgetView::unmarshal(cr) is Ok
-    &&& has_mirror_identity(InnerWidgetView::unmarshal(cr)->Ok_0)
-}
-
-pub open spec fn snapshot_parent(cr: DynamicObjectView) -> StringView {
-    parent_uid_annotation(InnerWidgetView::unmarshal(cr)->Ok_0)
-}
-
-// No object carries the parent uid `parent`, and none ever will.
-pub open spec fn parent_absent_forever(parent: StringView) -> StatePred<ClusterState> {
-    |s: ClusterState| {
-        &&& forall |u: int| u >= s.api_server.uid_counter ==> #[trigger] int_to_string_view(u) != parent
-        &&& forall |k: ObjectRef| #[trigger] s.resources().contains_key(k) && s.resources()[k].metadata.uid is Some
-            ==> int_to_string_view(s.resources()[k].metadata.uid->0) != parent
-    }
-}
-
 pub proof fn lemma_parent_absent_forever_is_stable(parent: StringView, s: ClusterState, s_prime: ClusterState)
     requires
         parent_absent_forever(parent)(s),
@@ -658,32 +640,9 @@ proof fn lemma_janitor_decision_soundness_preserved_by_controller_step(
 
 
 // ---------------------------------------------------------------------------
-// The janitor's Deletes in flight are sound. This is the fact the sync
-// reconciler's proof needs about the janitor: a Delete lands only on an object
-// (identified by the uid it tests) whose parent is absent for good, so it never
-// lands on the mirror of an existing outer copy.
+// The janitor's Deletes in flight are sound (janitor_deletes_are_sound in
+// trusted/liveness_theorem.rs, part of the janitor's ESR).
 // ---------------------------------------------------------------------------
-
-pub open spec fn janitor_delete_is_sound(msg: Message, s: ClusterState) -> bool {
-    let req = msg.content.get_delete_request();
-    let obj = s.resources()[req.key];
-    &&& req.preconditions is Some
-    &&& req.preconditions->0.uid is Some
-    &&& req.preconditions->0.uid->0 < s.api_server.uid_counter
-    &&& (s.resources().contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
-        ==> parent_absent_forever(snapshot_parent(obj))(s)
-}
-
-pub open spec fn janitor_deletes_are_sound(controller_id: int) -> StatePred<ClusterState> {
-    |s: ClusterState| {
-        forall |msg: Message| {
-            &&& #[trigger] s.in_flight().contains(msg)
-            &&& msg.src.is_controller_id(controller_id)
-            &&& msg.content is APIRequest
-            &&& msg.content.is_delete_request()
-        } ==> janitor_delete_is_sound(msg, s)
-    }
-}
 
 #[verifier(rlimit(400))]
 #[verifier(spinoff_prover)]
