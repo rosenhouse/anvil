@@ -1,0 +1,79 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: widgets.anvil.dev
+spec:
+  group: anvil.dev
+  names:
+    categories: []
+    kind: Widget
+    plural: widgets
+    shortNames:
+    - wdg
+    singular: widget
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for WidgetSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              count:
+                format: int32
+                type: integer
+              message:
+                nullable: true
+                type: string
+            required:
+            - count
+            type: object
+          status:
+            nullable: true
+            properties:
+              conditions:
+                items:
+                  properties:
+                    message:
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      nullable: true
+                      type: string
+                    status:
+                      type: string
+                    type:
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              observedCount:
+                format: int32
+                nullable: true
+                type: integer
+              observedGeneration:
+                format: int64
+                nullable: true
+                type: integer
+              ready:
+                nullable: true
+                type: boolean
+            type: object
+        required:
+        - spec
+        title: Widget
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

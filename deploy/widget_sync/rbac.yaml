@@ -1,0 +1,53 @@
+# RBAC for the widget sync controller in the outer (primary) cluster.
+# The controller reads Widgets and writes only their status subresource here;
+# its access to the inner cluster comes from the kubeconfig in the
+# widget-sync-remote-kubeconfig Secret (see rbac_inner.yaml).
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync
+  name: widget-sync
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: widget-sync-controller
+  namespace: widget-sync
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-controller
+  name: widget-sync-controller-role
+rules:
+  - apiGroups:
+      - anvil.dev
+    resources:
+      - widgets
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - anvil.dev
+    resources:
+      - widgets/status
+    verbs:
+      - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-controller
+  name: widget-sync-controller-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: widget-sync-controller-role
+subjects:
+  - kind: ServiceAccount
+    name: widget-sync-controller
+    namespace: widget-sync

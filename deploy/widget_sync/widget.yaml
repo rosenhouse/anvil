@@ -1,0 +1,9 @@
+# A sample Widget. Create it in the outer cluster; the sync controller mirrors it
+# into the inner cluster and copies the inner copy's status back.
+apiVersion: anvil.dev/v1
+kind: Widget
+metadata:
+  name: demo
+spec:
+  count: 3
+  message: hello from the outer cluster

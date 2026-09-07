@@ -1,0 +1,6 @@
+# A single-node kind cluster. The two-cluster testbed creates two of these; the
+# Widget example runs no workloads, so worker nodes would only cost resources.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

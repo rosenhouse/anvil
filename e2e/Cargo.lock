@@ -472,7 +472,6 @@ dependencies = [
  "tracing-subscriber",
  "tungstenite 0.20.1",
  "verifiable-controllers",
- "vstd",
 ]
 
 [[package]]
@@ -2638,6 +2637,7 @@ dependencies = [
  "base64 0.13.1",
  "chrono",
  "futures",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "kube-client",

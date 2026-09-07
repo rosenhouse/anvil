@@ -86,6 +86,9 @@ pub enum Error {
 
     #[error("Invalid VDeployment passed admission!")]
     VDeploymentInvalidAdmissionPassed,
+
+    #[error("Widget sync across the two clusters failed!")]
+    WidgetSyncFailed,
 }
 
 pub async fn apply_file(
