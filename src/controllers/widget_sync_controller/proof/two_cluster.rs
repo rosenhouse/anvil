@@ -1464,6 +1464,7 @@ pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_
             .and(two_cluster_status_eventually_mirrored())
             .and(two_cluster_mirrors_stably_collected(tc))
             .and(two_cluster_mirrors_eventually_collected(tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, janitor_id))))
         )
     }),
 {
@@ -1477,7 +1478,8 @@ pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_
         two_cluster_spec_eventually_synced()
         .and(two_cluster_status_eventually_mirrored())
         .and(two_cluster_mirrors_stably_collected(tc))
-        .and(two_cluster_mirrors_eventually_collected(tc)).satisfied_by(ex) by {
+        .and(two_cluster_mirrors_eventually_collected(tc))
+        .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, janitor_id)))).satisfied_by(ex) by {
         assert(lift_state(tc.init()).satisfied_by(ex));
         assert(two_cluster_next_with_wf(tc, sync_id).satisfied_by(ex));
         assert(two_cluster_next_with_wf(tc, janitor_id).satisfied_by(ex));
@@ -1514,7 +1516,175 @@ pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_
         lemma_r2_pull_back(cluster, r, ex);
         lemma_r3s_pull_back(cluster, r, ex);
         lemma_r3_pull_back(cluster, r, ex);
+        assert(always(lift_state(janitor_deletes_are_sound(janitor_id))).satisfied_by(ex1));
+        lemma_janitor_sound_transfer(cluster, r, ex, janitor_id);
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// The janitor's delete soundness, read on two clusters.
+// ---------------------------------------------------------------------------
+
+// A Delete the janitor has in flight names a uid, and if the object it would
+// remove, in the store of its kind, is a mirror with that uid, no outer copy in
+// the primary store carries the mirror's parent uid.
+pub open spec fn two_cluster_janitor_delete_is_sound(tc: TwoCluster, msg: Message, s: TwoClusterState) -> bool {
+    let req = msg.content.get_delete_request();
+    let store = s.store(tc.side_of_kind(req.key.kind)).resources;
+    let obj = store[req.key];
+    &&& req.preconditions is Some
+    &&& req.preconditions->0.uid is Some
+    &&& (store.contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
+        ==> forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && s.primary.resources[k].metadata.uid is Some
+            ==> int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(obj)
+}
+
+pub open spec fn two_cluster_janitor_deletes_are_sound(tc: TwoCluster, controller_id: int) -> StatePred<TwoClusterState> {
+    |s: TwoClusterState| {
+        forall |msg: Message| {
+            &&& #[trigger] s.in_flight().contains(msg)
+            &&& msg.src.is_controller_id(controller_id)
+            &&& msg.content is APIRequest
+            &&& msg.content.is_delete_request()
+        } ==> two_cluster_janitor_delete_is_sound(tc, msg, s)
+    }
+}
+
+proof fn lemma_janitor_sound_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, controller_id: int, uid_next: Uid, rv_next: ResourceVersion)
+    requires
+        widget_relabeling(cluster, r),
+        inv(widget_two_cluster(cluster), s),
+        janitor_deletes_are_sound(controller_id)(abs(widget_two_cluster(cluster), r, s, uid_next, rv_next)),
+    ensures two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id)(s),
+{
+    let tc = widget_two_cluster(cluster);
+    lemma_widget_sides(cluster);
+    let a = abs(tc, r, s, uid_next, rv_next);
+    assert forall |msg: Message| {
+        &&& #[trigger] s.in_flight().contains(msg)
+        &&& msg.src.is_controller_id(controller_id)
+        &&& msg.content is APIRequest
+        &&& msg.content.is_delete_request()
+    } implies two_cluster_janitor_delete_is_sound(tc, msg, s) by {
+        let m1 = relabel_msg(tc, r, msg);
+        lemma_relabel_msgs_contains(tc, r, s.network.in_flight, msg);
+        assert(a.in_flight().contains(m1));
+        assert(janitor_delete_is_sound(m1, a));
+        let req = msg.content.get_delete_request();
+        let side = tc.side_of_kind(req.key.kind);
+        let store = s.store(side).resources;
+        lemma_abs_object(cluster, r, s, req.key, uid_next, rv_next);
+        if store.contains_key(req.key) && store[req.key].metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(store[req.key]) {
+            let obj = store[req.key];
+            let obj1 = relabel_obj(tc, r, obj);
+            lemma_unmarshal_inner_relabel(tc, r, obj);
+            let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
+            assert(InnerWidgetView::unmarshal(obj1)->Ok_0 == relabel_inner(tc, r, inner));
+            lemma_parent_annotation_relabel(cluster, r, inner);
+            assert(snapshot_is_mirror(obj1));
+            assert(snapshot_parent(obj1) == relabel_uid_string(r.uid, snapshot_parent(obj)));
+            assert(a.resources()[req.key] == obj1);
+            assert(obj1.metadata.uid == m1.content.get_delete_request().preconditions->0.uid);
+            assert(parent_absent_forever(snapshot_parent(obj1))(a));
+            assert forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && s.primary.resources[k].metadata.uid is Some
+                implies int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(obj) by {
+                lemma_abs_object(cluster, r, s, k, uid_next, rv_next);
+                let w = s.primary.resources[k].metadata.uid->0;
+                assert(a.resources().contains_key(k));
+                assert(a.resources()[k].metadata.uid == Some((r.uid)(Side::Primary, w)));
+                assert(int_to_string_view((r.uid)(Side::Primary, w)) != snapshot_parent(obj1));
+                lemma_uid_string_eq(r.uid, snapshot_parent(obj), w);
+            }
+        }
+    }
+}
+
+pub proof fn lemma_janitor_sound_transfer(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, controller_id: int)
+    requires
+        widget_sim(cluster, r, ex),
+        always(lift_state(janitor_deletes_are_sound(controller_id))).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
+    ensures always(lift_state(two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id))).satisfied_by(ex),
+{
+    let tc = widget_two_cluster(cluster);
+    let ex1 = alpha(tc, r, ex);
+    assert forall |i: nat| #[trigger] lift_state(two_cluster_janitor_deletes_are_sound(tc, controller_id)).satisfied_by(ex.suffix(i)) by {
+        assert(lift_state(janitor_deletes_are_sound(controller_id)).satisfied_by(ex1.suffix(i)));
+        assert(ex1.suffix(i).head() == abs_at(tc, r, ex, i));
+        assert(ex.suffix(i).head() == state_at(ex, i));
+        lemma_widget_sim_inv(cluster, r, ex, i);
+        let s = state_at(ex, i);
+        lemma_janitor_sound_pull_back(cluster, r, s, controller_id, uid_sum(s), rv_sum(s));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The concrete cluster of the pair satisfies the hypotheses.
+// ---------------------------------------------------------------------------
+
+pub proof fn lemma_widget_instance_is_pair_cluster()
+    ensures widget_pair_cluster(widget_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+{
+    let cluster = widget_cluster_instance();
+    let it = cluster.installed_types;
+    let outer_name = OuterWidgetView::kind()->CustomResourceKind_0;
+    let inner_name = InnerWidgetView::kind()->CustomResourceKind_0;
+    reveal_strlit("widget");
+    reveal_strlit("widget@inner");
+    assert(outer_name != inner_name) by { assert(outer_name.len() != inner_name.len()); }
+    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(widget_sync_id()).insert(widget_janitor_id()));
+    assert(it.contains_key(outer_name) && it[outer_name] == Cluster::installed_type::<OuterWidgetView>());
+    assert(it.contains_key(inner_name) && it[inner_name] == Cluster::installed_type::<InnerWidgetView>());
+    // Validation reads the spec only; transition validation is trivial.
+    assert forall |name: StringView, o: DynamicObjectView, m: ObjectMetaView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
+        implies (#[trigger] (it[name].valid_object)(DynamicObjectView { metadata: m, ..o })) == (it[name].valid_object)(o) by {
+        let o1 = DynamicObjectView { metadata: m, ..o };
+        if name == outer_name {
+            assert(OuterWidgetView::unmarshal(o1) is Ok == OuterWidgetView::unmarshal(o) is Ok);
+            if OuterWidgetView::unmarshal(o) is Ok {
+                assert(OuterWidgetView::unmarshal(o1)->Ok_0.spec == OuterWidgetView::unmarshal(o)->Ok_0.spec);
+            }
+        } else {
+            assert(name == inner_name);
+            assert(InnerWidgetView::unmarshal(o1) is Ok == InnerWidgetView::unmarshal(o) is Ok);
+            if InnerWidgetView::unmarshal(o) is Ok {
+                assert(InnerWidgetView::unmarshal(o1)->Ok_0.spec == InnerWidgetView::unmarshal(o)->Ok_0.spec);
+            }
+        }
+    }
+    assert forall |name: StringView, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView|
+        it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
+        implies (#[trigger] (it[name].valid_transition)(DynamicObjectView { metadata: m, ..o }, DynamicObjectView { metadata: m_old, ..old }))
+            == (it[name].valid_transition)(o, old) by {
+        if name == outer_name {} else { assert(name == inner_name); }
+    }
+    assert forall |name: StringView| #[trigger] it.contains_key(name) implies (it[name].unmarshallable_status)((it[name].marshalled_default_status)()) by {
+        if name == outer_name {
+            OuterWidgetView::marshal_status_preserves_integrity();
+        } else {
+            assert(name == inner_name);
+            InnerWidgetView::marshal_status_preserves_integrity();
+        }
+    }
+}
+
+// The theorem for the concrete cluster: the sync reconciler at widget_sync_id()
+// and the janitor at widget_janitor_id(), with both Widget types installed.
+pub proof fn widget_instance_two_cluster_theorem()
+    ensures ({
+        let cluster = widget_cluster_instance();
+        let tc = widget_two_cluster(cluster);
+        widget_two_cluster_spec(cluster, widget_sync_id(), widget_janitor_id()).entails(
+            two_cluster_spec_eventually_synced()
+            .and(two_cluster_status_eventually_mirrored())
+            .and(two_cluster_mirrors_stably_collected(tc))
+            .and(two_cluster_mirrors_eventually_collected(tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, widget_janitor_id()))))
+        )
+    }),
+{
+    lemma_widget_instance_is_pair_cluster();
+    widget_two_cluster_theorem(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
 }
 
 }

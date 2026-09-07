@@ -27,9 +27,11 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   shim.
 - What is mechanized about "two clusters" (section 2): a two-store model,
   `TwoCluster`, with a proof that every execution of it is, under an injective
-  relabeling of uids and resource versions, an execution of the one-store
-  model. R1, R2, R3 and R3s are then stated on two-store executions
-  (`widget_two_cluster_theorem`).
+  relabeling of uids and resource versions (and of the `parent-uid`
+  annotation through it), an execution of the one-store model. R1, R2, R3,
+  R3s and the janitor's delete soundness are then stated on two-store
+  executions (`widget_two_cluster_theorem`; `widget_instance_two_cluster_theorem`
+  for the concrete cluster of the pair).
 
 ## 1. Design
 
@@ -185,18 +187,33 @@ flight twice and that in-flight ids are below the allocator.
 
 `widget_sync_controller/proof/two_cluster.rs` instantiates the refinement.
 Both reconcilers commute with the relabeling, and `widget_two_cluster_theorem`
-states R1, R2, R3 and R3s of every execution of the two-store model that runs
-exactly the pair under its fairness assumptions and D3, each property read on
-the store its objects live in.
+states R1, R2, R3, R3s and the janitor's delete soundness of every execution
+of the two-store model that runs exactly the pair under its fairness
+assumptions and D3, each property read on the store its objects live in;
+`widget_instance_two_cluster_theorem` discharges the hypotheses for the
+concrete cluster of the pair.
+
+The two-store statement is narrower than the one-store theorems in one
+respect: the one-store theorems quantify over other controllers under the
+relies of section 3.2, while the two-store cluster holds exactly the pair.
+Every controller of a two-store cluster must meet hypotheses 1 and 3 below, so
+composing the pair with a verified inner implementation on two stores needs
+that implementation's own commutation lemma. A kind lives on exactly one side;
+with `{widget@inner}` remote, every built-in kind is primary, so an inner
+implementation that creates Pods or ConfigMaps in the inner cluster is not
+expressible in this two-store cluster.
 
 The refinement holds under hypotheses, all met by the Widget pair:
 
 1. Controllers write only objects of known kinds, name what they create, put
    owner references only on kinds of the object's own side (`request_ok`), and
    have no external system.
-2. Installed types validate objects without reading metadata, and their
-   default status unmarshals (true of every type installed through
-   `Cluster::installed_type`).
+2. Installed types validate objects and transitions without reading
+   metadata, and their default status unmarshals. The second follows from
+   `marshal_status_preserves_integrity` for every type installed through
+   `Cluster::installed_type`; the first is a per-type fact (`CustomResourceView`
+   promises it for state validation only), checked for both Widget types in
+   `lemma_widget_instance_is_pair_cluster`.
 3. Every reconciler commutes with the relabeling: run on the relabeled object
    and response it reaches the same local state and sends the relabeled
    request. A reconciler that copies a uid or resource version into data other
@@ -204,11 +221,20 @@ The refinement holds under hypotheses, all met by the Widget pair:
    `UidToken` boundary (section 5.3) and `tools/check-widget-exec-hygiene.sh`
    hold the exec code to the same discipline as the model.
 4. The pod monkey of the two-store model writes named pods without
-   server-assigned fields or owner references.
+   server-assigned fields, owner references or annotations. This drops the
+   monkey behaviours that exercise stale-write conflicts and garbage
+   collection of owned pods; irrelevant to the Widget pair, but a
+   pod-managing controller verified on `TwoCluster` would lose that fault
+   coverage. The restriction exists because which monkey action runs is a
+   `choose` over the input, which Verus does not equate across an input and
+   its relabeling.
 
 What remains trusted is the usual Anvil boundary, per store: that each real API
 server behaves as the model's API server, with its uids and resource versions
-read as that store's counter values. A controller that reads counter values
+read as that store's counter values; that the shim routes each model kind to
+the cluster the model assigns it (section 5.3), which the model cannot check;
+and the injectivity of `int_to_string_view` (an `external_body` fact over all
+integers), which the hook's injectivity now rests on. A controller that reads counter values
 into data (VDeployment uses a resource version as a hash; RabbitMQ stores one
 in an annotation) is outside hypothesis 3 and must live in one cluster. The
 axiom `generated_name_spec` and the `external_body` ensures equating a real
@@ -225,9 +251,10 @@ reconcilers.
 | Write executed, client sees a timeout | by projection | executed plus `restart_controller`; every write is replay-safe (patches test uid and generation, deletes carry uids); a delayed `Create` is collected by the janitor |
 | Late delivery of a stale request | yes | the network reorders; the tests reject it |
 | Spurious `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | the janitor deletes only after a successful `List` lacking the parent |
-| Inner implementation writing status, timestamps or annotations on every reconcile | yes | the spec patch tests generation, not resource version |
-| Inner implementation adding finalizers | yes | rely allows it; R3 needs D3 |
-| Out-of-band edit of a mirror's spec (a `kubectl edit` in the inner cluster) | yes, as another controller's write | the rely permits it; the reconciler overwrites it and never copies a status computed for it; R1 and R2 hold once such edits stop |
+| Inner implementation writing status, timestamps or annotations on every reconcile | one-store theorems only | the spec patch tests generation, not resource version; the two-store cluster holds exactly the pair (2.2) |
+| Inner implementation adding finalizers | one-store theorems only | rely allows it; R3 needs D3 |
+| Out-of-band edit of a mirror's spec (a `kubectl edit` in the inner cluster) | one-store theorems only, as another controller's write | the rely permits it; the reconciler overwrites it and never copies a status computed for it; R1 and R2 hold once such edits stop |
+| A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
 | Out-of-band delete of a mirror; inner cluster rebuilt | no | the exec code recovers (NotFound → Create); modeling it needs a monkey step (issue #13) |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
 | Two outer clusters feeding one inner cluster | no | assumed away; parent-cluster identity is future work (issue #10) |
