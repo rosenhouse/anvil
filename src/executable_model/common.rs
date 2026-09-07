@@ -136,7 +136,7 @@ impl DynamicObjectView {
         }
     }
 
-    // with_spec and with_status now live in kubernetes_api_objects::spec::dynamic.
+    // with_spec and with_status: see kubernetes_api_objects::spec::dynamic.
 }
 
 impl DynamicObject {
