@@ -289,6 +289,7 @@ pub open spec fn new_obj_in_etcd(
         namespace: Some(req.namespace), // Set namespace for new object
         resource_version: Some(s.api_server.resource_version_counter), // Set rv for new object
         uid: Some(s.api_server.uid_counter), // Set uid for new object
+        generation: initial_generation(obj_temp.kind), // Set generation for new object
         deletion_timestamp: None, // Unset deletion timestamp for new object
         ..obj_temp.metadata
     };
