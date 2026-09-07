@@ -1,18 +1,20 @@
-// R1: once the outer copy's spec stops changing, the mirror eventually exists,
-// is ours and carries that spec, and stays so.
+// R1: once the outer copy is stable, the mirror eventually exists, is ours and
+// carries the outer spec, and stays so.
 //
 // For an outer copy `outer` (key `key`, mirror key `ikey`):
-//     always(desired_state_is(outer)) ~> always(spec_synced(outer))
+//     always(outer_stable(outer)) ~> always(spec_synced(outer))
 //
-// The proof has three parts. Phases I and II establish the usual eventual facts
-// (failures disabled; the snapshots the sync reconciler works from carry the outer
-// spec and uid; the only request of the sync reconciler for `key` in flight is the
-// pending one; requests and responses are consistent). Under them, the mirror key
-// eventually and stably holds either nothing or our mirror: a stale mirror (of an
-// older outer copy) is collected by the janitor (R3, a liveness dependency) and a
-// terminating one is released by the inner side (D3), while our mirror is never
-// touched by anyone. Under that, one reconcile of the outer copy creates the mirror
-// or patches its spec, after which nothing changes it.
+// The proof has three parts.
+// 1. Phases I and II: failures are disabled; the snapshots the sync reconciler
+//    works from carry the outer spec and uid; the only request of the sync
+//    reconciler for `key` in flight is the pending one; requests and responses
+//    are consistent.
+// 2. The mirror key eventually and stably holds nothing or our mirror: a stale
+//    mirror is collected by the janitor (R3, the liveness dependency), a
+//    terminating one is released by the inner side (D3), and our mirror is kept
+//    by everyone.
+// 3. One reconcile of the outer copy creates the mirror or patches its spec, after
+//    which nothing changes it.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;

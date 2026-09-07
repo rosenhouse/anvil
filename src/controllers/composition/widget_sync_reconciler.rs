@@ -12,7 +12,7 @@ use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
 use crate::widget_sync_controller::model::install::*;
-use crate::widget_sync_controller::proof::{guarantee::*, liveness::sync_proof::*, liveness::sync_status_proof::*};
+use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::sync_proof::*, liveness::sync_status_proof::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;
@@ -20,9 +20,9 @@ use vstd::prelude::*;
 
 verus! {
 
-// R1 and R2 together.
+// R1, R2 and R3s together.
 pub open spec fn widget_sync_esr() -> TempPred<ClusterState> {
-    widget_spec_eventually_synced().and(widget_status_eventually_mirrored())
+    widget_spec_eventually_synced().and(widget_status_eventually_mirrored()).and(widget_mirrors_stably_collected())
 }
 
 pub open spec fn widget_sync_partial_rely(janitor_id: int) -> spec_fn(int) -> TempPred<ClusterState> {
@@ -140,7 +140,9 @@ pub proof fn widget_sync_singleton_core_holds(cluster: CoreCluster, id: int, jan
             entails_trans(spec_rde, spec, sync_next_with_wf(inner, id));
             sync_eventually_synced(spec_rde, inner, id, janitor_id);
             sync_eventually_mirrors_status(spec_rde, inner, id, janitor_id);
+            sync_mirrors_stably_collected(spec_rde, inner, id, janitor_id);
             entails_and(spec_rde, widget_spec_eventually_synced(), widget_status_eventually_mirrored());
+            entails_and(spec_rde, widget_spec_eventually_synced().and(widget_status_eventually_mirrored()), widget_mirrors_stably_collected());
             assert(ESR_fn(c) == widget_sync_esr());
         }
     }

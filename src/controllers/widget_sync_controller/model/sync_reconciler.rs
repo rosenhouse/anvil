@@ -132,15 +132,12 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                             let req = APIRequest::PatchRequest(inner_spec_patch(inner, outer));
                             (at_step(WidgetSyncStepView::AfterPatchInner), Some(RequestView::KRequest(req)))
                         } else if inner_caught_up(inner) {
-                            // Spec is in place and the inner implementation has observed this
-                            // very generation of it: mirror the status back and stamp the
-                            // outer generation.
+                            // The inner status observes the mirror's current generation:
+                            // copy it back, stamped with the outer generation.
                             write_outer_status_or_done(outer, outer_status_for(outer.metadata.generation, inner.status->0, true, reason_synced()))
                         } else {
-                            // Spec is in place but the inner status was computed for an older
-                            // generation of the mirror, possibly a mistaken edit that has since
-                            // been overwritten: never copy such fields. Keep what was reported
-                            // before and say the inner side is converging.
+                            // The inner status is for an older generation of the mirror: keep
+                            // the previously reported fields and report InnerConverging.
                             write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_inner_converging()))
                         }
                     }

@@ -1,6 +1,6 @@
-// The properties the Widget sync example is verified against, in the notation of
-// the other controllers' trusted/liveness_theorem.rs files. Section 5 of
-// discussion/multi-cluster/sync_controller_evaluation.md motivates each one.
+// The properties the Widget sync example is verified against (R1, R2, R3, R3s)
+// and its one liveness assumption about the inner side (D3). Motivation:
+// doc/widget_sync_design.md, section 3.
 //
 // Both clusters are one logical store in the model; the outer copy has kind
 // OuterWidgetView::kind() and the mirror has kind InnerWidgetView::kind(), at the
@@ -24,21 +24,10 @@ pub open spec fn widget_spec_eventually_synced_per_cr(outer: OuterWidgetView) ->
     always(lift_state(outer_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))
 }
 
-// The premise of R1 and R2: the outer copy has the spec `outer.spec` at the
-// generation `outer.metadata.generation` (and its uid, and is not being deleted),
-// and nobody is writing anything but that spec to the mirror any more.
-//
-// Fixing the generation along with the spec is the same premise stated precisely:
-// the API server moves the generation exactly when the spec changes (or a deletion
-// is stamped, which desired_state_is excludes), so "the spec stopped changing" is
-// "spec and generation stopped changing". The status the sync reconciler writes is
-// pinned to that generation (observedGeneration and the Synced condition), which is
-// how observers of the outer copy tell a fresh status from a stale one.
-//
-// The second half tolerates mistaken (fat-finger) edits of the mirror's spec: the
-// sync reconciler overwrites them, and convergence is promised for the time after
-// they stop, exactly as it is promised for the time after the outer copy stops
-// changing.
+// The premise of R1 and R2: the outer copy exists with this uid, spec and
+// generation and is not terminating, and every in-flight write of the mirror's
+// spec writes `outer.spec`. Convergence is promised for the time after the outer
+// copy and the mirror's spec stop changing.
 pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& Cluster::desired_state_is(outer)(s)
@@ -122,21 +111,11 @@ pub open spec fn status_synced(outer: OuterWidgetView, mirrored: WidgetStatusVie
     }
 }
 
-// R3, cleanup (the janitor's own property): once no outer copy with the parent
-// uid exists at the mirror's namespace and name, a mirror object pointing at that
-// parent is eventually gone.
-//
-// The property is stated per mirror object (its uid): the janitor's job is to
-// remove that object, and it does so even if the inner side holds the object with
-// finalizers for a while. Whether another mirror with the same parent uid can be
-// created afterwards depends on whoever creates mirrors (the sync reconciler,
-// whose reconciles triggered by an older copy of the outer object drain in finite
-// time), not on the janitor; the stable form is a property of the two reconcilers
-// together and is what R1's proof establishes for the parent uids it cares about.
-//
-// R3 needs D3 below: the janitor's Delete stamps the deletion timestamp of an
-// object with finalizers, the inner side then removes its finalizers, and the
-// update that removes the last finalizer removes the object.
+// R3, cleanup (the janitor's ESR): once no outer copy with the parent uid exists
+// at the mirror's namespace and name, a mirror object pointing at that parent is
+// eventually gone. Stated per mirror object; R3s below is the stable form, which
+// needs the sync reconciler too. R3 needs D3: a Delete of an object with
+// finalizers only stamps the deletion timestamp.
 pub open spec fn widget_mirrors_eventually_collected() -> TempPred<ClusterState> {
     tla_forall(|i: (ObjectRef, Uid, Uid)| widget_mirror_eventually_collected_per_object(i.0, i.1, i.2))
 }
@@ -186,6 +165,19 @@ pub open spec fn mirror_collected(key: ObjectRef, parent_uid: Uid) -> StatePred<
     |s: ClusterState| {
         !(s.resources().contains_key(key) && mirror_of_parent(s.resources()[key], parent_uid))
     }
+}
+
+// R3s, stable cleanup: once no outer copy with uid `parent_uid` exists at the
+// parent key of `key`, eventually and stably no mirror at `key` points at it.
+// R3 removes each such mirror object; R3s adds that the sync reconciler stops
+// creating them. It is part of the sync reconciler's ESR (which has R3 as its
+// liveness dependency).
+pub open spec fn widget_mirrors_stably_collected() -> TempPred<ClusterState> {
+    tla_forall(|i: (ObjectRef, Uid)| widget_mirror_stably_collected_per_key(i.0, i.1))
+}
+
+pub open spec fn widget_mirror_stably_collected_per_key(key: ObjectRef, parent_uid: Uid) -> TempPred<ClusterState> {
+    always(lift_state(parent_absent(key, parent_uid))).leads_to(always(lift_state(mirror_collected(key, parent_uid))))
 }
 
 // D3, the liveness dependency on the inner side: a terminating mirror object is
