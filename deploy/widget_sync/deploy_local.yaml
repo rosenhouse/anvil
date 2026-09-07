@@ -5,6 +5,7 @@
 # relative tokenFile (key "token"); tools/two-cluster-test.sh creates it. Both
 # keys land in the same mounted directory. kube re-reads the token file at
 # least once a minute, so rotating the Secret takes effect without a restart.
+# No probes: the binary exposes no health endpoint.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,6 +25,16 @@ spec:
       labels:
         app.kubernetes.io/name: widget-sync-controller
     spec:
+      # The in-cluster token is how the controller reaches the outer API server.
+      automountServiceAccountToken: true
+      # The shared controller image runs as root by default and defines no
+      # non-root user, so the uid is set here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - image: local/widget-sync-controller:v0.1.0
           imagePullPolicy: IfNotPresent
@@ -31,6 +42,19 @@ spec:
           env:
             - name: REMOTE_KUBECONFIG
               value: /etc/widget-sync/remote-kubeconfig/kubeconfig
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           volumeMounts:
             - name: remote-kubeconfig
               mountPath: /etc/widget-sync/remote-kubeconfig

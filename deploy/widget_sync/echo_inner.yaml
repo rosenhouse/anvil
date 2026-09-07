@@ -1,6 +1,7 @@
 # The widget echo controller, deployed in the inner (remote) cluster as the
 # demo's stand-in for a real Widget implementation. It writes Widget status
 # (observedGeneration, ready, observedCount, a Ready condition) and nothing else.
+# No probes: the binary exposes no health endpoint.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -13,6 +14,8 @@ kind: ServiceAccount
 metadata:
   name: widget-echo-controller
   namespace: widget-echo
+# Only the controller pod opts in to the token, below.
+automountServiceAccountToken: false
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -68,6 +71,16 @@ spec:
       labels:
         app.kubernetes.io/name: widget-echo-controller
     spec:
+      # The in-cluster token is how the controller reaches the API server.
+      automountServiceAccountToken: true
+      # The shared controller image runs as root by default and defines no
+      # non-root user, so the uid is set here.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - image: local/widget-echo-controller:v0.1.0
           imagePullPolicy: IfNotPresent
@@ -78,4 +91,17 @@ spec:
             # InnerConverging.
             - name: WIDGET_ECHO_DELAY_SECONDS
               value: "0"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
       serviceAccountName: widget-echo-controller
