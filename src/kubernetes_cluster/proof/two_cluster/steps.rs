@@ -31,10 +31,24 @@ pub open spec fn controllers_present(tc: TwoCluster, s: TwoClusterState) -> bool
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> s.controller_and_externals.contains_key(id)
 }
 
+// Every object a reconcile is scheduled with or runs on is a stored object
+// under its own key.
+pub open spec fn controller_crs_ok(tc: TwoCluster, c: ControllerState) -> bool {
+    &&& forall |key: ObjectRef| #[trigger] c.scheduled_reconciles.contains_key(key)
+        ==> c.scheduled_reconciles[key].kind == key.kind && stored_object_ok(tc, c.scheduled_reconciles[key])
+    &&& forall |key: ObjectRef| #[trigger] c.ongoing_reconciles.contains_key(key)
+        ==> c.ongoing_reconciles[key].triggering_cr.kind == key.kind && stored_object_ok(tc, c.ongoing_reconciles[key].triggering_cr)
+}
+
+pub open spec fn crs_ok(tc: TwoCluster, s: TwoClusterState) -> bool {
+    forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> controller_crs_ok(tc, s.controller_and_externals[id].controller)
+}
+
 pub open spec fn inv(tc: TwoCluster, s: TwoClusterState) -> bool {
     &&& stores_sided(tc, s)
     &&& msgs_ok(tc, s)
     &&& controllers_present(tc, s)
+    &&& crs_ok(tc, s)
 }
 
 // ---------------------------------------------------------------------------
@@ -69,12 +83,16 @@ pub open spec fn models_ok(tc: TwoCluster) -> bool {
 }
 
 // Every reconciler commutes with the relabeling: run on the relabeled object and
-// response, it reaches the same local state and sends the relabeled request.
+// response, it reaches the same local state and sends the relabeled request. Only
+// objects a reconcile can run on are asked about: stored objects of the model's
+// kind.
 pub open spec fn models_commute(tc: TwoCluster, r: Relabeling) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> {
-        let t = tc.cluster.controller_models[id].reconcile_model.transition;
+        let m = tc.cluster.controller_models[id].reconcile_model;
+        let t = m.transition;
         forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
-            #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
+            cr.kind == m.kind && stored_object_ok(tc, cr)
+            ==> #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
                 == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
     }
 }
@@ -88,6 +106,7 @@ pub open spec fn relabel_step(tc: TwoCluster, r: Relabeling, step: Step) -> Step
         Step::APIServerStep(input) => Step::APIServerStep(relabel_opt_msg(tc, r, input)),
         Step::ControllerStep(input) => Step::ControllerStep((input.0, relabel_opt_msg(tc, r, input.1), input.2)),
         Step::DropReqStep(input) => Step::DropReqStep((relabel_msg(tc, r, input.0), input.1)),
+        Step::ExternalStep(input) => Step::ExternalStep((input.0, relabel_opt_msg(tc, r, input.1))),
         _ => step,
     }
 }
@@ -187,6 +206,7 @@ pub proof fn lemma_abs_controller(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
 // The API server step.
 // ---------------------------------------------------------------------------
 
+#[verifier::rlimit(60)]
 pub proof fn lemma_api_server_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: Option<Message>, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
@@ -371,6 +391,8 @@ pub proof fn lemma_controller_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
             assert(resp_o1 == relabel_resp_content(tc, r, resp_o2));
             let t = model.transition;
             let (ls2, req_o2) = t(rs.triggering_cr, resp_o2, rs.local_state);
+            assert(controller_crs_ok(tc, c));
+            assert(rs.triggering_cr.kind == key.kind && stored_object_ok(tc, rs.triggering_cr));
             assert(t(relabel_obj(tc, r, rs.triggering_cr), relabel_resp_content(tc, r, resp_o2), rs.local_state) == (ls2, relabel_req_content(tc, r, req_o2)));
             let (pending2, send2, alloc2) = if req_o2 is Some {
                 let pending = match req_o2->0 {
@@ -425,6 +447,11 @@ pub proof fn lemma_controller_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
             assert(host2->Enabled_1.send.contains(m));
         }
     }
+    assert(controller_crs_ok(tc, c));
+    assert(controller_crs_ok(tc, host2->Enabled_0));
+    assert forall |i: int| #[trigger] tc.cluster.controller_models.contains_key(i) implies controller_crs_ok(tc, s_prime.controller_and_externals[i].controller) by {
+        if i != id { assert(s_prime.controller_and_externals[i] == s.controller_and_externals[i]); }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +486,11 @@ pub proof fn lemma_schedule_step(tc: TwoCluster, r: Relabeling, s: TwoClusterSta
     lemma_map_values_insert(s.controller_and_externals, f_cae, id, cae_prime);
     assert(a_prime.controller_and_externals == a.controller_and_externals.insert(id, relabel_cae(tc, r, cae_prime)));
     assert(tc.cluster.schedule_controller_reconcile().forward(input)(a, a_prime));
+    assert(controller_crs_ok(tc, cae.controller));
+    assert(controller_crs_ok(tc, cae_prime.controller));
+    assert forall |i: int| #[trigger] tc.cluster.controller_models.contains_key(i) implies controller_crs_ok(tc, s_prime.controller_and_externals[i].controller) by {
+        if i != id { assert(s_prime.controller_and_externals[i] == s.controller_and_externals[i]); }
+    }
 }
 
 pub proof fn lemma_builtin_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: (BuiltinControllerChoice, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
@@ -542,6 +574,10 @@ pub proof fn lemma_restart_step(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
     lemma_map_values_insert(s.controller_and_externals, f_cae, id, cae_prime);
     assert(a_prime.controller_and_externals == a.controller_and_externals.insert(id, relabel_cae(tc, r, cae_prime)));
     assert(tc.cluster.restart_controller().forward(input)(a, a_prime));
+    assert(controller_crs_ok(tc, cae_prime.controller));
+    assert forall |i: int| #[trigger] tc.cluster.controller_models.contains_key(i) implies controller_crs_ok(tc, s_prime.controller_and_externals[i].controller) by {
+        if i != id { assert(s_prime.controller_and_externals[i] == s.controller_and_externals[i]); }
+    }
 }
 
 pub proof fn lemma_disable_crash_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: int, uid_next: Uid, rv_next: ResourceVersion)
@@ -564,6 +600,9 @@ pub proof fn lemma_disable_crash_step(tc: TwoCluster, r: Relabeling, s: TwoClust
     lemma_map_values_insert(s.controller_and_externals, f_cae, id, cae_prime);
     assert(a_prime.controller_and_externals == a.controller_and_externals.insert(id, relabel_cae(tc, r, cae_prime)));
     assert(tc.cluster.disable_crash().forward(input)(a, a_prime));
+    assert forall |i: int| #[trigger] tc.cluster.controller_models.contains_key(i) implies controller_crs_ok(tc, s_prime.controller_and_externals[i].controller) by {
+        if i != id { assert(s_prime.controller_and_externals[i] == s.controller_and_externals[i]); }
+    }
 }
 
 pub proof fn lemma_drop_req_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: (Message, APIError), uid_next: Uid, rv_next: ResourceVersion)

@@ -28,15 +28,26 @@ pub struct Relabeling {
     pub annotation: spec_fn(Kind, StringView, StringView) -> StringView,
 }
 
-// Injective per side, with disjoint images across sides; the annotation hook is
-// injective per kind and key.
+// Injective per side, with disjoint images across sides.
+pub open spec fn uid_map_injective(u: spec_fn(Side, Uid) -> Uid) -> bool {
+    &&& forall |side: Side, a: Uid, b: Uid| #[trigger] u(side, a) == #[trigger] u(side, b) ==> a == b
+    &&& forall |a: Uid, b: Uid| #[trigger] u(Side::Primary, a) != #[trigger] u(Side::Remote, b)
+}
+
+pub open spec fn rv_map_injective(v: spec_fn(Side, ResourceVersion) -> ResourceVersion) -> bool {
+    &&& forall |side: Side, a: ResourceVersion, b: ResourceVersion| #[trigger] v(side, a) == #[trigger] v(side, b) ==> a == b
+    &&& forall |a: ResourceVersion, b: ResourceVersion| #[trigger] v(Side::Primary, a) != #[trigger] v(Side::Remote, b)
+}
+
+// Injective per kind and key.
+pub open spec fn annotation_injective(h: spec_fn(Kind, StringView, StringView) -> StringView) -> bool {
+    forall |kind: Kind, key: StringView, a: StringView, b: StringView| #[trigger] h(kind, key, a) == #[trigger] h(kind, key, b) ==> a == b
+}
+
 pub open spec fn injective(r: Relabeling) -> bool {
-    &&& forall |side: Side, a: Uid, b: Uid| #[trigger] (r.uid)(side, a) == #[trigger] (r.uid)(side, b) ==> a == b
-    &&& forall |a: Uid, b: Uid| #[trigger] (r.uid)(Side::Primary, a) != #[trigger] (r.uid)(Side::Remote, b)
-    &&& forall |side: Side, a: ResourceVersion, b: ResourceVersion| #[trigger] (r.rv)(side, a) == #[trigger] (r.rv)(side, b) ==> a == b
-    &&& forall |a: ResourceVersion, b: ResourceVersion| #[trigger] (r.rv)(Side::Primary, a) != #[trigger] (r.rv)(Side::Remote, b)
-    &&& forall |kind: Kind, key: StringView, a: StringView, b: StringView|
-        #[trigger] (r.annotation)(kind, key, a) == #[trigger] (r.annotation)(kind, key, b) ==> a == b
+    &&& uid_map_injective(r.uid)
+    &&& rv_map_injective(r.rv)
+    &&& annotation_injective(r.annotation)
 }
 
 // ---------------------------------------------------------------------------
@@ -260,11 +271,50 @@ pub open spec fn abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next
     }
 }
 
+// An object a store may hold or a reconcile may be scheduled with: object_ok
+// (of a known kind, with owner references to kinds of its own side), with a
+// uid, and unmarshallable.
+pub open spec fn stored_object_ok(tc: TwoCluster, o: DynamicObjectView) -> bool {
+    &&& tc.object_ok(o)
+    &&& o.metadata.uid is Some
+    &&& unmarshallable_object(o, tc.cluster.installed_types)
+}
+
 // Every object of a store is under a key of its own kind, of a kind of that
-// store's side, and object_ok (of a known kind, with owner references to kinds
-// of its own side).
+// store's side, and stored_object_ok.
 pub open spec fn store_sided(tc: TwoCluster, side: Side, store: StoredState) -> bool {
-    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && store[k].kind == k.kind && tc.object_ok(store[k])
+    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && store[k].kind == k.kind && stored_object_ok(tc, store[k])
+}
+
+// The default status of every installed type unmarshals. (Every type installed
+// through Cluster::installed_type satisfies this.)
+pub open spec fn installed_types_coherent(it: InstalledTypes) -> bool {
+    forall |name: StringView| #[trigger] it.contains_key(name) ==> (it[name].unmarshallable_status)((it[name].marshalled_default_status)())
+}
+
+// A freshly created object, whose status is the default one, unmarshals if its
+// spec does.
+pub proof fn lemma_created_object_unmarshallable(tc: TwoCluster, o: DynamicObjectView)
+    requires
+        installed_types_coherent(tc.cluster.installed_types),
+        tc.kind_ok(o.kind),
+        unmarshallable_spec(o, tc.cluster.installed_types),
+        o.status == marshalled_default_status(o.kind, tc.cluster.installed_types),
+    ensures unmarshallable_object(o, tc.cluster.installed_types),
+{
+    match o.kind {
+        Kind::ConfigMapKind => { ConfigMapView::marshal_status_preserves_integrity(); },
+        Kind::DaemonSetKind => { DaemonSetView::marshal_status_preserves_integrity(); },
+        Kind::PersistentVolumeClaimKind => { PersistentVolumeClaimView::marshal_status_preserves_integrity(); },
+        Kind::PodKind => { PodView::marshal_status_preserves_integrity(); },
+        Kind::RoleBindingKind => { RoleBindingView::marshal_status_preserves_integrity(); },
+        Kind::RoleKind => { RoleView::marshal_status_preserves_integrity(); },
+        Kind::SecretKind => { SecretView::marshal_status_preserves_integrity(); },
+        Kind::ServiceKind => { ServiceView::marshal_status_preserves_integrity(); },
+        Kind::StatefulSetKind => { StatefulSetView::marshal_status_preserves_integrity(); },
+        Kind::ServiceAccountKind => { ServiceAccountView::marshal_status_preserves_integrity(); },
+        Kind::CustomResourceKind(name) => {},
+    }
 }
 
 pub open spec fn stores_sided(tc: TwoCluster, s: TwoClusterState) -> bool {
