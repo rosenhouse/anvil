@@ -311,16 +311,41 @@ pub open spec fn each_object_in_etcd_has_at_most_one_controller_owner() -> State
     }
 }
 
+pub open spec fn etcd_object_has_at_most_one_controller_owner(key: ObjectRef) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let obj = s.resources()[key];
+        let owners = obj.metadata.owner_references->0;
+        let controller_owners = owners.filter(
+            |o: OwnerReferenceView| o.controller is Some && o.controller->0
+        );
+        obj.metadata.owner_references is Some ==> controller_owners.len() <= 1
+    }
+}
+
+#[verifier(rlimit(200))]
+#[verifier(spinoff_prover)]
 pub proof fn lemma_always_each_object_in_etcd_has_at_most_one_controller_owner(self, spec: TempPred<ClusterState>)
     requires
         spec.entails(lift_state(self.init())),
         spec.entails(always(lift_action(self.next()))),
     ensures spec.entails(always(lift_state(Self::each_object_in_etcd_has_at_most_one_controller_owner())))
 {
-    init_invariant(
-        spec, self.init(), self.next(),
-        Self::each_object_in_etcd_has_at_most_one_controller_owner()
-    );
+    let invariant = Self::each_object_in_etcd_has_at_most_one_controller_owner();
+
+    // Structure the inductive step per key so the solver only has to consider
+    // the object at that key: either it was already in the store and is unchanged
+    // or updated, or it was just created. In both write cases the API server's
+    // metadata_validity_check rejects more than one controller owner.
+    assert forall |s, s_prime| invariant(s) && #[trigger] self.next()(s, s_prime) implies invariant(s_prime) by {
+        assert forall |key: ObjectRef| #[trigger] s_prime.resources().contains_key(key)
+        implies Self::etcd_object_has_at_most_one_controller_owner(key)(s_prime) by {
+            if s.resources().contains_key(key) {
+                assert(Self::etcd_object_has_at_most_one_controller_owner(key)(s));
+            } else {}
+        }
+    }
+
+    init_invariant(spec, self.init(), self.next(), invariant);
 }
 
 }
