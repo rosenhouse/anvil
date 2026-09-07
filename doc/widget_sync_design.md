@@ -253,13 +253,38 @@ reconcilers.
 | Spurious `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | the janitor deletes only after a successful `List` lacking the parent |
 | Inner implementation writing status, timestamps or annotations on every reconcile | one-store theorems only | the spec patch tests generation, not resource version; the two-store cluster holds exactly the pair (2.2) |
 | Inner implementation adding finalizers | one-store theorems only | rely allows it; R3 needs D3 |
-| Out-of-band edit of a mirror's spec (a `kubectl edit` in the inner cluster) | one-store theorems only, as another controller's write | the rely permits it; the reconciler overwrites it and never copies a status computed for it; R1 and R2 hold once such edits stop |
+| Out-of-band edit of a mirror's spec, or of its other labels and annotations (a `kubectl edit` in the inner cluster) | one-store theorems only, as another controller's write | the rely permits it; the reconciler overwrites a spec edit and never copies a status computed for it; R1 and R2 hold once such edits stop (`mirror_spec_undisturbed`) |
+| Out-of-band delete of a mirror; inner cluster rebuilt | one-store theorems only, as another controller's delete | the rely permits any Delete; the reconciler recovers (NotFound → Create); R1 and R2 hold once such deletes stop landing on the live mirror (`mirror_undeleted`); R3 and R3s hold throughout. The disturber (section 2.4) is a controller model doing exactly this |
+| Out-of-band edit that removes the mirror's label or `parent-uid` annotation | excluded by the rely | the object becomes foreign to both reconcilers, which refuse to adopt; no recovery is possible without adoption (section 1.1) |
 | A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
-| Out-of-band delete of a mirror; inner cluster rebuilt | no | the exec code recovers (NotFound → Create); modeling it needs a monkey step (issue #13) |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
 | Two outer clusters feeding one inner cluster | no | assumed away; parent-cluster identity is future work (issue #10) |
 | Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
 | Two replicas of the controller | no | one replica; a second would violate the rely |
+
+### 2.4 The disturber
+
+An out-of-band actor in the inner cluster is not a fault of the cluster model
+but another controller, so it is modeled as one, in the way Anvil treats every
+other controller: through a rely. `model/disturber_reconciler.rs` is a
+controller model triggered by inner `Widget`s that, on each reconcile, patches
+the mirror's spec testing nothing and then deletes the mirror with no
+precondition, ignoring every response. No fairness is assumed for it, so it may
+act at any moment and stop at any moment, which is what a `kubectl delete` or a
+rebuilt inner cluster looks like from the pair's side. Its guarantee
+(`proof/disturber.rs`: every request it has in flight is such a Patch or Delete
+of its own key) implies both reconcilers' relies, and
+`composition/widget_disturber_reconciler.rs` composes it with the pair through
+Welder: `widget_disturbed_core_holds` is the closed statement for a cluster
+running the janitor, the sync reconciler and the disturber.
+
+The disturber adds no assumption. What it buys is a witness that the relaxed
+sync rely (any Delete, any Patch) is satisfiable by something that deletes and
+edits mirrors, and that the premises of R1 and R2 are the only place where "the
+disturbance has stopped" is said. A cluster-model step in the style of the pod
+monkey was not needed: it would have touched every `next_step` case split in the
+repository and the two-store simulation, for a behaviour the rely already
+expresses.
 
 ## 3. Specification
 
@@ -287,7 +312,10 @@ mirror's namespace, or a `Delete` of the mirror with a uid precondition.
 of the inner kind; an `Update` of a mirror that is going to land keeps its
 owner references and its identity (label and `parent-uid` annotation) and is
 otherwise free, spec included; any `Patch`; no status write to the outer kind;
-no `Delete` of the inner kind.
+any `Delete` and any `GetThenDelete`, mirrors included. A transactional delete
+never removes a mirror, which has no owner references; a plain delete may, and
+R1 and R2 are stated for the time after such deletes stop landing on the live
+mirror.
 
 **Janitor, on an anonymous other controller** (`widget_janitor_rely`): a
 `Create` of the inner kind at `ns/n` is `make_inner(outer)` for an outer copy
@@ -308,6 +336,9 @@ outer_stable(outer)(s) :=
  && s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
  && mirror_spec_undisturbed(outer)(s)
         // every in-flight Update / GetThenUpdate / Patch of the mirror writes outer.spec
+ && mirror_undeleted(outer)(s)
+        // while a mirror of outer is at the mirror key, every in-flight Delete of that key
+        // names, by uid precondition, an object other than that mirror
 
 spec_synced(outer)(s)            := the mirror exists, is not terminating, is a mirror of outer, has spec outer.spec
 inner_settled(outer, mirrored)(s) := spec_synced(outer)(s) && inner_caught_up(inner) && π(inner.status) == mirrored
@@ -331,11 +362,23 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
 (spec and generation constant, not being deleted, same uid), and whoever was
-editing the mirror's spec out of band has stopped. Convergence is promised for
-the time after the disturbances stop; during them the guarantees still hold.
-R2's premise fixes the inner status instead of assuming the inner
-implementation is live, so R2 holds for any inner implementation. R3 is per
-object; R3s is the stable form and is the sync reconciler's promise given R3.
+editing the mirror's spec or deleting the mirror out of band has stopped.
+Convergence is promised for the time after the disturbances stop; during them
+the guarantees still hold. The delete clause is stated so that it costs
+nothing in the undisturbed case: a Delete the janitor sends satisfies it
+whenever the outer copy exists (`janitor_deletes_are_sound`), a stale Delete of
+an earlier mirror misses by uid, and a Delete that arrives while no mirror of
+`outer` is at the key is free. Only a Delete that would remove the live mirror
+is excluded, and one that keeps arriving forever falsifies the premise rather
+than the conclusion. R2's premise fixes the inner status instead of assuming
+the inner implementation is live, so R2 holds for any inner implementation. R3
+is per object; R3s is the stable form and is the sync reconciler's promise
+given R3. Neither R3 nor R3s needs a premise about deletes: the janitor's rely
+already admits any Delete, and an extra delete of a mirror only helps them.
+
+On two stores (`two_cluster_outer_stable`) the premise reads the outer copy and
+the in-flight writes on the primary side and the delete clause on the remote
+side, where the mirror lives.
 
 ### 3.4 Composition
 
@@ -366,7 +409,9 @@ on its own is that the custom kind names differ (`kind_strings_distinct`).
 
 The concrete instances exercise neither R2's premise nor D3: nothing in them
 writes inner status or finalizers. Verifying the echo controller as a further
-member would discharge both (issue #3).
+member would discharge both (issue #3). A separate concrete instance adds the
+disturber (section 2.4) as a third member with an empty ESR and no rely;
+`widget_disturbed_core_holds` composes it with the pair.
 
 ### 3.5 Assumptions
 
@@ -452,7 +497,8 @@ status without an owner reference, which composing against one requires.
 | Exec reconcilers (proved to conform to the model) | `widget_sync_controller/exec/` |
 | Guarantees, store and message invariants | `widget_sync_controller/proof/{guarantee,helper_invariants,janitor_invariants,sync_invariants}.rs` |
 | Termination, R3, R1, R2, R3s | `widget_sync_controller/proof/liveness/` |
-| Welder specs and composition | `composition/widget_{janitor,sync}_reconciler.rs`, `composition/compose_all.rs` |
+| The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
+| Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
 | Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
 | R1 to R3s on two clusters | `widget_sync_controller/proof/two_cluster.rs` |
@@ -464,7 +510,8 @@ Full-repository verification (`cargo verus verify --lib`) passes.
 
 Tracked as issues on the fork: verified echo controller discharging D3 (#3); operability (#9) and hardening (#10);
 proof layout and solver budgets (#11); Patch in the executable model (#12,
-whose composition part landed in section 3.4); modeling out-of-band
-mirror edits and deletes (#13); parent-cluster identity, a `keep` annotation,
-an admission policy in the inner cluster, and a spec projection for
-inner-owned fields (#10).
+whose composition part landed in section 3.4); parent-cluster identity, a
+`keep` annotation, an admission policy in the inner cluster, and a spec
+projection for inner-owned fields (#10). Out-of-band edits and deletes of
+mirrors (#13) are modeled (sections 2.3 and 2.4); what remains excluded is an
+edit that strips a mirror's identity, which the design refuses to recover from.
