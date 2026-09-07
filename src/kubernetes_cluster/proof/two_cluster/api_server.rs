@@ -250,6 +250,7 @@ pub proof fn lemma_update_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
         relabel_hyps(tc, r),
         stores_sided(tc, s),
         tc.side_of_kind(req.obj.kind) == side,
+        tc.object_ok(req.obj),
         alloc_compatible(tc, r, s, side, handle_update_request(tc.cluster.installed_types, req, s.store(side)).0, uid_next, rv_next),
     ensures ({
         let (s1, resp) = handle_update_request(tc.cluster.installed_types, req, s.store(side));

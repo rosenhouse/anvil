@@ -260,9 +260,11 @@ pub open spec fn abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next
     }
 }
 
-// Every object of a store is of a known kind of that store's side, under a key of its own kind.
+// Every object of a store is under a key of its own kind, of a kind of that
+// store's side, and object_ok (of a known kind, with owner references to kinds
+// of its own side).
 pub open spec fn store_sided(tc: TwoCluster, side: Side, store: StoredState) -> bool {
-    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && tc.kind_ok(k.kind) && store[k].kind == k.kind
+    forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && store[k].kind == k.kind && tc.object_ok(store[k])
 }
 
 pub open spec fn stores_sided(tc: TwoCluster, s: TwoClusterState) -> bool {
