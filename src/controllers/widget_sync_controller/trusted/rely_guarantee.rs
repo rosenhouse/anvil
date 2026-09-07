@@ -1,22 +1,70 @@
 // Rely and guarantee conditions of the Widget sync example (section 3.3 of
 // discussion/multi-cluster/sync_controller_evaluation.md).
 //
-// The sync reconciler and the janitor reconciler are composed with each other,
-// so "other controllers" below means every controller id except those two. In
-// the real deployment the other controllers are: whatever runs against the outer
+// The sync reconciler and the janitor reconciler are separate controllers in the
+// model; each relies on every other controller, the other one of the pair
+// included, and each guarantee is what the other one's rely needs from it. In the
+// real deployment the other controllers are: whatever runs against the outer
 // cluster, and the inner cluster's own Widget implementation together with
 // everything else that runs there.
+//
+// Two clauses are state-dependent, in the style of vd_rely_update_req:
+//   - a Create of a mirror carries a parent uid that no object other than the one
+//     at the outer key has (mirror_create_req), which is what lets the janitor
+//     trust a parent uid it reads off a mirror;
+//   - a Delete of a mirror is only sent once its parent is gone for good
+//     (mirror_delete_req), which is what lets the sync reconciler keep a mirror
+//     whose parent exists.
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{cluster::*, message::*};
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::model::{janitor_reconciler, sync_reconciler};
-use crate::widget_sync_controller::trusted::spec_types::*;
+use crate::widget_sync_controller::trusted::{liveness_theorem::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use vstd::prelude::*;
 
 verus! {
 
-// Rely conditions.
+// The key of the mirror of the outer copy at `outer_key`.
+pub open spec fn inner_key_of(outer_key: ObjectRef) -> ObjectRef {
+    ObjectRef { kind: InnerWidgetView::kind(), ..outer_key }
+}
+
+// `parent_uid` has been issued, and the only object that may carry it is the one at
+// `outer_key`. Uids are never reused, so this is stable once true.
+pub open spec fn parent_uid_is_bound_to_key(parent_uid: Uid, outer_key: ObjectRef) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& parent_uid < s.api_server.uid_counter
+        &&& forall |k: ObjectRef| #[trigger] s.resources().contains_key(k) && s.resources()[k].metadata.uid == Some(parent_uid)
+            ==> k == outer_key
+    }
+}
+
+// A Create of a mirror: the object the sync reconciler builds for some outer copy at
+// `outer_key`, whose uid is bound to that key.
+pub open spec fn mirror_create_req(req: CreateRequest, outer_key: ObjectRef) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        exists |outer: OuterWidgetView| {
+            &&& outer.object_ref() == outer_key
+            &&& outer.metadata.uid is Some
+            &&& req.namespace == outer_key.namespace
+            &&& req.obj == #[trigger] sync_reconciler::make_inner(outer).marshal()
+            &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
+        }
+    }
+}
+
+// A Delete of a mirror the janitor's way: with a uid precondition. Why such a
+// delete never removes a mirror whose parent exists is not a property of the
+// message but of the janitor's state machine (it decides from a List of the outer
+// copies); the sync reconciler's proof establishes it from the janitor's model,
+// which is why the sync reconciler's spec names the janitor as a member of the
+// cluster rather than as an anonymous other controller.
+pub open spec fn mirror_delete_req(req: DeleteRequest) -> bool {
+    &&& req.key.kind == InnerWidgetView::kind()
+    &&& req.preconditions is Some
+    &&& req.preconditions->0.uid is Some
+}
 
 // If `old_meta` identifies a mirror (label and parent-uid annotation), `new_meta`
 // identifies the same mirror. Other labels, annotations and finalizers are free:
@@ -35,17 +83,11 @@ pub open spec fn preserves_mirror_identity(old_meta: ObjectMetaView, new_meta: O
     }
 }
 
-// Nobody else creates mirrors.
-pub open spec fn widget_rely_create_req(req: CreateRequest) -> bool {
-    req.obj.kind != InnerWidgetView::kind()
-}
-
 // An update of a mirror by another controller carries a resource version, and if
 // it is going to land (the resource version matches the store) it changes neither
-// the spec nor the owner references and keeps the mirror's identity. Stated
-// conditionally on the store, in the style of vd_rely_update_req, so that stale
+// the spec nor the owner references and keeps the mirror's identity. Stale
 // updates, which the API server rejects, are unconstrained.
-pub open spec fn widget_rely_update_req(req: UpdateRequest) -> StatePred<ClusterState> {
+pub open spec fn mirror_update_req(req: UpdateRequest) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let etcd_obj = s.resources()[req.key()];
         req.obj.kind == InnerWidgetView::kind() ==> {
@@ -63,7 +105,7 @@ pub open spec fn widget_rely_update_req(req: UpdateRequest) -> StatePred<Cluster
 // The transactional form of the same condition. (A mirror has no owner
 // references, so such a request fails its owner check anyway; the clause keeps
 // the rely honest rather than relying on that.)
-pub open spec fn widget_rely_get_then_update_req(req: GetThenUpdateRequest) -> StatePred<ClusterState> {
+pub open spec fn mirror_get_then_update_req(req: GetThenUpdateRequest) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let etcd_obj = s.resources()[req.key()];
         req.obj.kind == InnerWidgetView::kind() ==> {
@@ -76,50 +118,55 @@ pub open spec fn widget_rely_get_then_update_req(req: GetThenUpdateRequest) -> S
     }
 }
 
-// Nobody else patches the spec of a mirror. (Status patches are free: that is
-// how the inner implementation is expected to report.)
-pub open spec fn widget_rely_patch_req(req: PatchRequest) -> bool {
-    req.kind != InnerWidgetView::kind()
-}
-
-// Nobody else writes the status of an outer copy.
-pub open spec fn widget_rely_update_status_req(req: UpdateStatusRequest) -> bool {
-    req.obj.kind != OuterWidgetView::kind()
-}
-
-pub open spec fn widget_rely_get_then_update_status_req(req: GetThenUpdateStatusRequest) -> bool {
-    req.obj.kind != OuterWidgetView::kind()
-}
-
-pub open spec fn widget_rely_patch_status_req(req: PatchStatusRequest) -> bool {
-    req.kind != OuterWidgetView::kind()
-}
-
-// Nobody else deletes mirrors.
-pub open spec fn widget_rely_delete_req(req: DeleteRequest) -> bool {
-    req.key.kind != InnerWidgetView::kind()
-}
-
-pub open spec fn widget_rely_get_then_delete_req(req: GetThenDeleteRequest) -> bool {
-    req.key.kind != InnerWidgetView::kind()
-}
-
-pub open spec fn widget_rely(other_id: int) -> StatePred<ClusterState> {
+// The sync reconciler's rely on every other controller (the janitor included).
+pub open spec fn widget_sync_rely(other_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(other_id)
         } ==> match msg.content->APIRequest_0 {
-            APIRequest::CreateRequest(req) => widget_rely_create_req(req),
-            APIRequest::UpdateRequest(req) => widget_rely_update_req(req)(s),
-            APIRequest::GetThenUpdateRequest(req) => widget_rely_get_then_update_req(req)(s),
-            APIRequest::PatchRequest(req) => widget_rely_patch_req(req),
-            APIRequest::UpdateStatusRequest(req) => widget_rely_update_status_req(req),
-            APIRequest::GetThenUpdateStatusRequest(req) => widget_rely_get_then_update_status_req(req),
-            APIRequest::PatchStatusRequest(req) => widget_rely_patch_status_req(req),
-            APIRequest::DeleteRequest(req) => widget_rely_delete_req(req),
-            APIRequest::GetThenDeleteRequest(req) => widget_rely_get_then_delete_req(req),
+            // Nobody else creates mirrors.
+            APIRequest::CreateRequest(req) => req.obj.kind != InnerWidgetView::kind(),
+            APIRequest::UpdateRequest(req) => mirror_update_req(req)(s),
+            APIRequest::GetThenUpdateRequest(req) => mirror_get_then_update_req(req)(s),
+            // Nobody else patches the spec of a mirror. (Status patches are free:
+            // that is how the inner implementation is expected to report.)
+            APIRequest::PatchRequest(req) => req.kind != InnerWidgetView::kind(),
+            // Nobody else writes the status of an outer copy.
+            APIRequest::UpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),
+            APIRequest::GetThenUpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),
+            APIRequest::PatchStatusRequest(req) => req.kind != OuterWidgetView::kind(),
+            // Nobody else deletes mirrors. (The janitor does, but it is not an
+            // anonymous other controller to the sync reconciler: its spec names the
+            // janitor and its proof reasons about the janitor's state machine.)
+            APIRequest::DeleteRequest(req) => req.key.kind != InnerWidgetView::kind(),
+            APIRequest::GetThenDeleteRequest(req) => req.key.kind != InnerWidgetView::kind(),
+            _ => true,
+        }
+    }
+}
+
+// The janitor's rely on every other controller (the sync reconciler included):
+// mirrors are created only the sync reconciler's way, and updates keep their
+// identity.
+pub open spec fn widget_janitor_rely(other_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |msg| {
+            &&& #[trigger] s.in_flight().contains(msg)
+            &&& msg.content is APIRequest
+            &&& msg.src.is_controller_id(other_id)
+        } ==> match msg.content->APIRequest_0 {
+            APIRequest::CreateRequest(req) => req.obj.kind == InnerWidgetView::kind() ==> {
+                &&& req.obj.metadata.name is Some
+                &&& mirror_create_req(req, ObjectRef {
+                    kind: OuterWidgetView::kind(),
+                    namespace: req.namespace,
+                    name: req.obj.metadata.name->0,
+                })(s)
+            },
+            APIRequest::UpdateRequest(req) => mirror_update_req(req)(s),
+            APIRequest::GetThenUpdateRequest(req) => mirror_get_then_update_req(req)(s),
             _ => true,
         }
     }
@@ -127,74 +174,72 @@ pub open spec fn widget_rely(other_id: int) -> StatePred<ClusterState> {
 
 // Guarantee conditions.
 
-// Every request the sync reconciler sends is one of:
-//   Get of the mirror key of some outer copy;
-//   Create of a mirror: provided name, no owner references, no finalizers, our
-//     label, parent-uid equal to the uid of an outer copy, and that copy's spec;
-//   Patch of a mirror's spec, testing the mirror's uid and generation;
-//   PatchStatus of an outer copy, testing that copy's uid and generation and
-//     writing status.observedGeneration equal to the tested generation (G-gen).
-// It never deletes, never writes an outer copy's spec or metadata, never writes a
-// mirror's status, and never touches any other kind.
-pub open spec fn widget_sync_guarantee_create_req(req: CreateRequest) -> bool {
-    &&& req.obj.kind == InnerWidgetView::kind()
-    &&& InnerWidgetView::unmarshal(req.obj) is Ok
-    &&& exists |outer: OuterWidgetView| #[trigger] sync_reconciler::make_inner(outer) == InnerWidgetView::unmarshal(req.obj)->Ok_0
-}
-
-pub open spec fn widget_sync_guarantee_patch_req(req: PatchRequest) -> bool {
-    &&& req.kind == InnerWidgetView::kind()
-    &&& req.tests.uid is Some
-    &&& req.tests.generation is Some
-}
-
-pub open spec fn widget_sync_guarantee_patch_status_req(req: PatchStatusRequest) -> bool {
+// The status patch the sync reconciler sends for the outer copy at `outer_key`:
+// it tests the copy's uid and generation, and (G-gen) the status it writes carries
+// observedGeneration equal to the tested generation, as does its Synced condition.
+pub open spec fn sync_status_patch_req(req: PatchStatusRequest, outer_key: ObjectRef) -> bool {
     let status = OuterWidgetView::unmarshal_status(req.status);
     &&& req.kind == OuterWidgetView::kind()
+    &&& req.namespace == outer_key.namespace
+    &&& req.name == outer_key.name
     &&& req.tests.uid is Some
     &&& req.tests.generation is Some
     &&& status is Ok
     &&& status->Ok_0 is Some
-    // G-gen: the written observedGeneration is the generation the patch tests for.
     &&& status->Ok_0->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.synced_condition() is Some
     &&& status->Ok_0->0.synced_condition()->0.observed_generation == req.tests.generation
 }
 
+// Every request the sync reconciler sends while reconciling the outer copy at
+// `outer_key` is one of: Get of its mirror; Create of its mirror; Patch of its
+// mirror's spec; PatchStatus of the outer copy itself. It never deletes, never
+// writes an outer copy's spec or metadata, never writes a mirror's status, and
+// never touches any other key.
 pub open spec fn widget_sync_guarantee(controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(controller_id)
-        } ==> match msg.content->APIRequest_0 {
-            APIRequest::GetRequest(req) => req.key.kind == InnerWidgetView::kind(),
-            APIRequest::CreateRequest(req) => widget_sync_guarantee_create_req(req),
-            APIRequest::PatchRequest(req) => widget_sync_guarantee_patch_req(req),
-            APIRequest::PatchStatusRequest(req) => widget_sync_guarantee_patch_status_req(req),
-            _ => false,
+        } ==> {
+            let outer_key = msg.src->Controller_1;
+            match msg.content->APIRequest_0 {
+                APIRequest::GetRequest(req) => req.key == inner_key_of(outer_key),
+                APIRequest::CreateRequest(req) => mirror_create_req(req, outer_key)(s),
+                APIRequest::PatchRequest(req) => {
+                    &&& req.kind == InnerWidgetView::kind()
+                    &&& req.namespace == outer_key.namespace
+                    &&& req.name == outer_key.name
+                },
+                APIRequest::PatchStatusRequest(req) => sync_status_patch_req(req, outer_key),
+                _ => false,
+            }
         }
     }
 }
 
-// Every request the janitor reconciler sends is a List of outer copies in some
-// namespace or a Delete of a mirror with a uid precondition.
-pub open spec fn widget_janitor_guarantee_delete_req(req: DeleteRequest) -> bool {
-    &&& req.key.kind == InnerWidgetView::kind()
-    &&& req.preconditions is Some
-    &&& req.preconditions->0.uid is Some
-}
-
+// Every request the janitor sends while reconciling the mirror at `inner_key` is a
+// List of the outer copies in its namespace or a Delete of that mirror.
 pub open spec fn widget_janitor_guarantee(controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(controller_id)
-        } ==> match msg.content->APIRequest_0 {
-            APIRequest::ListRequest(req) => req.kind == OuterWidgetView::kind(),
-            APIRequest::DeleteRequest(req) => widget_janitor_guarantee_delete_req(req),
-            _ => false,
+        } ==> {
+            let inner_key = msg.src->Controller_1;
+            match msg.content->APIRequest_0 {
+                APIRequest::ListRequest(req) => {
+                    &&& req.kind == OuterWidgetView::kind()
+                    &&& req.namespace == inner_key.namespace
+                },
+                APIRequest::DeleteRequest(req) => {
+                    &&& req.key == inner_key
+                    &&& mirror_delete_req(req)
+                },
+                _ => false,
+            }
         }
     }
 }

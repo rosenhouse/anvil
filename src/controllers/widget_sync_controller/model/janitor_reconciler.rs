@@ -95,7 +95,11 @@ pub open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseV
             }
         },
         WidgetJanitorStepView::AfterListOuter => {
-            if !(is_some_k_list_resp_view(resp_o) && extract_some_k_list_resp_view(resp_o) is Ok) {
+            if !has_mirror_identity(inner) {
+                // Cannot happen (the triggering object is fixed for the whole reconcile);
+                // stated so that parent_uid_annotation below is only read off a mirror.
+                error
+            } else if !(is_some_k_list_resp_view(resp_o) && extract_some_k_list_resp_view(resp_o) is Ok) {
                 // Any failure, including a type-level NotFound, is a retry, never a deletion.
                 error
             } else {

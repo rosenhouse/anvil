@@ -147,6 +147,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
     cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init), at_sync_step_closure(WidgetSyncStepView::AfterGetInner));
 
     // Every state is idle or at one of the steps.
+    entails_implies_leads_to(spec, idle, idle);
     lemma_true_equal_to_sync_idle_or_at_any_step(controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),
@@ -308,6 +309,7 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(
     );
     cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::Init), janitor_step_after_init());
 
+    entails_implies_leads_to(spec, idle, idle);
     lemma_true_equal_to_janitor_idle_or_at_any_step(controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),

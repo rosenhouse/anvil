@@ -3,6 +3,7 @@ use crate::kubernetes_cluster::spec::{
     api_server::{types::*, state_machine::*}, builtin_controllers::garbage_collector::*,
     builtin_controllers::types::*, cluster::*, message::*,
 };
+use crate::kubernetes_cluster::proof::api_server::*;
 use verus_temporal_logic::{defs::*, rules::*};
 use crate::vstd_ext::string_view::StringView;
 use vstd::prelude::*;
@@ -188,6 +189,7 @@ pub proof fn lemma_eventually_objects_owner_references_satisfies(
         &&& Self::every_create_msg_with_generate_name_matching_key_set_owner_references_as(key, eventual_owner_ref)(s)
         &&& Self::objects_owner_references_violates(key, eventual_owner_ref)(s) ==> Self::garbage_collector_deletion_enabled(key)(s)
         &&& Self::objects_owner_references_violates(key, eventual_owner_ref)(s_prime) ==> Self::garbage_collector_deletion_enabled(key)(s_prime)
+        &&& Self::each_object_in_etcd_is_weakly_well_formed()(s)
     };
     always_to_always_later(spec, lift_state(Self::objects_owner_references_violates(key, eventual_owner_ref)).implies(lift_state(Self::garbage_collector_deletion_enabled(key))));
     combine_spec_entails_always_n!(
@@ -197,7 +199,8 @@ pub proof fn lemma_eventually_objects_owner_references_satisfies(
         lift_state(Self::every_valid_update_msg_sets_owner_references_as(self.installed_types, key, eventual_owner_ref)),
         lift_state(Self::every_create_msg_with_generate_name_matching_key_set_owner_references_as(key, eventual_owner_ref)),
         lift_state(Self::objects_owner_references_violates(key, eventual_owner_ref)).implies(lift_state(Self::garbage_collector_deletion_enabled(key))),
-        later(lift_state(Self::objects_owner_references_violates(key, eventual_owner_ref)).implies(lift_state(Self::garbage_collector_deletion_enabled(key))))
+        later(lift_state(Self::objects_owner_references_violates(key, eventual_owner_ref)).implies(lift_state(Self::garbage_collector_deletion_enabled(key)))),
+        lift_state(Self::each_object_in_etcd_is_weakly_well_formed())
     );
 
     assert forall |s, s_prime| pre(s) && #[trigger] stronger_next(s, s_prime) && self.builtin_controllers_next().forward(input)(s, s_prime) implies delete_msg_in_flight(s_prime) by {
@@ -257,21 +260,49 @@ pub proof fn lemma_eventually_objects_owner_references_satisfies(
         match step {
             Step::APIServerStep(input) => {
                 let req = input->0;
-                if resource_create_request_msg(key)(req) {} else {}
-                if resource_update_request_msg(key)(req) {} else {}
-                if resource_get_then_update_request_msg(key)(req) {} else {}
-                if resource_create_request_msg_without_name(key.kind, key.namespace)(req) {} else {}
-                // A patch keeps the stored metadata (and hence the owner references) as they are.
-                if resource_patch_request_msg(key)(req) {
-                    if s_prime.resources().contains_key(key) && s_prime.resources()[key] != s.resources()[key] {
-                        assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                if s_prime.resources().contains_key(key) {
+                    if !s.resources().contains_key(key) {
+                        // The object was just created, by a create with or without a name.
+                        if resource_create_request_msg(key)(req) {
+                        } else {
+                            assert(resource_create_request_msg_without_name(key.kind, key.namespace)(req));
+                        }
+                    } else if s_prime.resources()[key] != s.resources()[key] {
+                        match req.content->APIRequest_0 {
+                            APIRequest::UpdateRequest(_) => {
+                                assert(resource_update_request_msg(key)(req));
+                            },
+                            APIRequest::GetThenUpdateRequest(_) => {
+                                assert(resource_get_then_update_request_msg(key)(req));
+                            },
+                            // Every other write keeps the stored metadata, hence the owner references.
+                            APIRequest::PatchRequest(patch_req) => {
+                                lemma_weakly_well_formed_implies_kinds_match(s);
+                                lemma_patch_request_keeps_identity_and_lifecycle(self.installed_types, patch_req, s.api_server);
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            APIRequest::PatchStatusRequest(patch_req) => {
+                                lemma_patch_status_request_keeps_identity(self.installed_types, patch_req, s.api_server);
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            APIRequest::UpdateStatusRequest(_) => {
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            APIRequest::GetThenUpdateStatusRequest(_) => {
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            APIRequest::DeleteRequest(_) => {
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            APIRequest::GetThenDeleteRequest(_) => {
+                                assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
+                            },
+                            _ => {
+                                assert(s_prime.resources()[key] == s.resources()[key]);
+                            },
+                        }
                     }
-                } else {}
-                if resource_patch_status_request_msg(key)(req) {
-                    if s_prime.resources().contains_key(key) && s_prime.resources()[key] != s.resources()[key] {
-                        assert(s_prime.resources()[key].metadata.owner_references == s.resources()[key].metadata.owner_references);
-                    }
-                } else {}
+                }
             },
             _ => {}
         }

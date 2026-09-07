@@ -72,6 +72,8 @@ pub open spec fn is_vsts_pod_key(vsts: VStatefulSetView) -> spec_fn(ObjectRef) -
     |key: ObjectRef| key.kind == Kind::PodKind && key.namespace == vsts.object_ref().namespace && pod_name_match(key.name, vsts.object_ref().name)
 }
 
+#[verifier(rlimit(400))]
+#[verifier(spinoff_prover)]
 pub proof fn lemma_always_all_pods_in_etcd_matching_vsts_have_no_finalizer_or_deletion_timestamp_and_one_owner_ref(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, vsts: VStatefulSetView
 )
@@ -98,6 +100,7 @@ ensures
         &&& cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s)
         &&& internal_rely_guarantee::vsts_internal_guarantee_conditions(controller_id)(s)
         &&& every_msg_from_vsts_controller_carries_vsts_key(controller_id)(s)
+        &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
     };
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_no_pending_request_to_api_server_from_api_server_or_external(spec);
@@ -107,6 +110,7 @@ ensures
     cluster.lemma_always_every_in_flight_req_msg_from_controller_has_valid_controller_id(spec);
     internal_rely_guarantee::internal_guarantee_condition_holds_on_all_vsts(spec, cluster, controller_id);
     lemma_always_every_msg_from_vsts_controller_carries_vsts_key(spec, cluster, controller_id);
+    cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
 
     assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime)
         implies inv(s_prime) by {
@@ -167,16 +171,23 @@ ensures
                                             }
                                         },
                                         APIRequest::PatchRequest(req) => {
-                                            // Nobody else patches pods.
+                                            // Nobody else patches pods, and a patch keeps the metadata anyway.
                                             assert(rely_guarantee::vsts_rely_patch_req(req));
                                             assert(req.key().kind != Kind::PodKind);
+                                            lemma_weakly_well_formed_implies_kinds_match(s);
+                                            lemma_patch_request_keeps_identity_and_lifecycle(cluster.installed_types, req, s.api_server);
+                                            assert(s.resources().contains_key(pod_key));
+                                            assert(s_prime.resources()[pod_key].metadata.deletion_timestamp == s.resources()[pod_key].metadata.deletion_timestamp);
+                                            assert(s_prime.resources()[pod_key].metadata.finalizers == s.resources()[pod_key].metadata.finalizers);
+                                            assert(s_prime.resources()[pod_key].metadata.owner_references == s.resources()[pod_key].metadata.owner_references);
                                         },
                                         APIRequest::PatchStatusRequest(req) => {
                                             // A status patch keeps the metadata.
-                                            if req.key() == pod_key {
-                                                assert(s.resources().contains_key(pod_key));
-                                                assert(s_prime.resources()[pod_key].metadata == s.resources()[pod_key].metadata);
-                                            }
+                                            lemma_patch_status_request_keeps_identity(cluster.installed_types, req, s.api_server);
+                                            assert(s.resources().contains_key(pod_key));
+                                            assert(s_prime.resources()[pod_key].metadata.deletion_timestamp == s.resources()[pod_key].metadata.deletion_timestamp);
+                                            assert(s_prime.resources()[pod_key].metadata.finalizers == s.resources()[pod_key].metadata.finalizers);
+                                            assert(s_prime.resources()[pod_key].metadata.owner_references == s.resources()[pod_key].metadata.owner_references);
                                         },
                                         _ => {}
                                     }
@@ -251,7 +262,8 @@ ensures
         lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()),
         lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()),
         lift_state(internal_rely_guarantee::vsts_internal_guarantee_conditions(controller_id)),
-        lift_state(every_msg_from_vsts_controller_carries_vsts_key(controller_id))
+        lift_state(every_msg_from_vsts_controller_carries_vsts_key(controller_id)),
+        lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())
     );
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
@@ -1088,6 +1100,8 @@ pub open spec fn all_pvcs_in_etcd_matching_vsts_have_no_finalizer_or_deletion_ti
     }
 }
 
+#[verifier(rlimit(400))]
+#[verifier(spinoff_prover)]
 pub proof fn lemma_always_all_pvcs_in_etcd_matching_vsts_have_no_finalizer_or_deletion_timestamp_or_owner_ref(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int
 )
@@ -1114,7 +1128,9 @@ ensures
         &&& cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s)
         &&& internal_rely_guarantee::vsts_internal_guarantee_conditions(controller_id)(s)
         &&& every_msg_from_vsts_controller_carries_vsts_key(controller_id)(s)
+        &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
     };
+    cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_no_pending_request_to_api_server_from_api_server_or_external(spec);
     cluster.lemma_always_all_requests_from_pod_monkey_are_api_pod_requests(spec);
@@ -1180,16 +1196,23 @@ ensures
                                             }
                                         },
                                         APIRequest::PatchRequest(req) => {
-                                            // Nobody else patches PVCs.
+                                            // Nobody else patches PVCs, and a patch keeps the metadata anyway.
                                             assert(rely_guarantee::vsts_rely_patch_req(req));
                                             assert(req.key().kind != Kind::PersistentVolumeClaimKind);
+                                            lemma_weakly_well_formed_implies_kinds_match(s);
+                                            lemma_patch_request_keeps_identity_and_lifecycle(cluster.installed_types, req, s.api_server);
+                                            assert(s.resources().contains_key(pvc_key));
+                                            assert(s_prime.resources()[pvc_key].metadata.deletion_timestamp == s.resources()[pvc_key].metadata.deletion_timestamp);
+                                            assert(s_prime.resources()[pvc_key].metadata.finalizers == s.resources()[pvc_key].metadata.finalizers);
+                                            assert(s_prime.resources()[pvc_key].metadata.owner_references == s.resources()[pvc_key].metadata.owner_references);
                                         },
                                         APIRequest::PatchStatusRequest(req) => {
                                             // A status patch keeps the metadata.
-                                            if req.key() == pvc_key {
-                                                assert(s.resources().contains_key(pvc_key));
-                                                assert(s_prime.resources()[pvc_key].metadata == s.resources()[pvc_key].metadata);
-                                            }
+                                            lemma_patch_status_request_keeps_identity(cluster.installed_types, req, s.api_server);
+                                            assert(s.resources().contains_key(pvc_key));
+                                            assert(s_prime.resources()[pvc_key].metadata.deletion_timestamp == s.resources()[pvc_key].metadata.deletion_timestamp);
+                                            assert(s_prime.resources()[pvc_key].metadata.finalizers == s.resources()[pvc_key].metadata.finalizers);
+                                            assert(s_prime.resources()[pvc_key].metadata.owner_references == s.resources()[pvc_key].metadata.owner_references);
                                         },
                                         _ => {},
                                     }
@@ -1230,7 +1253,8 @@ ensures
         lift_state(Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()),
         lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()),
         lift_state(internal_rely_guarantee::vsts_internal_guarantee_conditions(controller_id)),
-        lift_state(every_msg_from_vsts_controller_carries_vsts_key(controller_id))
+        lift_state(every_msg_from_vsts_controller_carries_vsts_key(controller_id)),
+        lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())
     );
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
