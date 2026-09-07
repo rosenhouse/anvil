@@ -13,7 +13,7 @@
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::kubernetes_cluster::proof::api_server::*;
+use crate::kubernetes_cluster::proof::{api_server::*, temporal_rules::*};
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
     cluster::*,
@@ -1597,21 +1597,6 @@ pub proof fn lemma_current_reconcile_of_outer(cluster: Cluster, controller_id: i
     assert(cr.object_ref() == key);
     assert(cr.metadata.uid == outer.metadata().uid);
     assert(cr_outer.spec() == outer.spec());
-}
-
-// ---------------------------------------------------------------------------
-// Splitting a conjunction the spec entails.
-// ---------------------------------------------------------------------------
-
-// spec |= p /\ q gives spec |= p and spec |= q.
-pub proof fn entails_and_split(spec: TempPred<ClusterState>, p: TempPred<ClusterState>, q: TempPred<ClusterState>)
-    requires spec.entails(p.and(q)),
-    ensures spec.entails(p), spec.entails(q),
-{
-    assert(p.and(q).entails(p));
-    assert(p.and(q).entails(q));
-    entails_trans(spec, p.and(q), p);
-    entails_trans(spec, p.and(q), q);
 }
 
 }

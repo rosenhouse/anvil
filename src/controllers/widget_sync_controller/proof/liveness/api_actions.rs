@@ -473,21 +473,6 @@ pub proof fn lemma_spec_change_means_synced(
 // Stability of the object-level facts.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_next_only_grows_by_fresh_uids(cluster: Cluster, s: ClusterState, s_prime: ClusterState)
-    requires cluster.next()(s, s_prime),
-    ensures store_only_grows_by_fresh_uids(s, s_prime),
-{
-    let step = choose |step| cluster.next_step(s, s_prime, step);
-    match step {
-        Step::APIServerStep(input) => {
-            lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, input->0);
-        },
-        _ => {
-            assert(s_prime.api_server == s.api_server);
-        },
-    }
-}
-
 pub proof fn lemma_gone_is_stable(key: ObjectRef, uid: Uid, s: ClusterState, s_prime: ClusterState)
     requires
         gone(key, uid)(s),
