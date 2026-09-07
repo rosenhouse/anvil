@@ -68,7 +68,7 @@ ensures
             &&& VReplicaSetView::unmarshal(etcd_obj) is Ok
             // weakly equal to etcd object
             &&& valid_owned_obj_key(vd, s)(key)
-            &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+            &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
             &&& etcd_vrs.spec == vrs.spec
         } by {
             VReplicaSetView::marshal_preserves_metadata();
@@ -508,7 +508,7 @@ ensures
             &&& s_prime.resources().contains_key(key)
             &&& VReplicaSetView::unmarshal(s_prime.resources()[key]) is Ok
             &&& VReplicaSetView::unmarshal(s_prime.resources()[key])->Ok_0.spec == VReplicaSetView::unmarshal(s.resources()[key])->Ok_0.spec
-            &&& VReplicaSetView::unmarshal(s_prime.resources()[key])->Ok_0.metadata.without_resource_version() == VReplicaSetView::unmarshal(s.resources()[key])->Ok_0.metadata.without_resource_version()
+            &&& VReplicaSetView::unmarshal(s_prime.resources()[key])->Ok_0.metadata.without_resource_version_and_generation() == VReplicaSetView::unmarshal(s.resources()[key])->Ok_0.metadata.without_resource_version_and_generation()
             &&& valid_owned_obj_key(vd, s_prime)(key)
         } by {
             lemma_api_request_other_than_pending_req_msg_maintains_object_owned_by_vd(
@@ -816,7 +816,7 @@ ensures
         let vrs_prime = VReplicaSetView::unmarshal(s_prime.resources()[k])->Ok_0;
         &&& s_prime.resources().contains_key(k)
         &&& VReplicaSetView::unmarshal(s_prime.resources()[k]) is Ok
-        &&& vrs.metadata.without_resource_version() == vrs_prime.metadata.without_resource_version()
+        &&& vrs.metadata.without_resource_version_and_generation() == vrs_prime.metadata.without_resource_version_and_generation()
         &&& vrs.spec == vrs_prime.spec
         // convenient post condition
         &&& valid_owned_obj_key(vd, s_prime)(k) == valid_owned_obj_key(vd, s)(k)
@@ -833,7 +833,7 @@ ensures
         let vrs_prime = VReplicaSetView::unmarshal(s_prime.resources()[k])->Ok_0;
         &&& s.resources().contains_key(k)
         &&& VReplicaSetView::unmarshal(s.resources()[k]) is Ok
-        &&& vrs.metadata.without_resource_version() == vrs_prime.metadata.without_resource_version()
+        &&& vrs.metadata.without_resource_version_and_generation() == vrs_prime.metadata.without_resource_version_and_generation()
         &&& vrs.spec == vrs_prime.spec
         &&& valid_owned_obj_key(vd, s_prime)(k) == valid_owned_obj_key(vd, s)(k)
     },
@@ -850,7 +850,7 @@ ensures
         let vrs_prime = VReplicaSetView::unmarshal(s_prime.resources()[k])->Ok_0;
         &&& s_prime.resources().contains_key(k)
         &&& VReplicaSetView::unmarshal(s_prime.resources()[k]) is Ok
-        &&& vrs.metadata.without_resource_version() == vrs_prime.metadata.without_resource_version()
+        &&& vrs.metadata.without_resource_version_and_generation() == vrs_prime.metadata.without_resource_version_and_generation()
         &&& vrs.spec == vrs_prime.spec
         &&& valid_owned_obj_key(vd, s_prime)(k) == valid_owned_obj_key(vd, s)(k)
     } by {
@@ -963,7 +963,7 @@ ensures
         let vrs_prime = VReplicaSetView::unmarshal(s_prime.resources()[k])->Ok_0;
         &&& s.resources().contains_key(k)
         &&& VReplicaSetView::unmarshal(s.resources()[k]) is Ok
-        &&& vrs.metadata.without_resource_version() == vrs_prime.metadata.without_resource_version()
+        &&& vrs.metadata.without_resource_version_and_generation() == vrs_prime.metadata.without_resource_version_and_generation()
         &&& vrs.spec == vrs_prime.spec
         &&& valid_owned_obj_key(vd, s_prime)(k) == valid_owned_obj_key(vd, s)(k)
     } by {

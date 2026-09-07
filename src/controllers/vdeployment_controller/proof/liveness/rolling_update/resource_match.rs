@@ -303,7 +303,7 @@ ensures
                     &&& s_prime.resources().contains_key(key)
                     &&& VReplicaSetView::unmarshal(etcd_obj) is Ok
                     &&& valid_owned_obj_key(vd, s_prime)(key)
-                    &&& etcd_vrs.metadata.without_resource_version() == vrs.metadata.without_resource_version()
+                    &&& etcd_vrs.metadata.without_resource_version_and_generation() == vrs.metadata.without_resource_version_and_generation()
                     &&& etcd_vrs.spec == vrs.spec
                 } by {
                     lemma_api_request_other_than_pending_req_msg_maintains_object_owned_by_vd(

@@ -342,12 +342,12 @@ pub open spec fn filter_old_and_new_vrs(vd: VDeploymentView, vrs_list: Seq<VRepl
     (reusable_vrs, old_vrs_list)
 }
 
-// Strip resource_version AND status for vrs_set identity stability.
-// When VD controller changes replicas via GetThenUpdate, or VRS controller changes status,
+// Strip resource_version, generation AND status for vrs_set identity stability.
+// When VD controller changes replicas via GetThenUpdate (which bumps rv and generation), or VRS controller changes status,
 // the mapped set remains the same.
 pub open spec fn vrs_with_no_rv_status(vrs: VReplicaSetView) -> VReplicaSetView {
     VReplicaSetView {
-        metadata: vrs.metadata.without_resource_version(),
+        metadata: vrs.metadata.without_resource_version_and_generation(),
         status: None,
         ..vrs
     }

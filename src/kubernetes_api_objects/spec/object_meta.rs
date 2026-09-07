@@ -164,6 +164,17 @@ impl ObjectMetaView {
         }
     }
 
+    // Strips both server-owned revision counters. Use this, not
+    // without_resource_version, as the identity of an object across its
+    // own updates: a spec change bumps generation as well as resource_version.
+    pub open spec fn without_resource_version_and_generation(self) -> ObjectMetaView {
+        ObjectMetaView {
+            resource_version: None,
+            generation: None,
+            ..self
+        }
+    }
+
     pub open spec fn with_owner_references(self, owner_references: Seq<OwnerReferenceView>) -> ObjectMetaView {
         ObjectMetaView {
             owner_references: Some(owner_references),
