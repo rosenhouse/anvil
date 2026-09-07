@@ -28,10 +28,10 @@ use crate::kubernetes_cluster::spec::{
 use crate::reconciler::spec::io::*;
 use crate::vstd_ext::{set_lib::*, string_view::*};
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler, sync_reconciler::*},
+    model::{install::*, sync_reconciler::*},
     proof::{
         guarantee::*, helper_invariants::*, janitor_invariants::*,
-        liveness::{janitor_proof::{entails_and_split, lemma_next_only_grows_by_fresh_uids, lemma_gone_is_stable, gone, phase_i, lemma_true_leads_to_always_phase_i}, terminate},
+        liveness::{janitor_proof::*, terminate},
         predicate::*, sync_invariants::*,
     },
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
@@ -582,7 +582,7 @@ pub proof fn lemma_ours_after_api_server_step(
     assert(msg.content is APIRequest);
     lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, msg);
     // The parent uid on our mirror is the outer copy's, which exists.
-    assert(janitor_reconciler::parent_uid_annotation(inner) == parent_uid_of(outer));
+    assert(parent_uid_annotation(inner) == parent_uid_of(outer));
     assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
     assert(s.resources()[key].metadata.uid is Some);
     assert(outer.metadata.uid is Some);
@@ -1423,7 +1423,7 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(
     // A stale mirror (another parent) is collected by the janitor (R3).
     let stale_p = |p: Uid| lift_state(|s: ClusterState| {
         &&& stale(s)
-        &&& janitor_reconciler::parent_uid_annotation(InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0) == int_to_string_view(p)
+        &&& parent_uid_annotation(InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0) == int_to_string_view(p)
     });
     assert forall |p: Uid| spec.entails(#[trigger] stale_p(p).leads_to(gone_m)) by {
         if p == u {
@@ -1433,7 +1433,7 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(
                     let s = ex.head();
                     assert(mirror_is_bound(ikey)(s));
                     let inner = InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0;
-                    assert(janitor_reconciler::has_mirror_identity(inner));
+                    assert(has_mirror_identity(inner));
                     assert(is_mirror_of(inner, outer));
                     assert(ours(s));
                     assert(false);
@@ -1458,7 +1458,7 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(
             // stale_p(p) /\ inv ==> mirror_object_is(ikey, p, m)
             let stale_p_inv = |s: ClusterState| {
                 &&& stale(s)
-                &&& janitor_reconciler::parent_uid_annotation(InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0) == int_to_string_view(p)
+                &&& parent_uid_annotation(InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0) == int_to_string_view(p)
                 &&& inv(s)
             };
             assert forall |s: ClusterState| #[trigger] stale_p_inv(s) implies mirror_object_is(ikey, p, m)(s) by {
@@ -1476,7 +1476,7 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(
         let s = ex.head();
         assert(mirror_is_bound(ikey)(s));
         let inner = InnerWidgetView::unmarshal(s.resources()[ikey])->Ok_0;
-        let p = choose |p: Uid| janitor_reconciler::parent_uid_annotation(inner) == #[trigger] int_to_string_view(p);
+        let p = choose |p: Uid| parent_uid_annotation(inner) == #[trigger] int_to_string_view(p);
         assert(stale_p(p).satisfied_by(ex));
     }
     entails_implies_leads_to(spec, lift_state(stale_inv), tla_exists(stale_p));

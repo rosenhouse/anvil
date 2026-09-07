@@ -6,7 +6,6 @@ use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::{spec_types::*, step::*};
-pub use crate::widget_sync_controller::trusted::spec_types::{inner_key, parent_uid_of, make_inner, is_mirror_of, inner_caught_up};
 use vstd::prelude::*;
 
 verus! {

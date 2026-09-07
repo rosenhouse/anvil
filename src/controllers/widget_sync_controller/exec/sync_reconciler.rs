@@ -6,6 +6,7 @@ use crate::reconciler::exec::{io::*, reconciler::*};
 use crate::reconciler::spec::io::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::model::sync_reconciler as model;
+use crate::widget_sync_controller::trusted::spec_types;
 use crate::widget_sync_controller::trusted::{exec_types::*, spec_types::*, step::*};
 use vstd::prelude::*;
 
@@ -185,10 +186,10 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
     }
 }
 
-// The mirror the sync controller creates for `outer`. See model::make_inner.
+// The mirror the sync controller creates for `outer`. See make_inner.
 pub fn make_inner(outer: &OuterWidget) -> (inner: InnerWidget)
     requires outer@.well_formed(),
-    ensures inner@ == model::make_inner(outer@),
+    ensures inner@ == spec_types::make_inner(outer@),
 {
     let mut inner = InnerWidget::default();
     let mut metadata = ObjectMeta::default();
@@ -201,10 +202,10 @@ pub fn make_inner(outer: &OuterWidget) -> (inner: InnerWidget)
     inner
 }
 
-// Whether `inner` is the mirror of `outer`. See model::is_mirror_of.
+// Whether `inner` is the mirror of `outer`. See is_mirror_of.
 pub fn is_mirror_of(inner: &InnerWidget, outer: &OuterWidget) -> (b: bool)
     requires outer@.metadata.uid is Some,
-    ensures b == model::is_mirror_of(inner@, outer@),
+    ensures b == spec_types::is_mirror_of(inner@, outer@),
 {
     let labels = inner.metadata().labels();
     let annotations = inner.metadata().annotations();
@@ -221,9 +222,9 @@ pub fn is_mirror_of(inner: &InnerWidget, outer: &OuterWidget) -> (b: bool)
 }
 
 // Whether the inner implementation has processed the mirror's current spec.
-// See model::inner_caught_up.
+// See inner_caught_up.
 pub fn inner_caught_up(inner: &InnerWidget) -> (b: bool)
-    ensures b == model::inner_caught_up(inner@),
+    ensures b == spec_types::inner_caught_up(inner@),
 {
     let status = inner.status();
     if status.is_none() {
