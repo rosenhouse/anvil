@@ -638,17 +638,27 @@ pub open spec fn on_side(side: Side, p: StatePred<ClusterState>) -> StatePred<Tw
     |s: TwoClusterState| p(s.project(side))
 }
 
+// The premise of R1 and R2 on two clusters: the outer copy and the in-flight
+// writes are read on the primary side; the delete clause, which looks at the
+// mirror, is read on the remote side, where the mirror lives.
+pub open spec fn two_cluster_outer_stable(outer: OuterWidgetView) -> StatePred<TwoClusterState> {
+    |s: TwoClusterState| {
+        &&& outer_stable(outer)(s.project(Side::Primary))
+        &&& mirror_undeleted(outer)(s.project(Side::Remote))
+    }
+}
+
 // R1 on two clusters: the outer copy is read in the primary store, the mirror in the remote one.
 pub open spec fn two_cluster_spec_eventually_synced() -> TempPred<TwoClusterState> {
     tla_forall(|outer: OuterWidgetView|
-        always(lift_state(on_side(Side::Primary, outer_stable(outer))))
+        always(lift_state(two_cluster_outer_stable(outer)))
             .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))))
 }
 
 // R2 on two clusters.
 pub open spec fn two_cluster_status_eventually_mirrored() -> TempPred<TwoClusterState> {
     tla_forall(|i: (OuterWidgetView, WidgetStatusView)|
-        always(lift_state(on_side(Side::Primary, outer_stable(i.0))).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
+        always(lift_state(two_cluster_outer_stable(i.0)).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
             .leads_to(always(lift_state(on_side(Side::Primary, status_synced(i.0, i.1))))))
 }
 
@@ -740,7 +750,7 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
         inv(widget_two_cluster(cluster), s),
     ensures ({
         let tc = widget_two_cluster(cluster);
-        outer_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == outer_stable(outer)(s.project(Side::Primary))
+        outer_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_stable(outer)(s)
     }),
 {
     let tc = widget_two_cluster(cluster);
@@ -779,6 +789,89 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
                 let msg1 = relabel_msg(tc, r, msg);
                 assert(a.in_flight().contains(msg1));
             }
+        }
+    }
+    // Deletes of the mirror key in flight, read on the remote side. Only needed when
+    // the outer copy exists, which fixes its uid; otherwise both sides of the
+    // equality are false already.
+    if Cluster::desired_state_is(outer)(p) {
+        lemma_mirror_undeleted_pull_back(cluster, r, s, outer, uid_next, rv_next);
+    }
+}
+
+// The delete clause of the premise, pulled back: a Delete of the mirror key misses
+// the relabeled mirror exactly when its preimage misses the mirror in the remote
+// store, since uids of one side are relabeled injectively.
+#[verifier(rlimit(200))]
+#[verifier(spinoff_prover)]
+proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
+    requires
+        widget_relabeling(cluster, r),
+        inv(widget_two_cluster(cluster), s),
+        outer.metadata.uid is Some,
+    ensures ({
+        let tc = widget_two_cluster(cluster);
+        mirror_undeleted(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == mirror_undeleted(outer)(s.project(Side::Remote))
+    }),
+{
+    let tc = widget_two_cluster(cluster);
+    lemma_widget_sides(cluster);
+    let outer1 = relabel_outer(tc, r, outer);
+    let a = abs(tc, r, s, uid_next, rv_next);
+    let q = s.project(Side::Remote);
+    let key = inner_key(outer);
+    assert(inner_key(outer1) == key);
+    let in_flight = s.network.in_flight;
+    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    // The mirror at the key, on both sides of the abstraction.
+    if q.resources().contains_key(key) {
+        let obj = q.resources()[key];
+        lemma_unmarshal_inner_relabel(tc, r, obj);
+        lemma_relabel_obj_keeps_identity(tc, r, obj);
+        if InnerWidgetView::unmarshal(obj) is Ok {
+            lemma_is_mirror_of_relabel(cluster, r, InnerWidgetView::unmarshal(obj)->Ok_0, outer);
+        }
+    }
+    // A Delete of the mirror key and its relabeling miss the mirror together.
+    assert forall |m2: Message| #[trigger] in_flight.contains(m2) && m2.content is APIRequest && m2.content->APIRequest_0 is DeleteRequest
+        && m2.content->APIRequest_0->DeleteRequest_0.key == key
+        implies delete_misses_mirror(relabel_msg(tc, r, m2).content->APIRequest_0->DeleteRequest_0, outer1)(a)
+            == delete_misses_mirror(m2.content->APIRequest_0->DeleteRequest_0, outer)(q) by {
+        let req2 = m2.content->APIRequest_0->DeleteRequest_0;
+        let req1 = relabel_msg(tc, r, m2).content->APIRequest_0->DeleteRequest_0;
+        assert(req1.preconditions == relabel_preconditions(r, Side::Remote, req2.preconditions));
+        if q.resources().contains_key(key) {
+            let obj = q.resources()[key];
+            assert(a.resources()[key].metadata.uid == relabel_opt_uid(r, Side::Remote, obj.metadata.uid));
+            match (req2.preconditions, obj.metadata.uid) {
+                (Some(pre), Some(x)) => {
+                    match pre.uid {
+                        Some(y) => { if (r.uid)(Side::Remote, y) == (r.uid)(Side::Remote, x) { assert(y == x); } },
+                        None => {},
+                    }
+                },
+                _ => {},
+            }
+        }
+    }
+    if mirror_undeleted(outer)(q) {
+        assert forall |msg: Message| #[trigger] a.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
+            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(req, outer1)(a),
+            _ => true,
+        } by {
+            lemma_relabel_msgs_contains(tc, r, in_flight, msg);
+            let m2 = choose |m2: Message| #[trigger] in_flight.contains(m2) && relabel_msg(tc, r, m2) == msg;
+            assert(q.in_flight().contains(m2));
+        }
+    }
+    if mirror_undeleted(outer1)(a) {
+        assert forall |msg: Message| #[trigger] q.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
+            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(req, outer)(q),
+            _ => true,
+        } by {
+            lemma_relabel_msgs_contains(tc, r, in_flight, msg);
+            let msg1 = relabel_msg(tc, r, msg);
+            assert(a.in_flight().contains(msg1));
         }
     }
 }
@@ -1118,7 +1211,7 @@ proof fn lemma_outer_without_uid_not_stable_at(cluster: Cluster, r: Relabeling, 
     requires
         widget_sim(cluster, r, ex),
         outer.metadata.uid is None,
-    ensures !on_side(Side::Primary, outer_stable(outer))(state_at(ex, t)),
+    ensures !two_cluster_outer_stable(outer)(state_at(ex, t)),
 {
     let tc = widget_two_cluster(cluster);
     lemma_widget_sim_inv(cluster, r, ex, t);
@@ -1127,6 +1220,7 @@ proof fn lemma_outer_without_uid_not_stable_at(cluster: Cluster, r: Relabeling, 
     if s.primary.resources.contains_key(key) {
         assert(stored_object_ok(tc, s.primary.resources[key]));
     }
+    assert(!Cluster::desired_state_is(outer)(s.project(Side::Primary)));
 }
 
 // A leads-to whose premise never holds is vacuous.
@@ -1151,16 +1245,16 @@ proof fn lemma_outer_without_uid_never_stable(cluster: Cluster, r: Relabeling, e
     requires
         widget_sim(cluster, r, ex),
         outer.metadata.uid is None,
-    ensures always(lift_state(on_side(Side::Primary, outer_stable(outer)))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex),
-        forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(on_side(Side::Primary, outer_stable(outer))).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
+    ensures always(lift_state(two_cluster_outer_stable(outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex),
+        forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
             .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex),
 {
-    let sp = on_side(Side::Primary, outer_stable(outer));
+    let sp = two_cluster_outer_stable(outer);
     assert forall |t: nat| !sp(#[trigger] state_at(ex, t)) by {
         lemma_outer_without_uid_not_stable_at(cluster, r, ex, outer, t);
     }
     lemma_vacuous_from_never(ex, sp, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(outer)))));
-    assert forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(on_side(Side::Primary, outer_stable(outer))).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
+    assert forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
         .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex) by {
         lemma_vacuous_from_never(ex, sp, lift_state(on_side(Side::Remote, inner_settled(outer, mirrored))), always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored)))));
     }
@@ -1174,7 +1268,7 @@ pub proof fn lemma_r1_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
 {
     let tc = widget_two_cluster(cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |outer: OuterWidgetView| #[trigger] always(lift_state(on_side(Side::Primary, outer_stable(outer))))
+    assert forall |outer: OuterWidgetView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)))
         .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex) by {
         if outer.metadata.uid is None {
             lemma_outer_without_uid_never_stable(cluster, r, ex, outer);
@@ -1185,7 +1279,7 @@ pub proof fn lemma_r1_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
             assert(f(outer1).satisfied_by(ex1));
             let p1 = outer_stable(outer1);
             let q1 = spec_synced(outer1);
-            let p2 = on_side(Side::Primary, outer_stable(outer));
+            let p2 = two_cluster_outer_stable(outer);
             let q2 = on_side(Side::Remote, spec_synced(outer));
             assert forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)) by {
                 lemma_widget_sim_inv(cluster, r, ex, i);
@@ -1208,7 +1302,7 @@ pub proof fn lemma_r2_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
 {
     let tc = widget_two_cluster(cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: (OuterWidgetView, WidgetStatusView)| #[trigger] always(lift_state(on_side(Side::Primary, outer_stable(i.0))).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
+    assert forall |i: (OuterWidgetView, WidgetStatusView)| #[trigger] always(lift_state(two_cluster_outer_stable(i.0)).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
         .leads_to(always(lift_state(on_side(Side::Primary, status_synced(i.0, i.1))))).satisfied_by(ex) by {
         let outer = i.0;
         let mirrored = i.1;
@@ -1223,7 +1317,7 @@ pub proof fn lemma_r2_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
             let p1 = outer_stable(outer1);
             let p1b = inner_settled(outer1, mirrored);
             let q1 = status_synced(outer1, mirrored);
-            let p2 = on_side(Side::Primary, outer_stable(outer));
+            let p2 = two_cluster_outer_stable(outer);
             let p2b = on_side(Side::Remote, inner_settled(outer, mirrored));
             let q2 = on_side(Side::Primary, status_synced(outer, mirrored));
             assert forall |k: nat| p1(abs_at(tc, r, ex, k)) == p2(#[trigger] state_at(ex, k)) by {

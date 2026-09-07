@@ -561,6 +561,7 @@ pub proof fn lemma_ours_after_api_server_step(
         Cluster::all_requests_from_pod_monkey_are_api_pod_requests()(s),
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::desired_state_is(outer)(s),
+        mirror_undeleted(outer)(s),
         mirror_is_ours(outer)(s),
     ensures
         mirror_is_ours(outer)(s_prime),
@@ -596,45 +597,14 @@ pub proof fn lemma_ours_after_api_server_step(
         match msg.content->APIRequest_0 {
             APIRequest::DeleteRequest(req) => {
                 if req.key == ikey {
-                    match msg.src {
-                        HostId::Controller(id, k) => {
-                            assert(cluster.controller_models.contains_key(id));
-                            if id == janitor_id {
-                                assert(janitor_delete_is_sound(msg, s));
-                                if req.preconditions->0.uid == cr.metadata.uid {
-                                    assert(snapshot_is_mirror(cr));
-                                    assert(parent_absent_forever(snapshot_parent(cr))(s));
-                                    assert(snapshot_parent(cr) == int_to_string_view(outer_uid(outer)));
-                                    assert(s.resources().contains_key(key) && s.resources()[key].metadata.uid is Some);
-                                    assert(int_to_string_view(s.resources()[key].metadata.uid->0) != snapshot_parent(cr));
-                                    assert(false);
-                                }
-                                assert(delete_request_admission_check(req, s.api_server) is Some);
-                                assert(s_prime.api_server == s.api_server);
-                            } else if id == controller_id {
-                                assert(sync_request_is_guaranteed(msg, s));
-                                assert(false);
-                            } else {
-                                assert(cluster.controller_models.remove(controller_id).contains_key(id));
-                                assert(widget_sync_rely(id)(s));
-                                assert(req.key.kind != InnerWidgetView::kind());
-                                assert(false);
-                            }
-                        },
-                        HostId::BuiltinController => {
-                            assert(builtin_delete_never_targets_a_mirror(msg, s));
-                            assert(s.resources()[ikey].metadata.uid != req.preconditions->0.uid);
-                            assert(delete_request_admission_check(req, s.api_server) is Some);
-                            assert(s_prime.api_server == s.api_server);
-                        },
-                        HostId::PodMonkey => {
-                            assert(req.key().kind == Kind::PodKind);
-                            assert(false);
-                        },
-                        _ => {
-                            assert(false);
-                        },
-                    }
+                    // Whoever sent it (the janitor, a garbage collector, an anonymous
+                    // controller deleting mirrors out of band), the premise says a
+                    // Delete of the mirror key in flight names a uid other than our
+                    // mirror's, so the API server rejects it.
+                    assert(delete_misses_mirror(req, outer)(s));
+                    assert(req.preconditions->0.uid != cr.metadata.uid);
+                    assert(delete_request_admission_check(req, s.api_server) is Some);
+                    assert(s_prime.api_server == s.api_server);
                 } else {
                     assert(s_prime.resources()[ikey] == cr);
                 }
@@ -735,6 +705,7 @@ pub proof fn lemma_ours_after_step(
         Cluster::all_requests_from_pod_monkey_are_api_pod_requests()(s),
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::desired_state_is(outer)(s),
+        mirror_undeleted(outer)(s),
         mirror_is_ours(outer)(s),
     ensures
         mirror_is_ours(outer)(s_prime),
@@ -973,6 +944,7 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(spec: TempPred<ClusterState>, 
         spec.entails(always(lift_state(outer_stable(outer)))),
         spec.entails(always(lift_state(Cluster::desired_state_is(outer)))),
         spec.entails(always(lift_state(mirror_spec_undisturbed(outer)))),
+        spec.entails(always(lift_state(mirror_undeleted(outer)))),
         spec.entails(always(lift_state(phase_i(controller_id)))),
         spec.entails(always(lift_state(sync_phase_ii(controller_id, outer)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
@@ -988,6 +960,7 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(spec: TempPred<ClusterState>, 
     entails_and_split(spec, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
     always_weaken(spec, lift_state(outer_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
     always_weaken(spec, lift_state(outer_stable(outer)), lift_state(mirror_spec_undisturbed(outer)));
+    always_weaken(spec, lift_state(outer_stable(outer)), lift_state(mirror_undeleted(outer)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
@@ -1136,6 +1109,7 @@ pub open spec fn sync_step_ctx(cluster: Cluster, controller_id: int, janitor_id:
         &&& Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s)
         &&& Cluster::desired_state_is(outer)(s)
         &&& mirror_spec_undisturbed(outer)(s)
+        &&& mirror_undeleted(outer)(s)
         &&& Cluster::the_object_in_reconcile_has_spec_and_uid_as::<OuterWidgetView>(controller_id, outer)(s)
         &&& Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, outer.object_ref())(s)
         &&& sync_pending_requests_match_snapshots(controller_id)(s)
@@ -1186,6 +1160,7 @@ pub proof fn lemma_always_sync_step_next(spec: TempPred<ClusterState>, cluster: 
         lift_state(Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()),
         lift_state(Cluster::desired_state_is(outer)),
         lift_state(mirror_spec_undisturbed(outer)),
+        lift_state(mirror_undeleted(outer)),
         lift_state(Cluster::the_object_in_reconcile_has_spec_and_uid_as::<OuterWidgetView>(controller_id, outer)),
         lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, key)),
         lift_state(sync_pending_requests_match_snapshots(controller_id)),
@@ -1210,6 +1185,7 @@ pub proof fn lemma_always_sync_step_next(spec: TempPred<ClusterState>, cluster: 
             .and(lift_state(Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()))
             .and(lift_state(Cluster::desired_state_is(outer)))
             .and(lift_state(mirror_spec_undisturbed(outer)))
+            .and(lift_state(mirror_undeleted(outer)))
             .and(lift_state(Cluster::the_object_in_reconcile_has_spec_and_uid_as::<OuterWidgetView>(controller_id, outer)))
             .and(lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, key)))
             .and(lift_state(sync_pending_requests_match_snapshots(controller_id)))

@@ -107,7 +107,10 @@ pub open spec fn mirror_get_then_update_req(req: GetThenUpdateRequest) -> StateP
     }
 }
 
-// The sync reconciler's rely on every other controller (the janitor included).
+// The sync reconciler's rely on every other controller (the janitor included). It
+// constrains only what would break identity or forge a mirror; edits of a
+// mirror's spec, of its other labels and annotations, and deletes of mirrors are
+// all admitted, and R1 and R2 promise convergence for the time after they stop.
 pub open spec fn widget_sync_rely(other_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
@@ -126,11 +129,11 @@ pub open spec fn widget_sync_rely(other_id: int) -> StatePred<ClusterState> {
             APIRequest::UpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),
             APIRequest::GetThenUpdateStatusRequest(req) => req.obj.kind != OuterWidgetView::kind(),
             APIRequest::PatchStatusRequest(req) => req.kind != OuterWidgetView::kind(),
-            // Nobody else deletes mirrors. (The janitor does, but it is not an
-            // anonymous other controller to the sync reconciler: its spec names the
-            // janitor and its proof reasons about the janitor's state machine.)
-            APIRequest::DeleteRequest(req) => req.key.kind != InnerWidgetView::kind(),
-            APIRequest::GetThenDeleteRequest(req) => req.key.kind != InnerWidgetView::kind(),
+            // Deletes are free, mirrors included: an out-of-band delete of a mirror
+            // is recovered from (NotFound, then Create), and R1 and R2 are stated for
+            // the time after such deletes stop landing on the live mirror
+            // (mirror_undeleted in liveness_theorem.rs). A transactional delete never
+            // removes a mirror, which has no owner references.
             _ => true,
         }
     }

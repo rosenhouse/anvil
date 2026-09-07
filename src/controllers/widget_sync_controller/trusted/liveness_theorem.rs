@@ -26,14 +26,47 @@ pub open spec fn widget_spec_eventually_synced_per_cr(outer: OuterWidgetView) ->
 }
 
 // The premise of R1 and R2: the outer copy exists with this uid, spec and
-// generation and is not terminating, and every in-flight write of the mirror's
-// spec writes `outer.spec`. Convergence is promised for the time after the outer
-// copy and the mirror's spec stop changing.
+// generation and is not terminating, every in-flight write of the mirror's spec
+// writes `outer.spec`, and no in-flight Delete would remove a mirror of the outer
+// copy. Convergence is promised for the time after the outer copy stops changing
+// and out-of-band edits and deletes of the mirror stop.
 pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& Cluster::desired_state_is(outer)(s)
         &&& s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
         &&& mirror_spec_undisturbed(outer)(s)
+        &&& mirror_undeleted(outer)(s)
+    }
+}
+
+// While a mirror of `outer` is at the mirror key, every in-flight Delete of that
+// key names, by uid precondition, an object other than that mirror. This is the
+// delete counterpart of mirror_spec_undisturbed: the rely lets any other
+// controller delete mirrors (an out-of-band `kubectl delete`, a rebuilt inner
+// cluster), and R1 and R2 promise convergence once such deletes stop landing on
+// the live mirror. A Delete the janitor sends satisfies the clause whenever the
+// outer copy exists (janitor_deletes_are_sound), as does a stale Delete of an
+// earlier mirror and a Delete arriving while no mirror of `outer` is at the key.
+pub open spec fn mirror_undeleted(outer: OuterWidgetView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |msg: Message| #[trigger] s.in_flight().contains(msg) && msg.content is APIRequest ==> match msg.content->APIRequest_0 {
+            APIRequest::DeleteRequest(req) => req.key == inner_key(outer) ==> delete_misses_mirror(req, outer)(s),
+            _ => true,
+        }
+    }
+}
+
+pub open spec fn delete_misses_mirror(req: DeleteRequest, outer: OuterWidgetView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let obj = s.resources()[inner_key(outer)];
+        (s.resources().contains_key(inner_key(outer))
+            && InnerWidgetView::unmarshal(obj) is Ok
+            && is_mirror_of(InnerWidgetView::unmarshal(obj)->Ok_0, outer))
+        ==> {
+            &&& req.preconditions is Some
+            &&& req.preconditions->0.uid is Some
+            &&& req.preconditions->0.uid != obj.metadata.uid
+        }
     }
 }
 
