@@ -352,9 +352,21 @@ Welder proves nothing new here. It gives the closed statement about the
 cluster running both controllers, with the janitor's ESR consumed rather than
 assumed, and a mechanical check that each guarantee implies the other's rely.
 
-The concrete two-controller instance exercises neither R2's premise nor D3:
-nothing in it writes inner status or finalizers. Verifying the echo controller
-as a third member would discharge both (issue #3).
+The whole-repository composition (`src/controllers/composition/compose_all.rs`)
+adds the pair to the cluster running the VReplicaSet, VDeployment,
+VStatefulSet and RabbitMQ controllers: `core_holds` proves `core` for the
+six-controller cluster. The pair is composed first (`widget_pair_core_holds`),
+so its liveness dependency is discharged internally and the outer step is a
+plain `compose`. The cross compatibilities are kind disjointness: the pair
+only sends requests to the two Widget kinds (for the sync reconciler this is
+read off `mirror_create_req`, whose Create is `make_inner(outer).marshal()`),
+and the other four controllers only send requests to Pods, PVCs,
+VReplicaSets and the RabbitMQ-managed kinds. The one fact Verus does not find
+on its own is that the custom kind names differ (`kind_strings_distinct`).
+
+The concrete instances exercise neither R2's premise nor D3: nothing in them
+writes inner status or finalizers. Verifying the echo controller as a further
+member would discharge both (issue #3).
 
 ### 3.5 Assumptions
 
@@ -440,7 +452,7 @@ status without an owner reference, which composing against one requires.
 | Exec reconcilers (proved to conform to the model) | `widget_sync_controller/exec/` |
 | Guarantees, store and message invariants | `widget_sync_controller/proof/{guarantee,helper_invariants,janitor_invariants,sync_invariants}.rs` |
 | Termination, R3, R1, R2, R3s | `widget_sync_controller/proof/liveness/` |
-| Welder specs and composition | `composition/widget_{janitor,sync}_reconciler.rs` |
+| Welder specs and composition | `composition/widget_{janitor,sync}_reconciler.rs`, `composition/compose_all.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
 | Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
 | R1 to R3s on two clusters | `widget_sync_controller/proof/two_cluster.rs` |
@@ -451,8 +463,8 @@ Full-repository verification (`cargo verus verify --lib`) passes.
 ## 8. Future work
 
 Tracked as issues on the fork: verified echo controller discharging D3 (#3); operability (#9) and hardening (#10);
-proof layout and solver budgets (#11); composition with the other four
-controllers and Patch in the executable model (#12); modeling out-of-band
+proof layout and solver budgets (#11); Patch in the executable model (#12,
+whose composition part landed in section 3.4); modeling out-of-band
 mirror edits and deletes (#13); parent-cluster identity, a `keep` annotation,
 an admission policy in the inner cluster, and a spec projection for
 inner-owned fields (#10).
