@@ -4,6 +4,7 @@
 // chain of the cluster's generic step lemmas.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_cluster::proof::temporal_rules::*;
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
     cluster::*,
@@ -19,15 +20,6 @@ use verus_temporal_logic::{defs::*, rules::*};
 use vstd::prelude::*;
 
 verus! {
-
-// From always(P) derive true ~> P.
-proof fn always_to_true_leads_to(spec: TempPred<ClusterState>, p: TempPred<ClusterState>)
-    requires spec.entails(always(p)),
-    ensures spec.entails(true_pred().leads_to(p)),
-{
-    temp_pred_equality(true_pred::<ClusterState>().implies(p), p);
-    always_implies_to_leads_to(spec, true_pred(), p);
-}
 
 // ---------------------------------------------------------------------------
 // The sync reconciler.

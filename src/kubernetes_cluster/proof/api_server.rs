@@ -296,6 +296,111 @@ pub proof fn lemma_other_requests_keep_identity(installed_types: InstalledTypes,
     }
 }
 
+// ---------------------------------------------------------------------------
+// Uids. The API server issues them from a counter that never decreases and
+// never reuses one, so after any step every stored object either was there
+// before with the same uid or was just created with the old counter as its uid.
+// Controller proofs use this to keep a uid bound to a key across steps.
+// ---------------------------------------------------------------------------
+
+pub open spec fn store_only_grows_by_fresh_uids(s: ClusterState, s_prime: ClusterState) -> bool {
+    &&& s_prime.api_server.uid_counter >= s.api_server.uid_counter
+    &&& forall |k: ObjectRef| #[trigger] s_prime.resources().contains_key(k) ==> {
+        ||| (s.resources().contains_key(k) && s_prime.resources()[k].metadata.uid == s.resources()[k].metadata.uid)
+        ||| s_prime.resources()[k].metadata.uid == Some(s.api_server.uid_counter)
+    }
+}
+
+#[verifier(rlimit(100))]
+#[verifier(spinoff_prover)]
+pub proof fn lemma_api_server_step_only_grows_by_fresh_uids(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message)
+    requires cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+    ensures store_only_grows_by_fresh_uids(s, s_prime),
+{
+    match msg.content->APIRequest_0 {
+        APIRequest::GetRequest(_) => {},
+        APIRequest::ListRequest(_) => {},
+        APIRequest::CreateRequest(_) => {},
+        APIRequest::DeleteRequest(_) => {},
+        APIRequest::UpdateRequest(_) => {},
+        APIRequest::UpdateStatusRequest(_) => {},
+        APIRequest::GetThenDeleteRequest(_) => {},
+        APIRequest::GetThenUpdateRequest(_) => {},
+        APIRequest::GetThenUpdateStatusRequest(_) => {},
+        APIRequest::PatchRequest(_) => {},
+        APIRequest::PatchStatusRequest(_) => {},
+    }
+}
+
+// Only the API server writes the store, so the same holds for any step.
+pub proof fn lemma_next_only_grows_by_fresh_uids(cluster: Cluster, s: ClusterState, s_prime: ClusterState)
+    requires cluster.next()(s, s_prime),
+    ensures store_only_grows_by_fresh_uids(s, s_prime),
+{
+    let step = choose |step| cluster.next_step(s, s_prime, step);
+    match step {
+        Step::APIServerStep(input) => {
+            lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, input->0);
+        },
+        _ => {
+            assert(s_prime.api_server == s.api_server);
+        },
+    }
+}
+
+// A uid that has been issued and that no object but the one at `key` carries
+// stays so across a step: the uid is below the counter, so no new object gets it.
+pub proof fn lemma_uid_stays_bound_to_key(uid: Uid, key: ObjectRef, s: ClusterState, s_prime: ClusterState)
+    requires
+        uid < s.api_server.uid_counter,
+        forall |k: ObjectRef| #[trigger] s.resources().contains_key(k) && s.resources()[k].metadata.uid == Some(uid) ==> k == key,
+        store_only_grows_by_fresh_uids(s, s_prime),
+    ensures
+        uid < s_prime.api_server.uid_counter,
+        forall |k: ObjectRef| #[trigger] s_prime.resources().contains_key(k) && s_prime.resources()[k].metadata.uid == Some(uid) ==> k == key,
+{
+}
+
+// A key that appears in the store, or whose object is replaced, was created by the
+// request the API server just handled; the created object keeps the request's
+// labels, annotations and spec.
+#[verifier(rlimit(100))]
+#[verifier(spinoff_prover)]
+pub proof fn lemma_new_object_comes_from_create(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
+    requires
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+        s_prime.resources().contains_key(key),
+        !(s.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == s.resources()[key].metadata.uid),
+    ensures
+        msg.content is APIRequest,
+        msg.content.is_create_request(),
+        ({
+            let req = msg.content.get_create_request();
+            let obj = s_prime.resources()[key];
+            &&& key.kind == req.obj.kind
+            &&& key.namespace == req.namespace
+            &&& req.obj.metadata.name is Some ==> key.name == req.obj.metadata.name->0
+            &&& obj.kind == req.obj.kind
+            &&& obj.metadata.labels == req.obj.metadata.labels
+            &&& obj.metadata.annotations == req.obj.metadata.annotations
+            &&& obj.spec == req.obj.spec
+        }),
+{
+    match msg.content->APIRequest_0 {
+        APIRequest::GetRequest(_) => {},
+        APIRequest::ListRequest(_) => {},
+        APIRequest::CreateRequest(_) => {},
+        APIRequest::DeleteRequest(_) => {},
+        APIRequest::UpdateRequest(_) => {},
+        APIRequest::UpdateStatusRequest(_) => {},
+        APIRequest::GetThenDeleteRequest(_) => {},
+        APIRequest::GetThenUpdateRequest(_) => {},
+        APIRequest::GetThenUpdateStatusRequest(_) => {},
+        APIRequest::PatchRequest(_) => {},
+        APIRequest::PatchStatusRequest(_) => {},
+    }
+}
+
 // A transactional update never touches an object without owner references.
 pub proof fn lemma_get_then_update_keeps_unowned_objects(installed_types: InstalledTypes, msg: Message, s: APIServerState, key: ObjectRef)
     requires
