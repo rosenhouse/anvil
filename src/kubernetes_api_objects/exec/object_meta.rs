@@ -22,6 +22,34 @@ implement_field_wrapper_type!(
     ObjectMetaView
 );
 
+// An object's uid as an opaque token. Exec code can compare a token with an
+// annotation value written from a token, and can write a token as an annotation
+// value; it never sees the string otherwise. Uid values therefore flow into data
+// through as_annotation_value only, which is what an argument about relabeling
+// uids (for instance across two API servers) has to account for.
+#[verifier(external_body)]
+pub struct UidToken {
+    inner: String,
+}
+
+implement_view_trait!(UidToken, StringView);
+
+impl UidToken {
+    #[verifier(external_body)]
+    pub fn as_annotation_value(&self) -> (value: String)
+        ensures value@ == self@,
+    {
+        self.inner.clone()
+    }
+
+    #[verifier(external_body)]
+    pub fn matches_annotation_value(&self, value: &String) -> (b: bool)
+        ensures b == (value@ == self@),
+    {
+        self.inner == *value
+    }
+}
+
 impl ObjectMeta {
     #[verifier(external_body)]
     pub fn name(&self) -> (name: Option<String>)
@@ -151,17 +179,14 @@ impl ObjectMeta {
         self.inner.generation
     }
 
-    // The uid as the opaque string the API server assigned. Like resource_version,
-    // the value is only meaningful for equality comparison: the exec code must never
-    // parse or order it. See the corresponding hygiene note in the multi-cluster
-    // evaluation (discussion/multi-cluster).
+    // The uid as an opaque token (see UidToken).
     #[verifier(external_body)]
-    pub fn uid(&self) -> (uid: Option<String>)
+    pub fn uid(&self) -> (uid: Option<UidToken>)
         ensures
             self@.uid is Some == uid is Some,
             uid is Some ==> uid->0@ == int_to_string_view(self@.uid->0),
     {
-        self.inner.uid.clone()
+        self.inner.uid.clone().map(|inner| UidToken { inner })
     }
 
     #[verifier(external_body)]

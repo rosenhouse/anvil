@@ -4,6 +4,14 @@ use crate::kubernetes_api_objects::exec::resource::*;
 use crate::kubernetes_api_objects::spec::api_resource::*;
 use vstd::prelude::*;
 
+// The cluster a wrapper type is bound to, as a type-level fact. The shim derives
+// the cluster of a controller's primary watch from the controller's wrapper type,
+// so the triggering object always comes from the cluster the wrapper's view kind
+// stands for.
+pub trait ClusterBound {
+    fn cluster() -> ClusterId;
+}
+
 verus! {
 
 // ClusterId names the API server an exec value belongs to or is bound for.
