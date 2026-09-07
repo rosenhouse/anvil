@@ -95,8 +95,21 @@ impl ClusterClients {
 // remote_clients_from_kubeconfig builds the pair of clients for another cluster
 // from a kubeconfig file (e.g. one mounted from a Secret). `request_timeout` bounds
 // each reconcile request; the watch client keeps kube's defaults.
+//
+// The credential should be a `tokenFile` (a relative path is resolved against the
+// kubeconfig's directory): kube re-reads it at least once a minute, so a rotated
+// token is picked up without a restart. An inline `token` is read once and takes
+// precedence over `tokenFile`, so it is warned about.
 pub async fn remote_clients_from_kubeconfig(path: &str, request_timeout: Duration) -> Result<RemoteClients> {
     let kubeconfig = Kubeconfig::read_from(path)?;
+    for named in &kubeconfig.auth_infos {
+        if named.auth_info.as_ref().map(|a| a.token.is_some()).unwrap_or(false) {
+            warn!(
+                "remote kubeconfig {} user {} uses an inline token; it is never re-read, so rotation needs a restart (use tokenFile)",
+                path, named.name
+            );
+        }
+    }
     let watch_config = Config::from_custom_kubeconfig(kubeconfig.clone(), &KubeConfigOptions::default()).await?;
     let mut request_config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await?;
     request_config.connect_timeout = Some(request_timeout);
