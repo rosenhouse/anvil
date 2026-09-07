@@ -75,6 +75,16 @@ impl DynamicObjectView {
         }
     }
 
+    pub open spec fn with_generation(self, generation: Option<Generation>) -> DynamicObjectView {
+        DynamicObjectView {
+            metadata: ObjectMetaView {
+                generation: generation,
+                ..self.metadata
+            },
+            ..self
+        }
+    }
+
     pub open spec fn with_deletion_timestamp(self, deletion_timestamp: StringView) -> DynamicObjectView {
         DynamicObjectView {
             metadata: ObjectMetaView {

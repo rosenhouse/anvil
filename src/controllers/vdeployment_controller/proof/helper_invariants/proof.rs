@@ -1143,6 +1143,7 @@ ensures vrs_objects_in_local_reconcile_state_are_controllerly_owned_by_vd_with_k
                             namespace: Some(req.namespace),
                             resource_version: Some(s.api_server.resource_version_counter),
                             uid: Some(s.api_server.uid_counter),
+                            generation: initial_generation(req.obj.kind),
                             deletion_timestamp: None,
                             ..req.obj.metadata
                         },

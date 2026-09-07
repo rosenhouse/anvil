@@ -231,6 +231,7 @@ pub fn handle_create_request(req: &KubeCreateRequest, s: &mut ApiServerState) ->
         created_obj.set_namespace(req.namespace.clone());
         created_obj.set_resource_version(s.resource_version_counter);
         created_obj.set_uid(s.uid_counter);
+        created_obj.set_initial_generation();
         created_obj.unset_deletion_timestamp();
         created_obj.set_default_status::<K::V>();
         let object_check_error = Self::created_object_validity_check(&created_obj);
@@ -267,6 +268,7 @@ pub fn handle_delete_request(req: &KubeDeleteRequest, s: &mut ApiServerState) ->
             } else {
                 obj.set_current_deletion_timestamp();
                 obj.set_resource_version(s.resource_version_counter);
+                obj.set_bumped_generation();
                 let stamped_obj_with_new_rv = obj; // This renaming is just to stay consistent with the model
                 s.resources.insert(req_key, stamped_obj_with_new_rv);
                 s.resource_version_counter = s.resource_version_counter + 1;
@@ -335,6 +337,7 @@ fn updated_object(req: &KubeUpdateRequest, old_obj: &DynamicObject) -> (ret: Dyn
     updated_obj.set_namespace(req.namespace.clone());
     updated_obj.set_resource_version_from(old_obj);
     updated_obj.set_uid_from(old_obj);
+    updated_obj.set_next_generation_from(old_obj);
     updated_obj.set_deletion_timestamp_from(old_obj);
     updated_obj.set_status_from(old_obj);
     updated_obj

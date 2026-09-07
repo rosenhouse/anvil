@@ -18,7 +18,18 @@ verus! {
 // object. Besides name, namespace and kind, each object has other metadata fields including:
 // * a resource_version that tracks the revision of this object
 // * a uid that uniquely distinguishes an object from its historical occurrences
+// * a generation that counts the revisions of the object's desired state (see below)
 // * so on...
+//
+// On generation: Kubernetes owns metadata.generation and, for a custom resource with the
+// status subresource, increments it exactly when something other than metadata and status
+// changes (in practice: the spec), and when the deletion timestamp is first set. Status
+// writes never change it. Controllers report the generation they acted on in
+// status.observedGeneration, and observers read observedGeneration == generation as
+// "the status reflects the current spec". We model these rules for custom resources only
+// (every custom resource in this model has the status subresource, since UpdateStatus
+// exists for them). Built-in kinds have per-kind rules in Kubernetes; rather than model
+// them wrong we leave their generation None, and no proof may rely on it.
 //
 // The API server provides a REST API, including Get, List, Create, Update and Delete. The API
 // implementation is more complex than a simple key-value store because a modification to the
@@ -197,6 +208,30 @@ pub open spec fn marshalled_default_status(kind: Kind, installed_types: Installe
     }
 }
 
+// The generation a freshly created object gets: 1 for custom resources, unmodeled (None) otherwise.
+pub open spec fn initial_generation(kind: Kind) -> Option<Generation> {
+    if kind is CustomResourceKind { Some(1) } else { None }
+}
+
+// The generation after an event that Kubernetes counts as a new revision of the desired state
+// (a spec change, or the deletion timestamp being set): old + 1 for custom resources.
+pub open spec fn bumped_generation(old_obj: DynamicObjectView) -> Option<Generation> {
+    if old_obj.kind is CustomResourceKind {
+        Some(old_obj.metadata.generation.unwrap_or(0) + 1)
+    } else {
+        None
+    }
+}
+
+// The generation after an update that replaces the spec with new_spec: bumped iff the spec changed.
+pub open spec fn next_generation(old_obj: DynamicObjectView, new_spec: Value) -> Option<Generation> {
+    if old_obj.kind is CustomResourceKind {
+        if new_spec != old_obj.spec { bumped_generation(old_obj) } else { old_obj.metadata.generation }
+    } else {
+        None
+    }
+}
+
 #[verifier(inline)]
 pub open spec fn handle_get_request(req: GetRequest, s: APIServerState) -> GetResponse {
     if !s.resources.contains_key(req.key) {
@@ -293,6 +328,7 @@ pub open spec fn handle_create_request(installed_types: InstalledTypes, req: Cre
                 namespace: Some(req.namespace), // Set namespace for new object
                 resource_version: Some(s.resource_version_counter), // Set rv for new object
                 uid: Some(s.uid_counter), // Set uid for new object
+                generation: initial_generation(req.obj.kind), // Set generation for new object (server-owned)
                 deletion_timestamp: None, // Unset deletion timestamp for new object
                 ..req.obj.metadata
             },
@@ -386,8 +422,11 @@ pub open spec fn handle_delete_request(req: DeleteRequest, s: APIServerState) ->
                 // A deletion timestamp is already set so no need to bother it.
                 (s, DeleteResponse{res: Ok(())})
             } else {
+                // Setting the deletion timestamp for the first time also bumps the generation
+                // (see rest.BeforeDelete and updateForGracefulDeletionAndFinalizers in the API server).
                 let stamped_obj_with_new_rv = obj.with_deletion_timestamp(deletion_timestamp())
-                                                 .with_resource_version(s.resource_version_counter);
+                                                 .with_resource_version(s.resource_version_counter)
+                                                 .with_generation(bumped_generation(obj));
                 (APIServerState {
                     // Here we use req.key, instead of stamped_obj.object_ref(), to insert to the map.
                     // This is intended because using stamped_obj.object_ref() will require us to use
@@ -481,6 +520,7 @@ pub open spec fn updated_object(req: UpdateRequest, old_obj: DynamicObjectView) 
             namespace: Some(req.namespace), // Overwrite namespace since it might not be provided
             resource_version: old_obj.metadata.resource_version, // Overwrite rv since it might not be provided
             uid: old_obj.metadata.uid, // Overwrite uid since it might not be provided
+            generation: next_generation(old_obj, req.obj.spec), // Server-owned: bumped iff the spec changes
             deletion_timestamp: old_obj.metadata.deletion_timestamp, // Ignore any change to deletion_timestamp
             ..req.obj.metadata
         },
