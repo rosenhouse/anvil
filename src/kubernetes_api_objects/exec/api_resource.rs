@@ -14,17 +14,10 @@ pub trait ClusterBound {
 
 verus! {
 
-// ClusterId names the API server an exec value belongs to or is bound for.
-//
-// A controller may talk to more than one cluster (e.g. a controller running in
-// one cluster that mirrors objects into another). The verified model has a single
-// logical store keyed by (kind, namespace, name), so objects of the same real kind
-// living in different clusters must get different *model* kinds. The tag below is
-// what the trusted wrappers use to make that distinction: an ApiResource or
-// DynamicObject tagged Remote maps to the remote cluster's model kind, and the shim
-// layer routes requests to the matching kube client by this tag. Primary is the
-// default and denotes the cluster the controller itself runs against; every
-// existing single-cluster controller only ever sees Primary.
+// ClusterId names the API server an exec value came from or is bound for. The
+// model has one store keyed by (kind, namespace, name), so a wrapper bound to
+// Remote gets a distinct view kind (for example `widget@inner`); the shim routes
+// requests by this tag. Existing single-cluster controllers see only Primary.
 pub enum ClusterId {
     Primary,
     Remote,

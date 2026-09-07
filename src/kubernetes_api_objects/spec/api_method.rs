@@ -35,13 +35,10 @@ pub enum APIRequest {
     PatchStatusRequest(PatchStatusRequest),
 }
 
-// PatchRequest replaces the spec of the object with the key (kind, name and namespace),
-// provided the tests pass against the object as stored. It models a JSON patch made of
-// `test` operations on metadata.uid and/or metadata.generation followed by an `add`
-// of /spec, executed atomically by the API server. Unlike UpdateRequest it carries no
-// resourceVersion, so it does not fail when unrelated fields (status, labels,
-// annotations, finalizers) were written since the sender read the object; the
-// generation test is what pins the spec the sender based its decision on.
+// PatchRequest replaces the spec of the object at (kind, namespace, name) if the
+// tests pass against the stored object: a JSON patch of `test` operations on
+// metadata.uid and metadata.generation followed by an `add` of /spec. See
+// handle_patch_request in kubernetes_cluster::spec::api_server::state_machine.
 pub struct PatchRequest {
     pub namespace: StringView,
     pub name: StringView,

@@ -10,11 +10,8 @@ verus! {
 // We use DynamicObject in KubeAPIRequest and KubeAPIResponse so that they can carry the requests and responses
 // for all kinds of Kubernetes resource objects without exhaustive pattern matching.
 //
-// A DynamicObject also carries the ClusterId it came from or is bound for (see
-// api_resource::ClusterId). The shim layer tags every object it returns with the
-// cluster of the client that produced it, and the typed wrappers only unmarshal
-// objects whose tag matches their own cluster, which is what keeps the view's kind
-// (and hence the model's key) consistent with the real cluster the object lives in.
+// A DynamicObject carries the ClusterId it came from or is bound for; see
+// api_resource::ClusterId.
 
 #[verifier(external_body)]
 pub struct DynamicObject {
