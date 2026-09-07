@@ -179,13 +179,17 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                             // Propagate the spec, pinned to the mirror's generation.
                             let req = APIRequest::PatchRequest(inner_spec_patch(inner, outer));
                             (at_step(WidgetSyncStepView::AfterPatchInner), Some(RequestView::KRequest(req)))
+                        } else if inner_caught_up(inner) {
+                            // Spec is in place and the inner implementation has observed this
+                            // very generation of it: mirror the status back and stamp the
+                            // outer generation.
+                            write_outer_status_or_done(outer, outer_status_for(outer.metadata.generation, inner.status->0, true, reason_synced()))
                         } else {
-                            // Spec is in place: mirror the status back, stamp the generation,
-                            // and report whether the inner implementation has caught up.
-                            let synced = inner_caught_up(inner);
-                            let inner_status = if inner.status is Some { inner.status->0 } else { WidgetStatusView::default() };
-                            let reason = if synced { reason_synced() } else { reason_inner_converging() };
-                            write_outer_status_or_done(outer, outer_status_for(outer.metadata.generation, inner_status, synced, reason))
+                            // Spec is in place but the inner status was computed for an older
+                            // generation of the mirror, possibly a mistaken edit that has since
+                            // been overwritten: never copy such fields. Keep what was reported
+                            // before and say the inner side is converging.
+                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_inner_converging()))
                         }
                     }
                 }

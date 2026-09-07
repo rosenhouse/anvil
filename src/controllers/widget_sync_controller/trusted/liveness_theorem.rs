@@ -22,7 +22,38 @@ pub open spec fn widget_spec_eventually_synced() -> TempPred<ClusterState> {
 }
 
 pub open spec fn widget_spec_eventually_synced_per_cr(outer: OuterWidgetView) -> TempPred<ClusterState> {
-    always(lift_state(Cluster::desired_state_is(outer))).leads_to(always(lift_state(spec_synced(outer))))
+    always(lift_state(outer_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))
+}
+
+// The premise of R1 and R2: the outer copy has the spec `outer.spec` (and its uid,
+// and is not being deleted), and nobody is writing anything but that spec to the
+// mirror any more. The second half tolerates mistaken (fat-finger) edits of the
+// mirror's spec: the sync reconciler overwrites them, and convergence is promised
+// for the time after they stop, exactly as it is promised for the time after the
+// outer copy stops changing.
+pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& Cluster::desired_state_is(outer)(s)
+        &&& mirror_spec_undisturbed(outer)(s)
+    }
+}
+
+// Every request in flight that writes the spec of the mirror writes the outer
+// copy's spec (the sync reconciler's own patches included).
+pub open spec fn mirror_spec_undisturbed(outer: OuterWidgetView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |msg: Message| #[trigger] s.in_flight().contains(msg) && msg.content is APIRequest ==> match msg.content->APIRequest_0 {
+            APIRequest::UpdateRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
+            APIRequest::GetThenUpdateRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
+            APIRequest::PatchRequest(req) => req.key() == sync_reconciler::inner_key(outer) ==> writes_outer_spec(req.spec, outer),
+            _ => true,
+        }
+    }
+}
+
+pub open spec fn writes_outer_spec(spec: Value, outer: OuterWidgetView) -> bool {
+    &&& InnerWidgetView::unmarshal_spec(spec) is Ok
+    &&& InnerWidgetView::unmarshal_spec(spec)->Ok_0 == outer.spec
 }
 
 pub open spec fn spec_synced(outer: OuterWidgetView) -> StatePred<ClusterState> {
@@ -51,7 +82,7 @@ pub open spec fn widget_status_eventually_mirrored() -> TempPred<ClusterState> {
 }
 
 pub open spec fn widget_status_eventually_mirrored_per_cr(outer: OuterWidgetView, mirrored: WidgetStatusView) -> TempPred<ClusterState> {
-    always(lift_state(Cluster::desired_state_is(outer)).and(lift_state(inner_settled(outer, mirrored))))
+    always(lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, mirrored))))
         .leads_to(always(lift_state(status_synced(outer, mirrored))))
 }
 

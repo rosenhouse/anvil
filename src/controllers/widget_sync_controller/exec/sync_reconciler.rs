@@ -147,15 +147,27 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 let req = KubeAPIRequest::PatchRequest(inner_spec_patch(&inner, outer));
                 return (at_step(WidgetSyncStep::AfterPatchInner), Some(Request::KRequest(req)));
             }
-            // Spec is in place: mirror the status back, stamp the generation, and report
-            // whether the inner implementation has caught up.
-            let synced = inner_caught_up(&inner);
-            let inner_status = match inner.status() {
-                Some(s) => s,
-                None => WidgetStatus::default(),
-            };
-            let reason = if synced { "Synced".to_string() } else { "InnerConverging".to_string() };
-            let status = WidgetStatus::outer_status_for(generation, &inner_status, synced, reason);
+            if inner_caught_up(&inner) {
+                // Spec is in place and the inner implementation has observed this very
+                // generation of it: mirror the status back and stamp the outer generation.
+                let inner_status = match inner.status() {
+                    Some(s) => s,
+                    None => {
+                        assert(false);
+                        WidgetStatus::default()
+                    },
+                };
+                let status = WidgetStatus::outer_status_for(generation, &inner_status, true, "Synced".to_string());
+                return write_outer_status_or_done(outer, status);
+            }
+            // Spec is in place but the inner status was computed for an older generation
+            // of the mirror (possibly a mistaken edit since overwritten): never copy such
+            // fields. Keep what was reported before and say the inner side is converging.
+            let previous = outer.status();
+            proof {
+                assert(previous.deep_view() == outer@.status);
+            }
+            let status = WidgetStatus::outer_status_without_inner(generation, &previous, "InnerConverging".to_string());
             return write_outer_status_or_done(outer, status);
         },
         WidgetSyncStep::AfterCreateInner => {
