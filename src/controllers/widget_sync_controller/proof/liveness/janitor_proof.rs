@@ -1644,6 +1644,17 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(
 // Assembly.
 // ---------------------------------------------------------------------------
 
+// spec |= p /\ q gives spec |= p and spec |= q.
+pub proof fn entails_and_split(spec: TempPred<ClusterState>, p: TempPred<ClusterState>, q: TempPred<ClusterState>)
+    requires spec.entails(p.and(q)),
+    ensures spec.entails(p), spec.entails(q),
+{
+    assert(p.and(q).entails(p));
+    assert(p.and(q).entails(q));
+    entails_trans(spec, p.and(q), p);
+    entails_trans(spec, p.and(q), q);
+}
+
 // The facts of the stable spec that the step lemmas use, spelled out.
 #[verifier(rlimit(400))]
 #[verifier(spinoff_prover)]
@@ -1793,10 +1804,9 @@ pub proof fn lemma_true_leads_to_always_phase_ii(
     ensures spec.entails(true_pred().leads_to(always(lift_state(phase_ii(controller_id, key, parent_uid, uid))))),
 {
     let spec_o = janitor_spec_with_object(cluster, controller_id, key, parent_uid, uid);
-    assert(spec.entails(spec_o));
-    assert(spec.entails(always(lift_state(phase_i(controller_id)))));
-    assert(spec.entails(always(lift_state(parent_absent(key, parent_uid)))));
-    assert(spec.entails(always(lift_state(present_or_gone(key, parent_uid, uid)))));
+    entails_and_split(spec, spec_o, always(lift_state(phase_i(controller_id))));
+    entails_and_split(spec, janitor_stable_spec(cluster, controller_id), always(lift_state(parent_absent(key, parent_uid))).and(always(lift_state(present_or_gone(key, parent_uid, uid)))));
+    entails_and_split(spec, always(lift_state(parent_absent(key, parent_uid))), always(lift_state(present_or_gone(key, parent_uid, uid))));
     lemma_janitor_stable_spec_facts(spec, cluster, controller_id);
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
@@ -1848,11 +1858,10 @@ pub proof fn lemma_true_leads_to_gone_under_phases(
     ensures spec.entails(true_pred().leads_to(lift_state(object_is_gone(key, uid)))),
 {
     let phase_ii_state = phase_ii(controller_id, key, parent_uid, uid);
-    assert(spec.entails(janitor_spec_with_object(cluster, controller_id, key, parent_uid, uid)));
-    assert(spec.entails(always(lift_state(phase_i(controller_id)))));
-    assert(spec.entails(always(lift_state(phase_ii_state))));
-    assert(spec.entails(always(lift_state(parent_absent(key, parent_uid)))));
-    assert(spec.entails(always(lift_state(present_or_gone(key, parent_uid, uid)))));
+    entails_and_split(spec, janitor_spec_with_phase_i(cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_ii_state)));
+    entails_and_split(spec, janitor_spec_with_object(cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_i(controller_id))));
+    entails_and_split(spec, janitor_stable_spec(cluster, controller_id), always(lift_state(parent_absent(key, parent_uid))).and(always(lift_state(present_or_gone(key, parent_uid, uid)))));
+    entails_and_split(spec, always(lift_state(parent_absent(key, parent_uid))), always(lift_state(present_or_gone(key, parent_uid, uid))));
     lemma_janitor_stable_spec_facts(spec, cluster, controller_id);
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
