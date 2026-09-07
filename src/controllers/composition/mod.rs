@@ -3,6 +3,7 @@ pub mod vdeployment_reconciler;
 pub mod vstatefulset_reconciler;
 pub mod rabbitmq_reconciler;
 pub mod compose_all;
+pub mod widget_janitor_reconciler;
 
 // Turn composition into a Verus module
 use vstd::prelude::*;
