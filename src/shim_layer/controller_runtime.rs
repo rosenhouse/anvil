@@ -33,14 +33,24 @@ use vstd::string::*;
 // which is required by the kube-rs framework to build a controller,
 // on top of reconcile_core, which is provided by the developer.
 
-// ClusterClients holds one kube client per ClusterId. Every request the reconciler
-// emits names its cluster through the ApiResource it carries (see
+// ClusterClients holds the kube clients for each ClusterId. Every request the
+// reconciler emits names its cluster through the ApiResource it carries (see
 // kubernetes_api_objects::exec::api_resource::ClusterId), and the shim routes the
 // request to the matching client and tags the objects in the response with the
 // same cluster. Single-cluster controllers only ever use `primary`.
+//
+// The remote cluster gets two clients: `remote` for reconcile requests, built with
+// short timeouts so a partition surfaces as an error within one reconcile, and
+// `remote_watch` for the long-lived watch stream, which must keep kube's default
+// (long) read timeout or the stream is cut every time the remote cluster is idle.
 pub struct ClusterClients {
     pub primary: Client,
-    pub remote: Option<Client>,
+    pub remote: Option<RemoteClients>,
+}
+
+pub struct RemoteClients {
+    pub requests: Client,
+    pub watch: Client,
 }
 
 impl ClusterClients {
@@ -48,32 +58,52 @@ impl ClusterClients {
         ClusterClients { primary, remote: None }
     }
 
-    pub fn client_of(&self, cluster: ClusterId) -> &Client {
+    // client_of returns the client that handles reconcile requests for `cluster`.
+    // A request for a remote cluster without a configured client is a deployment
+    // error; it is reported as a request failure rather than a panic so the
+    // reconciler ends in its error state and the controller keeps running.
+    pub fn client_of(&self, cluster: ClusterId) -> Result<&Client, Error> {
         match cluster {
-            ClusterId::Primary => &self.primary,
+            ClusterId::Primary => Ok(&self.primary),
             ClusterId::Remote => self
                 .remote
                 .as_ref()
-                .expect("a request targets the remote cluster but no remote client is configured"),
+                .map(|r| &r.requests)
+                .ok_or_else(|| Error::ShimLayerError("no client configured for the remote cluster".to_string())),
         }
     }
 
-    pub fn client_for(&self, api_resource: &ApiResource) -> &Client {
+    pub fn client_for(&self, api_resource: &ApiResource) -> Result<&Client, Error> {
         self.client_of(api_resource.cluster())
+    }
+
+    // watch_client_of returns the client to build a watch stream on for `cluster`.
+    pub fn watch_client_of(&self, cluster: ClusterId) -> Result<&Client, Error> {
+        match cluster {
+            ClusterId::Primary => Ok(&self.primary),
+            ClusterId::Remote => self
+                .remote
+                .as_ref()
+                .map(|r| &r.watch)
+                .ok_or_else(|| Error::ShimLayerError("no client configured for the remote cluster".to_string())),
+        }
     }
 }
 
-// client_from_kubeconfig builds a client for another cluster from a kubeconfig file
-// (e.g. one mounted from a Secret). The read timeout is set explicitly: kube's
-// default of nearly five minutes would turn a partition into a five-minute stall
-// inside a single reconcile instead of an error the reconciler can react to.
-pub async fn client_from_kubeconfig(path: &str, timeout: Duration) -> Result<Client> {
+// remote_clients_from_kubeconfig builds the pair of clients for another cluster
+// from a kubeconfig file (e.g. one mounted from a Secret). `request_timeout` bounds
+// each reconcile request; the watch client keeps kube's defaults.
+pub async fn remote_clients_from_kubeconfig(path: &str, request_timeout: Duration) -> Result<RemoteClients> {
     let kubeconfig = Kubeconfig::read_from(path)?;
-    let mut config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await?;
-    config.connect_timeout = Some(timeout);
-    config.read_timeout = Some(timeout);
-    config.write_timeout = Some(timeout);
-    Ok(Client::try_from(config)?)
+    let watch_config = Config::from_custom_kubeconfig(kubeconfig.clone(), &KubeConfigOptions::default()).await?;
+    let mut request_config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await?;
+    request_config.connect_timeout = Some(request_timeout);
+    request_config.read_timeout = Some(request_timeout);
+    request_config.write_timeout = Some(request_timeout);
+    Ok(RemoteClients {
+        requests: Client::try_from(request_config)?,
+        watch: Client::try_from(watch_config)?,
+    })
 }
 
 // run_controller prepares and runs the controller. It requires:
@@ -201,7 +231,7 @@ where
     R::EResp: Send,
     E: ExternalShimLayer<R::EReq, R::EResp>,
 {
-    let crs = Api::<K>::all(clusters.client_of(cr_cluster).clone());
+    let crs = Api::<K>::all(clusters.client_of(cr_cluster)?.clone());
 
     let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {
         return reconcile_with::<K, R, E>(cr, ctx, fault_injection).await;
@@ -259,8 +289,8 @@ where
         + Sync
         + 'static,
 {
-    let crs = Api::<K>::all(clusters.client_of(cr_cluster).clone());
-    let watched = Api::<O>::all(clusters.client_of(watched_cluster).clone());
+    let crs = Api::<K>::all(clusters.client_of(cr_cluster)?.clone());
+    let watched = Api::<O>::all(clusters.watch_client_of(watched_cluster)?.clone());
 
     let reconcile = |cr: Arc<K>, ctx: Arc<Data>| async move {
         return reconcile_with::<K, R, E>(cr, ctx, fault_injection).await;
@@ -316,7 +346,7 @@ where
 {
     // The custom resource is read from the cluster it lives in; every other request
     // is routed by the cluster named in its ApiResource.
-    let cr_client = ctx.clusters.client_of(ctx.cr_cluster);
+    let cr_client = ctx.clusters.client_of(ctx.cr_cluster)?;
 
     let cr_name = cr.meta().name.as_ref().ok_or_else(|| {
         Error::ShimLayerError("Custom resource misses \".metadata.name\"".to_string())
@@ -389,7 +419,7 @@ where
                         KubeAPIRequest::GetRequest(get_req) => {
                             let cluster = get_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_of(cluster).clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &get_req.namespace,
                                 get_req.api_resource.as_kube_ref(),
                             );
@@ -412,7 +442,7 @@ where
                         KubeAPIRequest::ListRequest(list_req) => {
                             let cluster = list_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_of(cluster).clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &list_req.namespace,
                                 list_req.api_resource.as_kube_ref(),
                             );
@@ -441,7 +471,7 @@ where
                             check_fault_timing = true;
                             let cluster = create_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_of(cluster).clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &create_req.namespace,
                                 create_req.api_resource.as_kube_ref(),
                             );
@@ -471,7 +501,7 @@ where
                         KubeAPIRequest::DeleteRequest(delete_req) => {
                             check_fault_timing = true;
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_for(&delete_req.api_resource).clone(),
+                                ctx.clusters.client_for(&delete_req.api_resource)?.clone(),
                                 &delete_req.namespace,
                                 delete_req.api_resource.as_kube_ref(),
                             );
@@ -506,7 +536,7 @@ where
                             check_fault_timing = true;
                             let cluster = update_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_of(cluster).clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &update_req.namespace,
                                 update_req.api_resource.as_kube_ref(),
                             );
@@ -537,7 +567,7 @@ where
                             check_fault_timing = true;
                             let cluster = update_status_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_of(cluster).clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &update_status_req.namespace,
                                 update_status_req.api_resource.as_kube_ref(),
                             );
@@ -579,7 +609,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenDeleteResponse(
                                 transactional_get_then_delete_by_retry(
-                                    ctx.clusters.client_for(&req.api_resource),
+                                    ctx.clusters.client_for(&req.api_resource)?,
                                     req,
                                     log_header.clone(),
                                 )
@@ -590,7 +620,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenUpdateResponse(
                                 transactional_get_then_update_by_retry(
-                                    ctx.clusters.client_for(&req.api_resource),
+                                    ctx.clusters.client_for(&req.api_resource)?,
                                     req,
                                     log_header.clone(),
                                 )
@@ -601,7 +631,7 @@ where
                             check_fault_timing = true;
                             kube_resp = KubeAPIResponse::GetThenUpdateStatusResponse(
                                 transactional_get_then_update_status_by_retry(
-                                    ctx.clusters.client_for(&req.api_resource),
+                                    ctx.clusters.client_for(&req.api_resource)?,
                                     req,
                                     log_header.clone(),
                                 )
