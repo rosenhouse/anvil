@@ -7,9 +7,11 @@
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_cluster::proof::{composition::*, core::*, temporal_rules::*};
 use crate::kubernetes_cluster::proof::two_cluster::{api_server::*, execution::*, fairness::*, relabel::*, steps::*};
 use crate::kubernetes_cluster::spec::{
-    api_server::state_machine::*, api_server::types::*, builtin_controllers::types::*, cluster::*, controller::types::*, message::*, two_cluster::*,
+    api_server::state_machine::*, api_server::types::*, builtin_controllers::types::*, cluster::*, controller::state_machine::*,
+    controller::types::*, message::*, two_cluster::*,
 };
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
@@ -523,26 +525,106 @@ pub open spec fn other_model_commutes(tc: TwoCluster, r: Relabeling, m: Controll
 }
 
 // The pair's relies on the controller at `id`, as invariants of the one-store
-// model: what a Welder composition of that controller with the pair
-// establishes from its guarantee (composition/widget_disturber_reconciler.rs
-// for the disturber). Relies are safety, so init and next are all that is
-// asked; no fairness of the other controller is assumed anywhere.
-pub open spec fn widget_relies_hold_of(cluster: Cluster, id: int) -> bool {
-    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
-    &&& base.entails(always(lift_state(widget_sync_rely(id))))
-    &&& base.entails(always(lift_state(widget_janitor_rely(id))))
+// model under the pair's own spec: init, next, the pair's fairness and D3
+// (widget_one_cluster_spec, the one-store reading of the two-store spec's
+// conjuncts). Relies are safety, so init and next would do; the pair's
+// fairness is admitted into the hypothesis only so that a Welder result, which
+// is stated under cluster_model (init, next and every registered fairness),
+// can be cited: lemma_relies_hold_of_from_welder. No fairness of the other
+// controller is assumed anywhere.
+pub open spec fn widget_relies_hold_of(cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
+    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    &&& spec.entails(always(lift_state(widget_sync_rely(id))))
+    &&& spec.entails(always(lift_state(widget_janitor_rely(id))))
+}
+
+// A Welder registry on this cluster whose model the pair's spec covers: every
+// fairness it declares is entailed by the pair's spec (the pair's own, or
+// true_pred for a controller that assumes none, like the disturber).
+pub open spec fn pair_spec_covers(cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster) -> bool {
+    &&& cc.cluster == cluster
+    &&& forall |i: int| #[trigger] cc.registry.contains_key(i)
+        ==> widget_one_cluster_spec(cluster, sync_id, janitor_id).entails((cc.registry[i].fairness)(cluster))
+}
+
+pub proof fn lemma_pair_spec_entails_cluster_model(cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster)
+    requires pair_spec_covers(cluster, sync_id, janitor_id, cc),
+    ensures widget_one_cluster_spec(cluster, sync_id, janitor_id).entails(cluster_model(cc)),
+{
+    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    let fairness_fn = |i: int| if cc.registry.contains_key(i) { (cc.registry[i].fairness)(cc.cluster) } else { true_pred::<ClusterState>() };
+    assert(spec.entails(lift_state(cc.cluster.init())));
+    assert(spec.entails(sync_next_with_wf(cluster, sync_id)));
+    assert(sync_next_with_wf(cluster, sync_id).entails(always(lift_action(cc.cluster.next()))));
+    entails_trans(spec, sync_next_with_wf(cluster, sync_id), always(lift_action(cc.cluster.next())));
+    assert forall |i: int| spec.entails(#[trigger] fairness_fn(i)) by {
+        if cc.registry.contains_key(i) {
+            assert(fairness_fn(i) == (cc.registry[i].fairness)(cluster));
+        } else {
+            assert(fairness_fn(i) == true_pred::<ClusterState>());
+        }
+    }
+    spec_entails_tla_forall(spec, fairness_fn);
+    entails_and(spec, lift_state(cc.cluster.init()), always(lift_action(cc.cluster.next())));
+    entails_and(spec, lift_state(cc.cluster.init()).and(always(lift_action(cc.cluster.next()))), tla_forall(fairness_fn));
+}
+
+// A member's guarantee under cluster_model, read off the core of a set it
+// belongs to (a singleton core, or a composed one).
+pub proof fn lemma_core_member_guarantee(cc: CoreCluster, cs: CoreSet, id: int)
+    requires
+        cs.members.contains(id),
+        core(cc, cs),
+    ensures cluster_model(cc).entails(cc.registry[id].safety_guarantee),
+{
+    let spec = cluster_model(cc);
+    let g_fn = |c: int| if cs.members.contains(c) { cc.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+    let r_fn = |pair: (int, int)| if cs.members.contains(pair.0) && !cs.members.contains(pair.1) { (cc.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+    let env_fn = |c: int| if cs.members.contains(c) { cc.registry[c].environment_rely } else { true_pred::<ClusterState>() };
+    let esr_fn = |c: int| if cs.members.contains(c) { cc.registry[c].esr } else { true_pred::<ClusterState>() };
+    let rest = tla_forall(r_fn).and(cs.liveness_dependency).and(tla_forall(env_fn)).implies(tla_forall(esr_fn));
+    assert(spec.entails(tla_forall(g_fn).and(rest)));
+    entails_and_split(spec, tla_forall(g_fn), rest);
+    tla_forall_apply(g_fn, id);
+    entails_trans(spec, tla_forall(g_fn), g_fn(id));
+    assert(g_fn(id) == cc.registry[id].safety_guarantee);
+}
+
+// widget_relies_hold_of from a Welder fact about the controller at `id`: its
+// guarantee holds as an invariant under cluster_model(cc), the form in which
+// compatible and a singleton core state it (lemma_core_member_guarantee reads
+// it off a core); the guarantee implies both relies pointwise (as
+// disturber_guarantee_implies_relies does for the disturber); and the pair's
+// spec covers cc's model. The last hypothesis is where the fairness gap
+// between the two statements closes: a Welder fact is stated under every
+// registered fairness, widget_relies_hold_of under the pair's alone.
+pub proof fn lemma_relies_hold_of_from_welder(cluster: Cluster, sync_id: int, janitor_id: int, id: int, cc: CoreCluster, guarantee: StatePred<ClusterState>)
+    requires
+        pair_spec_covers(cluster, sync_id, janitor_id, cc),
+        cluster_model(cc).entails(always(lift_state(guarantee))),
+        lift_state(guarantee).entails(lift_state(widget_sync_rely(id))),
+        lift_state(guarantee).entails(lift_state(widget_janitor_rely(id))),
+    ensures widget_relies_hold_of(cluster, sync_id, janitor_id, id),
+{
+    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    lemma_pair_spec_entails_cluster_model(cluster, sync_id, janitor_id, cc);
+    entails_trans(spec, cluster_model(cc), always(lift_state(guarantee)));
+    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_sync_rely(id)));
+    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_janitor_rely(id)));
+    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_sync_rely(id))));
+    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_janitor_rely(id))));
 }
 
 // A controller other than the pair that the two-store theorem admits: its model
 // meets the per-controller hypotheses of the refinement (hypotheses 1 and 3 of
 // doc/widget_sync_design.md section 2.2, under the Widget hook), and the pair's
 // relies hold of it.
-pub open spec fn widget_other_controller_ok(cluster: Cluster, id: int) -> bool {
+pub open spec fn widget_other_controller_ok(cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
     let tc = widget_two_cluster(cluster);
     let m = cluster.controller_models[id];
     &&& other_model_ok(tc, m)
     &&& forall |r: Relabeling| widget_relabeling(cluster, r) ==> #[trigger] other_model_commutes(tc, r, m)
-    &&& widget_relies_hold_of(cluster, id)
+    &&& widget_relies_hold_of(cluster, sync_id, janitor_id, id)
 }
 
 // A cluster running the sync reconciler and the janitor, with the two Widget
@@ -554,7 +636,7 @@ pub open spec fn widget_cluster_with_others(cluster: Cluster, sync_id: int, jani
     &&& installed_types_ignore_metadata(cluster.installed_types)
     &&& installed_types_coherent(cluster.installed_types)
     &&& forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
-        ==> widget_other_controller_ok(cluster, id)
+        ==> widget_other_controller_ok(cluster, sync_id, janitor_id, id)
 }
 
 // A cluster running exactly the sync reconciler and the janitor: the special
@@ -572,7 +654,7 @@ pub proof fn lemma_pair_cluster_is_cluster_with_others(cluster: Cluster, sync_id
     ensures widget_cluster_with_others(cluster, sync_id, janitor_id),
 {
     assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
-        implies widget_other_controller_ok(cluster, id) by {
+        implies widget_other_controller_ok(cluster, sync_id, janitor_id, id) by {
         assert(cluster.controller_models.dom().contains(id));
         assert(false);
     }
@@ -620,7 +702,7 @@ pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: 
                 }
             }
         } else {
-            assert(widget_other_controller_ok(cluster, id));
+            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, id));
             assert(other_model_ok(tc, m));
         }
     }
@@ -655,7 +737,7 @@ pub proof fn lemma_widget_models_commute(cluster: Cluster, sync_id: int, janitor
                 }
             }
         } else {
-            assert(widget_other_controller_ok(cluster, id));
+            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, id));
             assert(other_model_commutes(tc, r, tc.cluster.controller_models[id]));
         }
     }
@@ -1669,7 +1751,7 @@ pub open spec fn widget_one_cluster_spec(cluster: Cluster, sync_id: int, janitor
 // R1, R2, R3s and the janitor's ESR, for a cluster running the pair beside
 // controllers the pair's relies hold of. The relies on the pair's members are
 // their guarantees; the relies on everyone else are the invariants
-// widget_relies_hold_of provides, taken under the spec, which has init and next.
+// widget_relies_hold_of provides, stated under this very spec.
 pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: int)
     requires widget_cluster_with_others(cluster, sync_id, janitor_id),
     ensures ({
@@ -1681,7 +1763,6 @@ pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: i
     }),
 {
     let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
-    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
     assert(spec.entails(lift_state(cluster.init())));
     assert(spec.entails(sync_next_with_wf(cluster, sync_id)));
     assert(spec.entails(janitor_next_with_wf(cluster, janitor_id)));
@@ -1699,8 +1780,7 @@ pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: i
             always_weaken(spec, lift_state(widget_sync_guarantee(sync_id)), lift_state(widget_janitor_rely(sync_id)));
         } else {
             assert(cluster.controller_models.contains_key(other_id));
-            assert(widget_other_controller_ok(cluster, other_id));
-            entails_trans(spec, base, always(lift_state(widget_janitor_rely(other_id))));
+            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, other_id));
         }
     }
     janitor_rely_facts_imply_lifted_condition(spec, cluster, janitor_id);
@@ -1711,8 +1791,7 @@ pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: i
         if other_id == janitor_id {
         } else {
             assert(cluster.controller_models.contains_key(other_id));
-            assert(widget_other_controller_ok(cluster, other_id));
-            entails_trans(spec, base, always(lift_state(widget_sync_rely(other_id))));
+            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, other_id));
             assert(widget_sync_partial_rely(janitor_id)(other_id) == always(lift_state(widget_sync_rely(other_id))));
         }
     }
@@ -1979,12 +2058,15 @@ pub proof fn widget_instance_two_cluster_theorem()
 
 // The disturber is admitted beside the pair: its model sends only Patches and
 // Deletes (request_ok holds of both), commutes with the relabeling, and the
-// pair's relies hold of it by its guarantee (proof/disturber.rs).
-pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, id: int)
+// pair's relies hold of it through Welder: the core of the disturber alone
+// (composition/widget_disturber_reconciler.rs) gives its guarantee under the
+// model of a registry holding only the disturber, which declares no fairness,
+// and the guarantee implies both relies (proof/disturber.rs).
+pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, sync_id: int, janitor_id: int, id: int)
     requires
         cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
         cluster.controller_models.contains_pair(id, widget_disturber_controller_model()),
-    ensures widget_other_controller_ok(cluster, id),
+    ensures widget_other_controller_ok(cluster, sync_id, janitor_id, id),
 {
     let tc = widget_two_cluster(cluster);
     let m = cluster.controller_models[id];
@@ -2013,15 +2095,27 @@ pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, id: int)
             lemma_disturber_model_commutes(cluster, r, cr, resp, ls);
         }
     }
-    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
-    assert(base.entails(lift_state(cluster.init())));
-    assert(base.entails(always(lift_action(cluster.next()))));
-    lemma_always_widget_disturber_guarantee(base, cluster, id);
+    // The relies, through Welder.
+    let cc = CoreCluster { cluster: cluster, registry: Map::<int, ControllerSpec>::empty().insert(id, widget_disturber_controller_spec(id)) };
+    let cs = widget_disturber_core_set(id);
+    assert(cs.members.contains(id));
+    assert(well_formed(cc, cs)) by {
+        assert forall |i: int| #[trigger] cs.members.contains(i) implies cc.registry.contains_key(i) && (cc.registry[i].membership)(cc.cluster, i) by {
+            assert(i == id);
+        }
+    }
+    widget_disturber_singleton_core_holds(cc, id);
+    lemma_core_member_guarantee(cc, cs, id);
+    assert(cc.registry[id].safety_guarantee == always(lift_state(widget_disturber_guarantee(id))));
+    assert(pair_spec_covers(cluster, sync_id, janitor_id, cc)) by {
+        let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+        assert forall |i: int| #[trigger] cc.registry.contains_key(i) implies spec.entails((cc.registry[i].fairness)(cluster)) by {
+            assert(i == id);
+            assert((cc.registry[i].fairness)(cluster) == true_pred::<ClusterState>());
+        }
+    }
     disturber_guarantee_implies_relies(id);
-    entails_preserved_by_always(lift_state(widget_disturber_guarantee(id)), lift_state(widget_sync_rely(id)));
-    entails_preserved_by_always(lift_state(widget_disturber_guarantee(id)), lift_state(widget_janitor_rely(id)));
-    entails_trans(base, always(lift_state(widget_disturber_guarantee(id))), always(lift_state(widget_sync_rely(id))));
-    entails_trans(base, always(lift_state(widget_disturber_guarantee(id))), always(lift_state(widget_janitor_rely(id))));
+    lemma_relies_hold_of_from_welder(cluster, sync_id, janitor_id, id, cc, widget_disturber_guarantee(id));
 }
 
 // The concrete three-controller cluster of composition/widget_disturber_reconciler.rs.
@@ -2031,9 +2125,9 @@ pub proof fn lemma_widget_disturbed_instance_is_cluster_with_others()
     let cluster = widget_disturbed_cluster_instance();
     lemma_widget_instance_types(cluster);
     assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != widget_sync_id() && id != widget_janitor_id()
-        implies widget_other_controller_ok(cluster, id) by {
+        implies widget_other_controller_ok(cluster, widget_sync_id(), widget_janitor_id(), id) by {
         assert(id == widget_disturber_id());
-        lemma_disturber_is_other_controller_ok(cluster, id);
+        lemma_disturber_is_other_controller_ok(cluster, widget_sync_id(), widget_janitor_id(), id);
     }
 }
 
