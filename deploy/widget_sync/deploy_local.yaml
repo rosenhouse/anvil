@@ -49,15 +49,17 @@ spec:
               value: /etc/widget-sync/remote-kubeconfig/kubeconfig
             - name: READY_FILE
               value: /run/widget-sync/ready
-          readinessProbe:
+          # A startup probe, not a readiness probe: the file appears once the
+          # access check has passed and never disappears, so there is nothing
+          # to re-check afterwards.
+          startupProbe:
             exec:
               command:
                 - test
                 - -f
                 - /run/widget-sync/ready
-            initialDelaySeconds: 2
-            periodSeconds: 5
-            failureThreshold: 3
+            periodSeconds: 2
+            failureThreshold: 60
           resources:
             requests:
               cpu: 50m

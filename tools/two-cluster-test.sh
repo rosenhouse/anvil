@@ -79,6 +79,8 @@ kubectl --context "$inner_ctx" apply -f "$manifests/rbac_inner.yaml"
 # relative tokenFile: kube resolves it against the kubeconfig's directory and
 # re-reads it at least once a minute, so rotating the Secret needs no restart.
 # An inline token would take precedence and is never re-read.
+# The token must not appear in the trace.
+set +x
 for _ in $(seq 1 30); do
     token="$(kubectl --context "$inner_ctx" -n widget-sync get secret widget-sync-remote-token \
         -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)"
@@ -94,6 +96,8 @@ inner_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}
 kubeconfig_dir="$(mktemp -d)"
 # No trailing newline: the file content becomes the bearer header verbatim.
 printf '%s' "$token" > "$kubeconfig_dir/token"
+unset token
+set -x
 cat > "$kubeconfig_dir/kubeconfig" <<EOF
 apiVersion: v1
 kind: Config
