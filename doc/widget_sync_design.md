@@ -438,18 +438,17 @@ model reads only the namespace, name and spec of its object and tests nothing,
 so it commutes with the relabeling by computation, and its guarantee gives the
 pair's relies in the form the two-store theorem asks for (section 2.2).
 
-The value it writes over the spec, `disturbed_spec`, is an uninterpreted
-function of the value it found: nothing the pair proves depends on which value
-it is. One thing is assumed about it, and only in the model:
-`disturbed_spec_changes_the_spec` (`model/install.rs`) says the edit is really an
-edit, `disturbed_spec(v) != v` for every `v`. Without it the identity would be a
-model of `disturbed_spec`, and a disturber that writes the spec back unchanged is
-not a disturbance -- the premises of R1 and R2, "no edit of the mirror's spec is
-in flight", would be met by a Patch that changes nothing. The axiom is
-model-only: the disturber stands for a `kubectl edit` and has no exec twin, and
-it is inventoried below with the other trusted items.
+The value it writes over the spec, `disturbed_spec`, is a closed definition
+(`model/disturber_reconciler.rs`): it appends one character to the value it
+found, so `disturbed_spec(v) != v` for every `v`
+(`disturbed_spec_changes_the_spec`, proved by length). Nothing the pair proves
+depends on which value it is beyond that; what the inequality rules out is a
+disturber that writes the spec back unchanged, which would be no disturbance at
+all -- the premise of R1 and R2, "no edit of the mirror's spec is in flight",
+would be met by a Patch that changes nothing. The disturber stands for a
+`kubectl edit` and has no exec twin.
 
-The disturber adds no assumption beyond that one. What it buys is a witness that the relaxed
+The disturber adds no assumption. What it buys is a witness that the relaxed
 sync rely (any Delete, any Patch) is satisfiable by something that deletes and
 edits mirrors, and that the premises of R1 and R2 are the only place where "the
 disturbance has stopped" is said. A cluster-model step in the style of the pod
@@ -472,12 +471,12 @@ which names the model kind of a configured kind in a cluster. `π` is
 Trusted beyond the specification, under `widget_sync_controller/`: one
 `external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
 which builds the outer status, its three conditions included, by hand to match
-the spec's definition — four `external_body` items in `model/install.rs` — the
-three `Marshallable` instances of the reconcile states and
-`disturbed_spec_changes_the_spec`, the model-only axiom that the disturber's edit
-changes the spec (section 2.4) — and one uninterpreted spec function,
-`default_status_rest()` in `trusted/spec_types.rs`, the mirrored remainder of a
-status that was never written.
+the spec's definition — three `external_body` items in `model/install.rs`, the
+`Marshallable` instances of the reconcile states, whose `marshal` and
+`unmarshal` are the six uninterpreted spec functions the hygiene script pins
+there — and one more uninterpreted spec function, `default_status_rest()` in
+`trusted/spec_types.rs`, the mirrored remainder of a status that was never
+written.
 
 Everything the pair used to trust about its own wrappers is now the shape's,
 and lives in `kubernetes_api_objects`, where anything else generic over kinds
@@ -632,9 +631,10 @@ assumed, and a mechanical check that each guarantee implies the other's rely.
 The whole-repository composition (`src/controllers/composition/compose_all.rs`)
 adds the Widget configurations to the cluster running the VReplicaSet,
 VDeployment, VStatefulSet and RabbitMQ controllers: `core_holds_for` proves
-`core` for the four controllers beside the sync controllers and janitors of a
-finite set of configured kinds, none of whose outer kinds is one of the four
-framework kinds, and `core_holds` is the demo's instance of it. The Widget
+`core` for the four controllers beside the sync controller and janitors of one
+configured kind, `framework_and_kinds_core_holds` for the four beside the
+controllers of a finite set of configured kinds, none of whose outer kinds is
+one of the four framework kinds, and `core_holds` is the demo's instance. The Widget
 controllers are composed first (`widget_fanout_core_holds` per kind, then
 `widget_kinds_core_holds` over the kinds), so their liveness dependency is
 discharged internally and the outer step is a plain `compose`. The
@@ -670,19 +670,30 @@ disturber (section 2.4) as a third member with an empty ESR and no rely;
 
 ## 4. Deployment shape
 
-- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`.
-- Outer RBAC: `widgets` get, list, watch; `widgets/status` patch; a Role in
-  `default` for get and update of the crash-mode ConfigMap. Inner: a
-  ClusterRole on `widgets` with get, list, watch, create, patch, delete, bound
-  to a service account whose kubeconfig, with a token file the client
-  re-reads, is mounted from a Secret.
-- Watches: outer `Widget`s (sync primary), inner `Widget`s (janitor primary and
-  sync secondary, mapped by name).
+The deployment is the one `doc/widget_sync_fanout_design.md` describes in its
+sections 1, 3.4 and 4; `deploy/widget_sync/README.md` has the manifests, the
+flags and the operating procedures. In outline:
+
+- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`,
+  given its kinds as `--kind` flags.
+- Outer RBAC: for each kind its plural (get, list, watch) and its status
+  subresource (patch); `secrets` (get, list, watch) for the binding Secrets;
+  `customresourcedefinitions` (get) for the shape check; `namespaces` (get) on
+  `kube-system` for the outer cluster id; a Role in `default` for the
+  crash-mode ConfigMap. Inner, per binding's credential: each kind's plural
+  (get, list, watch, create, patch, delete) and the claim ConfigMap in
+  `kube-system` (create; get by name).
+- Bindings: one client pair per `<clusterName>-kubeconfig` Secret of type
+  `cluster.x-k8s.io/secret`, validated before use, rebuilt when the Secret's
+  `value` changes, dropped when it goes away.
+- Watches: the outer objects of each kind (sync primary); per binding, the
+  mirrors of each kind (janitor primary, and a same-name trigger stream for
+  the sync controller).
 - Requeue: a fixed 60 seconds after a reconcile that did not fail, and a
   per-object exponential backoff after one that did (10 seconds doubling to a
   cap of 5 minutes, reset when that object next succeeds; `build.md`). The
-  remote client has a short request timeout so a partition surfaces as a failed
-  reconcile.
+  remote clients have a short request timeout so a partition surfaces as a
+  failed reconcile.
 - The janitor pause gate: the ConfigMap `widget-sync-janitor` in the
   controller's namespace, shipped empty and mounted read-only at
   `/etc/widget-sync/janitor`; `JANITOR_PAUSE_FILE` points the binary at the
@@ -693,8 +704,8 @@ disturber (section 2.4) as a third member with an empty ESR and no rely;
 Of the operability and hardening work issues #9 and #10 listed, the branch
 has: a usage error instead of a silent exit, a field manager on every write,
 warn-level structured error logs that tell a failed patch `test` apart from
-other errors, token rotation through the token file, a startup access check
-against the inner cluster with a readiness marker, a non-root image, a
+other errors, credential rotation through the binding Secret, an access
+check per binding, a startup probe on the ready file, a non-root image, a
 security context and resources; and, decided later (#17), the error reasons
 in the `Synced` condition and the `Ready` and `Stalled` conditions of
 section 1.4, and the per-object retry backoff of the shim's `error_policy`.
@@ -703,7 +714,8 @@ Events, KEP-1623 condition fields (no
 `lastTransitionTime`), a name selector on the janitor's List,
 leader election (one replica with `Recreate` is not at-most-one; the deploy
 README says so), a deletion rate limit and dry-run mode. A cluster identity
-on mirrors moved to the fan-out follow-up (#15).
+on mirrors is not used: the claim object of the fan-out design (its section
+1.3) is what keeps two bindings off one inner cluster.
 
 ## 5. Framework additions
 

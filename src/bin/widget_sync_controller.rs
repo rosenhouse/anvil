@@ -509,7 +509,7 @@ async fn main() -> Result<()> {
             if let Some(path) = &ready_file {
                 match fs::write(path, b"") {
                     Ok(()) => info!("ready: created {}", path),
-                    Err(e) => warn!("could not create ready file {}: {}; the pod will not become ready", path, e),
+                    Err(e) => warn!("could not create ready file {}: {}; the pod will not pass its startup probe", path, e),
                 }
             }
 

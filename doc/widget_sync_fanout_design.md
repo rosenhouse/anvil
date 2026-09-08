@@ -558,11 +558,12 @@ The statements of the main design, section 3.3, with parameters:
   kind (a List) and its own mirror (a Delete). That two configurations' mirror
   kinds are disjoint is `lemma_kinds_of_distinct_configurations`, and it holds
   for *every* binding, not only the configured ones, because the relies quantify
-  over `is_inner_kind`. `core_holds_for` (`composition/compose_all.rs`) is the
-  statement for the framework plus the kinds: the four controllers of the
-  repository beside the sync controllers and janitors of a finite set of
-  configured kinds, none of whose outer kinds is one of the four framework
-  kinds. `core_holds` is the demo's instance of it.
+  over `is_inner_kind`. `framework_and_kinds_core_holds`
+  (`composition/compose_all.rs`) is the statement for the framework plus the
+  kinds: the four controllers of the repository beside the sync controllers
+  and janitors of a finite set of configured kinds, none of whose outer kinds
+  is one of the four framework kinds; `core_holds_for` is its one-kind form
+  and `core_holds` the demo's instance.
 
 Hypotheses added to the theorems, in place of the lemmas that today prove
 them from the literal strings. `sync_kind_ok(k)` and `binding_ok(b)` are real
