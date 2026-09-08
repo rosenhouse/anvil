@@ -27,3 +27,6 @@ vstatefulset_controller.*.txt
 # Other
 certs
 
+
+# Worktrees created by Claude Code agents
+.claude/worktrees/
