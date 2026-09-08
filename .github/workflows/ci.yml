@@ -7,8 +7,6 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
-  schedule:
-    - cron: "0 7 * * *" # Catch breakage from upstream Verus `main`
 env:
   kind_version: 0.23.0
   go_version: "^1.20"
