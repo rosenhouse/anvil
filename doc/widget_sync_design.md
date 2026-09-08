@@ -543,9 +543,9 @@ Full-repository verification (`cargo verus verify --lib`) passes.
 
 ## 8. Future work
 
-Tracked as issues on the fork: operability, kept small (#9); manifest and shim
-hardening (#10); proof layout and solver budgets (#11); repository hygiene
-(#14). Out-of-band edits and deletes of mirrors (#13) are modeled (sections
+Tracked as issues on the fork: repository hygiene, now the e2e checks that
+need the kind testbed (#14). Operability (#9), hardening (#10) and the proof
+layout and solver-budget pass (#11) are done in the scope their issues record. Out-of-band edits and deletes of mirrors (#13) are modeled (sections
 2.3 and 2.4); what remains excluded is an edit that strips a mirror's
 identity, which the design refuses to recover from.
 
