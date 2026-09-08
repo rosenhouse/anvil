@@ -34,9 +34,119 @@ verus! {
 // Nobody touches our mirror: neither its identity nor its lifecycle.
 // ---------------------------------------------------------------------------
 
+// One step of the API server keeps our mirror in the store, with its uid and
+// without a deletion timestamp: a Delete of the mirror key misses it by uid (the
+// premise), a transactional delete skips an object without owner references, and
+// no other request removes an object or stamps it.
+proof fn lemma_ours_kept_after_api_server_step(
+    cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, msg: Message, outer: OuterWidgetView
+)
+    requires
+        sync_membership(cluster, controller_id, janitor_id),
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+        Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
+        cluster.each_custom_object_in_etcd_is_well_formed::<InnerWidgetView>()(s_prime),
+        every_mirror_is_bound()(s),
+        every_in_flight_inner_update_preserves_identity()(s),
+        janitor_deletes_are_sound(janitor_id)(s),
+        builtin_deletes_never_target_mirrors()(s),
+        sync_rely_with_janitor(cluster, controller_id, janitor_id)(s),
+        widget_sync_guarantee(controller_id)(s),
+        cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
+        Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
+        Cluster::all_requests_from_pod_monkey_are_api_pod_requests()(s),
+        Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
+        Cluster::desired_state_is(outer)(s),
+        mirror_undeleted(outer)(s),
+        mirror_is_ours(outer)(s),
+    ensures
+        s_prime.resources().contains_key(inner_key(outer)),
+        s_prime.resources()[inner_key(outer)].metadata.uid == s.resources()[inner_key(outer)].metadata.uid,
+        s_prime.resources()[inner_key(outer)].metadata.deletion_timestamp is None,
+{
+    let ikey = inner_key(outer);
+    let key = outer.object_ref();
+    let cr = s.resources()[ikey];
+    let inner = InnerWidgetView::unmarshal(cr)->Ok_0;
+    lemma_weakly_well_formed_implies_kinds_match(s);
+    assert(Cluster::etcd_object_is_weakly_well_formed(ikey)(s));
+    assert(cr.kind == InnerWidgetView::kind());
+    assert(cr.object_ref() == ikey);
+    assert(mirror_is_bound(ikey)(s));
+    assert(cr.metadata.owner_references is None);
+    assert(s.in_flight().contains(msg));
+    assert(msg.content is APIRequest);
+    lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, msg);
+    // The parent uid on our mirror is the outer copy's, which exists.
+    assert(parent_uid_annotation(inner) == parent_uid_of(outer));
+    assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
+    assert(s.resources()[key].metadata.uid is Some);
+    assert(outer.metadata.uid is Some);
+    match msg.content->APIRequest_0 {
+        APIRequest::DeleteRequest(req) => {
+            if req.key == ikey {
+                // Whoever sent it (the janitor, a garbage collector, an anonymous
+                // controller deleting mirrors out of band), the premise says a
+                // Delete of the mirror key in flight names a uid other than our
+                // mirror's, so the API server rejects it.
+                assert(delete_misses_mirror(req, outer)(s));
+                assert(req.preconditions->0.uid != cr.metadata.uid);
+                assert(delete_request_admission_check(req, s.api_server) is Some);
+                assert(s_prime.api_server == s.api_server);
+            } else {
+                assert(s_prime.resources()[ikey] == cr);
+            }
+        },
+        APIRequest::GetThenDeleteRequest(req) => {
+            // A mirror has no owner references, so the transactional delete does nothing.
+            assert(s_prime.resources()[ikey] == cr);
+        },
+        APIRequest::UpdateRequest(req) => {
+            if req.key() == ikey {
+                if s_prime.api_server != s.api_server {
+                    assert(s_prime.resources()[ikey].metadata.uid == cr.metadata.uid);
+                    assert(s_prime.resources()[ikey].metadata.deletion_timestamp == cr.metadata.deletion_timestamp);
+                }
+            } else {
+                assert(s_prime.resources()[ikey] == cr);
+            }
+        },
+        APIRequest::GetThenUpdateRequest(_) => {
+            lemma_get_then_update_keeps_unowned_objects(cluster.installed_types, msg, s.api_server, ikey);
+        },
+        APIRequest::GetThenUpdateStatusRequest(req) => {
+            assert(s_prime.resources()[ikey] == cr);
+        },
+        APIRequest::PatchRequest(req) => {
+            lemma_patch_request_keeps_identity_and_lifecycle(cluster.installed_types, req, s.api_server);
+            if req.key() == ikey {
+                assert(keeps_identity_and_lifecycle(s.api_server, s_prime.api_server));
+            } else {
+                assert(s_prime.resources()[ikey] == cr);
+            }
+        },
+        APIRequest::PatchStatusRequest(req) => {
+            lemma_patch_status_request_keeps_identity(cluster.installed_types, req, s.api_server);
+            if req.key() != ikey {
+                assert(s_prime.resources()[ikey] == cr);
+            }
+        },
+        APIRequest::UpdateStatusRequest(req) => {
+            lemma_update_status_keeps_identity(cluster.installed_types, req, s.api_server);
+            if req.key() != ikey {
+                assert(s_prime.resources()[ikey] == cr);
+            }
+        },
+        APIRequest::CreateRequest(req) => {
+            assert(s_prime.resources()[ikey] == cr);
+        },
+        _ => {
+            assert(s_prime.api_server == s.api_server);
+        },
+    }
+}
+
 // The store facts a step of the API server keeps for our mirror.
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_ours_after_api_server_step(
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, msg: Message, outer: OuterWidgetView
 )
@@ -83,75 +193,8 @@ pub proof fn lemma_ours_after_api_server_step(
     assert(s.resources()[key].metadata.uid is Some);
     assert(outer.metadata.uid is Some);
     // Step 1: the object is still there, with its uid, and no deletion timestamp appeared.
-    let kept = |s_prime: ClusterState| {
-        &&& s_prime.resources().contains_key(ikey)
-        &&& s_prime.resources()[ikey].metadata.uid == cr.metadata.uid
-        &&& s_prime.resources()[ikey].metadata.deletion_timestamp is None
-    };
-    assert(kept(s_prime)) by {
-        match msg.content->APIRequest_0 {
-            APIRequest::DeleteRequest(req) => {
-                if req.key == ikey {
-                    // Whoever sent it (the janitor, a garbage collector, an anonymous
-                    // controller deleting mirrors out of band), the premise says a
-                    // Delete of the mirror key in flight names a uid other than our
-                    // mirror's, so the API server rejects it.
-                    assert(delete_misses_mirror(req, outer)(s));
-                    assert(req.preconditions->0.uid != cr.metadata.uid);
-                    assert(delete_request_admission_check(req, s.api_server) is Some);
-                    assert(s_prime.api_server == s.api_server);
-                } else {
-                    assert(s_prime.resources()[ikey] == cr);
-                }
-            },
-            APIRequest::GetThenDeleteRequest(req) => {
-                // A mirror has no owner references, so the transactional delete does nothing.
-                assert(s_prime.resources()[ikey] == cr);
-            },
-            APIRequest::UpdateRequest(req) => {
-                if req.key() == ikey {
-                    if s_prime.api_server != s.api_server {
-                        assert(s_prime.resources()[ikey].metadata.uid == cr.metadata.uid);
-                        assert(s_prime.resources()[ikey].metadata.deletion_timestamp == cr.metadata.deletion_timestamp);
-                    }
-                } else {
-                    assert(s_prime.resources()[ikey] == cr);
-                }
-            },
-            APIRequest::GetThenUpdateRequest(_) => {
-                lemma_get_then_update_keeps_unowned_objects(cluster.installed_types, msg, s.api_server, ikey);
-            },
-            APIRequest::GetThenUpdateStatusRequest(req) => {
-                assert(s_prime.resources()[ikey] == cr);
-            },
-            APIRequest::PatchRequest(req) => {
-                lemma_patch_request_keeps_identity_and_lifecycle(cluster.installed_types, req, s.api_server);
-                if req.key() == ikey {
-                    assert(keeps_identity_and_lifecycle(s.api_server, s_prime.api_server));
-                } else {
-                    assert(s_prime.resources()[ikey] == cr);
-                }
-            },
-            APIRequest::PatchStatusRequest(req) => {
-                lemma_patch_status_request_keeps_identity(cluster.installed_types, req, s.api_server);
-                if req.key() != ikey {
-                    assert(s_prime.resources()[ikey] == cr);
-                }
-            },
-            APIRequest::UpdateStatusRequest(req) => {
-                lemma_update_status_keeps_identity(cluster.installed_types, req, s.api_server);
-                if req.key() != ikey {
-                    assert(s_prime.resources()[ikey] == cr);
-                }
-            },
-            APIRequest::CreateRequest(req) => {
-                assert(s_prime.resources()[ikey] == cr);
-            },
-            _ => {
-                assert(s_prime.api_server == s.api_server);
-            },
-        }
-    }
+    lemma_ours_kept_after_api_server_step(cluster, controller_id, janitor_id, s, s_prime, msg, outer);
+
     // Step 2: identity is kept.
     assert(snapshot_is_mirror(cr));
     assert(janitor_snapshot_is_sound(cr, ikey)(s));
@@ -223,8 +266,6 @@ pub proof fn lemma_ours_after_step(
 // The mirror key after one step: our mirror stays ours; an absent mirror stays
 // absent or becomes ours (only the sync reconciler's current reconcile creates
 // one); an existing object is never replaced by another.
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_mirror_key_after_step(
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: OuterWidgetView
 )
@@ -416,8 +457,6 @@ pub proof fn lemma_spec_synced_after_step(
 }
 
 // While our mirror is there, its spec changes only by a write of the outer spec.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_spec_change_means_synced(
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: OuterWidgetView
 )
@@ -490,8 +529,6 @@ pub proof fn lemma_gone_is_stable(key: ObjectRef, uid: Uid, s: ClusterState, s_p
 }
 
 // One step of the cluster keeps the mirror object as it is, or removes it.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_mirror_object_after_step(cluster: Cluster, s: ClusterState, s_prime: ClusterState, key: ObjectRef, parent_uid: Uid, uid: Uid)
     requires
         cluster.next()(s, s_prime),

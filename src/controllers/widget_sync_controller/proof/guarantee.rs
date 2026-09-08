@@ -52,8 +52,6 @@ pub open spec fn sync_triggering_crs_are_bound(controller_id: int) -> StatePred<
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -192,8 +190,6 @@ pub proof fn lemma_synced_condition_of_written_status(status: WidgetStatusView)
 // The sync guarantee.
 // ---------------------------------------------------------------------------
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -306,8 +302,6 @@ proof fn lemma_sync_request_guarantee_is_preserved(msg: Message, s: ClusterState
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 proof fn lemma_sync_new_request_is_guaranteed(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message
@@ -437,8 +431,6 @@ pub open spec fn janitor_request_is_guaranteed(msg: Message) -> bool {
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -494,8 +486,6 @@ pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>,
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_janitor_new_request_is_guaranteed(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message

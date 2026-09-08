@@ -311,8 +311,6 @@ pub open spec fn store_only_grows_by_fresh_uids(s: ClusterState, s_prime: Cluste
     }
 }
 
-#[verifier(rlimit(100))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_api_server_step_only_grows_by_fresh_uids(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message)
     requires cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
     ensures store_only_grows_by_fresh_uids(s, s_prime),
@@ -364,8 +362,6 @@ pub proof fn lemma_uid_stays_bound_to_key(uid: Uid, key: ObjectRef, s: ClusterSt
 // A key that appears in the store, or whose object is replaced, was created by the
 // request the API server just handled; the created object keeps the request's
 // labels, annotations and spec.
-#[verifier(rlimit(100))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_new_object_comes_from_create(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
     requires
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
