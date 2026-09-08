@@ -137,7 +137,8 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 proof {
                     assert(previous.deep_view() == outer@.status);
                 }
-                let status = WidgetStatus::outer_status_without_inner(generation, &previous, "ForeignObject".to_string());
+                let reason = if has_mirror_identity(&inner) { "StaleMirror".to_string() } else { "ForeignObject".to_string() };
+                let status = WidgetStatus::outer_status_without_inner(generation, &previous, reason);
                 return write_outer_status_or_done(outer, status);
             }
             if !inner.spec().eq(&outer.spec()) {
@@ -219,6 +220,24 @@ pub fn is_mirror_of(inner: &InnerWidget, outer: &OuterWidget) -> (b: bool)
     }
     managed_by.unwrap().eq(&"widget-sync".to_string())
         && outer.metadata().uid().unwrap().matches_annotation_value(&parent_uid.unwrap())
+}
+
+// Whether `inner` carries the managed-by label and a parent-uid annotation, that
+// is, is a mirror of some outer copy. See has_mirror_identity.
+pub fn has_mirror_identity(inner: &InnerWidget) -> (b: bool)
+    ensures b == spec_types::has_mirror_identity(inner@),
+{
+    let labels = inner.metadata().labels();
+    let annotations = inner.metadata().annotations();
+    if labels.is_none() || annotations.is_none() {
+        return false;
+    }
+    let managed_by = labels.unwrap().get(&"anvil.dev/managed-by".to_string());
+    if managed_by.is_none() {
+        return false;
+    }
+    managed_by.unwrap().eq(&"widget-sync".to_string())
+        && annotations.unwrap().contains_key(&"anvil.dev/parent-uid".to_string())
 }
 
 // Whether the inner implementation has processed the mirror's current spec.

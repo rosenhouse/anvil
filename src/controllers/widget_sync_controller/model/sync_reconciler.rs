@@ -124,8 +124,11 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                             // Absent-in-progress: wait for the inner side to release it.
                             write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_inner_terminating()))
                         } else if !is_mirror_of(inner, outer) {
-                            // Not ours: never touch it, report the conflict.
-                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_foreign_object()))
+                            // Not ours: never touch it, report the conflict. A mirror of another
+                            // incarnation of the outer copy (label and annotation present, other
+                            // parent uid) is stale and the janitor removes it; anything else is foreign.
+                            let reason = if has_mirror_identity(inner) { reason_stale_mirror() } else { reason_foreign_object() };
+                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason))
                         } else if inner.spec != outer.spec {
                             // Propagate the spec, pinned to the mirror's generation.
                             let req = APIRequest::PatchRequest(inner_spec_patch(inner, outer));

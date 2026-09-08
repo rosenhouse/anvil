@@ -142,6 +142,9 @@ pub open spec fn outer_status_without_inner(outer_generation: Option<int>, previ
 // Reasons reported in the Synced condition.
 pub open spec fn reason_inner_converging() -> StringView { "InnerConverging"@ }
 pub open spec fn reason_foreign_object() -> StringView { "ForeignObject"@ }
+// The object at the mirror key is a mirror (label and parent-uid annotation) of
+// another incarnation of the outer copy; the janitor removes it.
+pub open spec fn reason_stale_mirror() -> StringView { "StaleMirror"@ }
 pub open spec fn reason_inner_terminating() -> StringView { "InnerTerminating"@ }
 pub open spec fn reason_synced() -> StringView { "Synced"@ }
 
