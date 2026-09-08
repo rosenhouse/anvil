@@ -387,6 +387,16 @@ liveness probe: the binary exposes no health endpoint and nothing else that says
 reconcilers are still making progress, and a probe that does not measure that
 would only restart healthy pods.
 
+What takes the place of a liveness probe is the process exiting. **A runner
+that ends when it was not asked to takes the process down with it**: if a sync
+runner of a kind, the binding manager (the Secret watch ending counts as a
+failure, not as a clean finish) or the janitor of a live binding returns — with
+an error or without one — the binary logs at error which runner it was and
+exits non-zero, and the kubelet restarts the container. Nothing restarts a
+runner in place, so the alternative is a pod that passes its startup probe
+while a kind is no longer reconciled. On SIGTERM the same returns are expected:
+the runners drain and the process exits 0.
+
 **Before restoring the outer cluster.** The janitor recognizes a mirror's
 parent by uid: the mirror's `anvil.dev/parent-uid` annotation must equal the
 uid of the outer `Widget` of the same namespace and name. A restore of the

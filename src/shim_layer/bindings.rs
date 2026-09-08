@@ -550,11 +550,15 @@ impl BindingManager {
             "binding manager: watching Secrets of type {} labelled {} and named *{}, in every namespace",
             SECRET_TYPE, CLUSTER_NAME_LABEL, SECRET_SUFFIX
         );
-        loop {
+        // Ok(()) only for the shutdown signal. The Secret watch ending is an
+        // error, not a clean exit: the manager would go on running with the
+        // bindings it happens to have, never noticing a Secret again, and
+        // nothing about the process would say so.
+        let result = loop {
             tokio::select! {
                 _ = &mut shutdown => {
                     info!("binding manager: shutting down");
-                    break;
+                    break Ok(());
                 }
                 _ = ticker.tick() => self.tick().await,
                 Some(result) = outcomes_rx.recv() => self.apply(result).await,
@@ -562,17 +566,16 @@ impl BindingManager {
                     Some(Ok(event)) => self.on_event(event).await,
                     // The watcher recovers on its own; the next poll re-lists.
                     Some(Err(e)) => warn!("binding manager: watching Secrets failed: {}; retrying", e),
-                    None => {
-                        warn!("binding manager: the Secret watch ended");
-                        break;
-                    }
+                    None => break Err(anyhow!(
+                        "the Secret watch ended; no change of any binding would be noticed again"
+                    )),
                 },
             }
-        }
+        };
         for binding in self.bindings.keys().cloned().collect::<Vec<_>>() {
             self.stop_runners(&binding);
         }
-        Ok(())
+        result
     }
 
     async fn on_event(&mut self, event: watcher::Event<Secret>) {

@@ -329,9 +329,13 @@ async fn main() -> Result<()> {
             // carries the same-name triggers of every bound cluster's mirrors of
             // that kind (shim_layer::bindings).
             let mut runners: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+            // What each runner is called in the log line that says it stopped;
+            // same index as `runners`.
+            let mut runner_names: Vec<String> = Vec::new();
             let mut binding_kinds = Vec::with_capacity(configured.len());
             for (kind, entry, plural) in &configured {
                 let (triggers, trigger_stream) = same_name_triggers();
+                runner_names.push(format!("the sync runner of {}", kind));
                 runners.push(tokio::spawn(run_dyn_controller_with_triggers::<SyncReconciler, VoidExternalShimLayer>(
                     clusters.clone(),
                     SyncReconciler { kind: sync_kind(entry, kind) },
@@ -370,12 +374,14 @@ async fn main() -> Result<()> {
                     let cluster = ClusterId::Remote(binding.clone());
                     let pause_file = janitor_pause.clone();
                     let binding = binding.clone();
+                    let kind_name = kind.to_string();
+                    let asked_to_stop = stop.clone();
                     let mut stop = stop.clone();
                     tokio::spawn(async move {
                         let stopped = async move {
                             let _ = stop.changed().await;
                         };
-                        if let Err(e) = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
+                        let outcome = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
                             clusters,
                             reconciler,
                             entry,
@@ -385,9 +391,27 @@ async fn main() -> Result<()> {
                             fault_injection,
                             stopped,
                         )
-                        .await
-                        {
-                            warn!("a janitor of binding {}/{} stopped: {}", binding.namespace, binding.name, e);
+                        .await;
+                        // A janitor returns when the manager stops it: its
+                        // Secret changed or went away, or the process is
+                        // shutting down. Anything else is a janitor that has
+                        // stopped collecting stale mirrors of a live binding
+                        // with nothing to restart it, so the process exits and
+                        // the kubelet brings the container back.
+                        let janitor = format!("the janitor of {} for binding {}/{}", kind_name, binding.namespace, binding.name);
+                        match (*asked_to_stop.borrow(), outcome) {
+                            (true, Ok(())) => info!("{} stopped with its binding", janitor),
+                            (true, Err(e)) => {
+                                warn!("{} stopped with its binding, reporting: {}", janitor, e)
+                            }
+                            (false, Ok(())) => {
+                                error!("{} ended although its binding is up; exiting so the pod restarts", janitor);
+                                process::exit(1);
+                            }
+                            (false, Err(e)) => {
+                                error!("{} failed although its binding is up: {}; exiting so the pod restarts", janitor, e);
+                                process::exit(1);
+                            }
                         }
                     });
                 }
@@ -401,6 +425,8 @@ async fn main() -> Result<()> {
                 REMOTE_REQUEST_TIMEOUT,
                 start_runners,
             );
+            runner_names.push("the binding manager".to_string());
+            let shutting_down = shutdown_rx.clone();
             runners.push(tokio::spawn(manager.run(signalled(shutdown_rx))));
 
             // Ready: every configured kind is served and has the right shape, and
@@ -413,8 +439,31 @@ async fn main() -> Result<()> {
                 }
             }
 
-            for result in futures::future::try_join_all(runners).await? {
-                result?;
+            // The first runner to return decides what happens to the process.
+            // Away from shutdown there is no good reason for one to return:
+            // nothing restarts it, so the pod would go on running, and passing
+            // its startup probe, with a kind that is no longer reconciled or a
+            // binding manager that no longer notices a Secret. Exiting non-zero
+            // is what makes the kubelet restart the container, and the error log
+            // is what says which runner it was.
+            let (first, index, rest) = futures::future::select_all(runners).await;
+            let name = runner_names[index].clone();
+            if *shutting_down.borrow() {
+                info!("{} stopped; draining the others", name);
+                for handle in rest {
+                    match handle.await {
+                        Ok(Ok(())) | Err(_) => {}
+                        Ok(Err(e)) => warn!("a runner reported on its way out: {}", e),
+                    }
+                }
+                info!("every runner has stopped");
+            } else {
+                match first {
+                    Ok(Ok(())) => error!("{} returned unexpectedly; exiting so the pod restarts", name),
+                    Ok(Err(e)) => error!("{} failed: {}; exiting so the pod restarts", name, e),
+                    Err(e) => error!("{} did not finish ({}); exiting so the pod restarts", name, e),
+                }
+                process::exit(1);
             }
         }
         other => {
