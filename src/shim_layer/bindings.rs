@@ -641,20 +641,24 @@ pub async fn check_binding_access(
     let mut denied = Vec::new();
     for kind in kinds {
         for verb in verbs {
-            if !allowed(client, &binding.namespace, &kind.group, &kind.plural, verb).await? {
+            if !allowed(client, &binding.namespace, &kind.group, &kind.plural, verb, None).await? {
                 denied.push(format!("{} on {}", verb, kind.resource()));
             }
         }
     }
-    for verb in ["get", "create"] {
-        if !allowed(client, CLAIM_NAMESPACE, "", "configmaps", verb).await? {
-            denied.push(format!("{} on configmaps in {}", verb, CLAIM_NAMESPACE));
-        }
+    // The claim: `get` is asked for the claim by name, since rbac_inner.yaml
+    // grants it through resourceNames and a nameless review would be denied;
+    // `create` cannot be limited by name and is asked without one.
+    if !allowed(client, CLAIM_NAMESPACE, "", "configmaps", "create", None).await? {
+        denied.push(format!("create on configmaps in {}", CLAIM_NAMESPACE));
+    }
+    if !allowed(client, CLAIM_NAMESPACE, "", "configmaps", "get", Some(CLAIM_NAME)).await? {
+        denied.push(format!("get on configmaps/{} in {}", CLAIM_NAME, CLAIM_NAMESPACE));
     }
     Ok(denied)
 }
 
-async fn allowed(client: &Client, namespace: &str, group: &str, resource: &str, verb: &str) -> std::result::Result<bool, kube::Error> {
+async fn allowed(client: &Client, namespace: &str, group: &str, resource: &str, verb: &str, name: Option<&str>) -> std::result::Result<bool, kube::Error> {
     let reviews: Api<SelfSubjectAccessReview> = Api::all(client.clone());
     let review = SelfSubjectAccessReview {
         spec: SelfSubjectAccessReviewSpec {
@@ -663,6 +667,7 @@ async fn allowed(client: &Client, namespace: &str, group: &str, resource: &str, 
                 group: Some(group.to_string()),
                 resource: Some(resource.to_string()),
                 verb: Some(verb.to_string()),
+                name: name.map(|n| n.to_string()),
                 ..ResourceAttributes::default()
             }),
             ..SelfSubjectAccessReviewSpec::default()
