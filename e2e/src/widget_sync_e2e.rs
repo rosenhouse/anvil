@@ -85,7 +85,9 @@ async fn client_for_context(context: &str) -> Result<Client, Error> {
 }
 
 fn widget(name: &str, count: i32, message: &str) -> Widget {
-    let mut w = Widget::new(name, WidgetSpec { count, message: Some(message.to_string()) });
+    // The binding name of the single-pair testbed; the bindings work renames it as needed.
+    let spec = WidgetSpec { cluster_name: "inner".to_string(), count, message: Some(message.to_string()) };
+    let mut w = Widget::new(name, spec);
     w.metadata.namespace = Some("default".to_string());
     w
 }
