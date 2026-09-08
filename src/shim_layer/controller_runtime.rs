@@ -1194,6 +1194,16 @@ fn log_request_failure(log_header: &str, request: &'static str, cluster: Cluster
 
 // TODO: match more error types.
 pub fn kube_error_to_api_error(error: &kube::Error) -> APIError {
+    // A JSON patch whose `test` failed comes back as a 422 Invalid, the same
+    // status as a schema or webhook rejection. The two differ in what the
+    // reconciler should report: a failed test means the object changed since it
+    // was read and the next reconcile retries, a rejection is permanent. Only
+    // the message tells them apart (is_failed_patch_test), so the failed test is
+    // handed to the reconciler as Conflict, the model's transient "the object
+    // moved under you" answer, and never as Invalid.
+    if is_failed_patch_test(error) {
+        return APIError::Conflict;
+    }
     match error {
         kube::Error::Api(error_resp) => {
             if &error_resp.reason == "NotFound" {
