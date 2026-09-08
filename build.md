@@ -11,7 +11,7 @@ This project uses [`cargo verus`](https://github.com/verus-lang/verus). All thir
 - `kubernetes_cluster/` A model of the core components in a Kubernetes cluster that controllers often interact with, including API servers, etcd, and some built-in controllers. It is written as a TLA-style state machine.
 - `kubernetes_api_objects/` A library that defines commonly used Kubernetes API objects (e.g., Pod, ConfigMap, StatefulSet, Service, etc.). Most definitions are imported from [k8s-openapi](https://github.com/Arnavion/k8s-openapi) (which is also used by [kube](https://github.com/kube-rs/kube)) with a wrapper that allows formal reasoning on these objects.
 - `state_machine/` A library for defining TLA-style state machines, used by `kubernetes_cluster/`.
-- `controllers/` Example controllers we built and verified using Anvil (e.g., `rabbitmq_controller/`, `vreplicaset_controller/`, `vdeployment_controller/`, `vstatefulset_controller/`, `widget_sync_controller/`), plus their `composition/` proofs.
+- `controllers/` Example controllers we built and verified using Anvil (`rabbitmq_controller/`, `vreplicaset_controller/`, `vdeployment_controller/`, `vstatefulset_controller/`, and `widget_sync_controller/`, which holds the Widget sync controller and janitor), plus their `composition/` proofs. See `doc/verified_controllers.md`.
 - `crds.rs` Custom resource type definitions (`kube`-derived), shared by the controllers and the e2e tests.
 - `bin/` Binary entry points, one per controller, admission webhook, and verification target (e.g., `esr_composition.rs`).
 - `tla_demo.rs` Proof code for the TLA demo.
@@ -85,5 +85,11 @@ Step 4:
 cd e2e
 cargo run -- <controller_name>
 ```
+
+The Widget sync controller and janitor run across two kind clusters instead:
+`./tools/two-cluster-test.sh [--build]` builds the `widget_sync` and
+`widget_echo` images, creates both clusters and deploys them, and
+`cd e2e && cargo run -- widget-sync` runs the test. See
+`deploy/widget_sync/README.md` and `doc/widget_sync_design.md`.
 
 See `.github/workflows/ci.yml` for the exact CI invocations.
