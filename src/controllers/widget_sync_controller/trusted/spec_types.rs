@@ -407,6 +407,9 @@ pub open spec fn error_reason(err: APIError, answering_create: bool) -> FailureR
 pub open spec fn no_cluster_name() -> StringView { ""@ }
 
 // The binding of `outer`: its namespace and the cluster its selector names.
+// A selector-less outer copy is refused at `Init` (Failed(Rejected)) before
+// `serves` is ever consulted, so a binding (ns, no_cluster_name()) that happens
+// to be in `k.bindings` is never served for such an object.
 pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
     ClusterRefView {
         namespace: outer.metadata.namespace->0,

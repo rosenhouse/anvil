@@ -70,21 +70,6 @@ pub open spec fn widget_janitor_controller_model(k: SyncKind, b: Binding) -> Con
     }
 }
 
-// The disturber's edit is really an edit: it never writes back the value it
-// found. `disturbed_spec` (model/disturber_reconciler.rs) is uninterpreted, so
-// without this nothing rules out the identity, and a disturber that leaves the
-// spec alone is not a disturbance -- the premise of R1 and R2, "no edit of the
-// mirror's spec is in flight", would be met by a Patch that changes nothing.
-//
-// Trusted, and model-only: the disturber stands for a `kubectl edit`, it has no
-// exec twin, and this is the one assumption made about what that edit writes.
-// It is inventoried with the other trusted items of the pair
-// (doc/widget_sync_design.md, section 3).
-#[verifier(external_body)]
-pub proof fn disturbed_spec_changes_the_spec()
-    ensures forall |v: Value| #[trigger] disturber_reconciler::disturbed_spec(v) != v,
-{}
-
 // The out-of-band actor of model/disturber_reconciler.rs, as a controller model,
 // acting on the objects of one inner kind.
 pub open spec fn widget_disturber_controller_model(kind: Kind) -> ControllerModel {

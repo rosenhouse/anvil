@@ -49,10 +49,26 @@ pub open spec fn at_step(step: WidgetDisturberStepView) -> WidgetDisturberReconc
     WidgetDisturberReconcileState { reconcile_step: step }
 }
 
-// The edit: some other value written over the mirror's spec. The spec of an
-// object of the shape is opaque, so the edit is an uninterpreted function of it;
-// nothing the pair proves depends on which value it is.
-pub uninterp spec fn disturbed_spec(spec: Value) -> Value;
+// The edit: some other value written over the mirror's spec. Nothing the pair
+// proves depends on which value it is, only that it is not the one that was
+// there, so the definition is the cheapest value with that property and stays
+// closed: outside this module the edit is still an opaque function of the spec,
+// known only through disturbed_spec_changes_the_spec.
+pub closed spec fn disturbed_spec(spec: Value) -> Value { spec.push('x') }
+
+// The disturber's edit is really an edit: it never writes back the value it
+// found. Without this nothing would rule out the identity, and a disturber that
+// leaves the spec alone is not a disturbance -- the premise of R1 and R2, "no
+// edit of the mirror's spec is in flight", would be met by a Patch that changes
+// nothing. A Value is a sequence of characters, so the witness is one character
+// longer than what it replaces.
+pub proof fn disturbed_spec_changes_the_spec()
+    ensures forall |v: Value| #[trigger] disturbed_spec(v) != v,
+{
+    assert forall |v: Value| #[trigger] disturbed_spec(v) != v by {
+        assert(disturbed_spec(v).len() == v.len() + 1);
+    }
+}
 
 // The spec patch, testing nothing: it lands whatever the mirror looks like now.
 pub open spec fn disturbing_patch(kind: Kind, inner: SyncedObjectView) -> PatchRequest {
