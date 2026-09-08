@@ -7,6 +7,10 @@ on:
   pull_request:
   merge_group:
   workflow_dispatch:
+# One run per branch: a new push supersedes the run of the previous head.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 env:
   kind_version: 0.23.0
   go_version: "^1.20"
