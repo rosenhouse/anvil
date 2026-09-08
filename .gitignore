@@ -30,3 +30,6 @@ certs
 
 # Worktrees created by Claude Code agents
 .claude/worktrees/
+
+# Private cargo target directories of agents and focused runs
+target-*/
