@@ -103,6 +103,13 @@ ours.
   create an object there bound to `a`. The claim refuses the second binding:
   the object reports `Synced=False/Forbidden` with `Stalled=True` and nothing
   of it ever reaches the inner cluster ("Bindings and the claim" below).
+- Rotate a credential: write the same kubeconfig back into
+  `default/a-kubeconfig` with a byte changed (a comment line will do). The
+  binding's clients are rebuilt and its janitors restarted in place, the
+  mirrors are untouched, and the next edit goes through the new clients.
+- Delete `kube-system/anvil-sync-claim` in `widget-sync-inner-a`. Within a
+  minute the binding that holds the cluster writes it again and says so at
+  warn — a released claim that nobody else took is taken back.
 
 ## Kinds and their shape
 

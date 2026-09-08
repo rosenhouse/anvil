@@ -429,7 +429,11 @@ fault-injection hook are unchanged; both act per process.
   namespace bound to different clusters; a Gadget named `a`; a Secret in a
   second namespace copied from `a-kubeconfig`, whose parents report
   `Forbidden` while the mirrors of namespace `default` survive; a Secret
-  removed and re-added; a kind refused at boot for a missing rule.
+  removed and re-added; a Secret whose `value` is replaced by an equivalent
+  kubeconfig with other bytes, after which the bound objects keep their
+  mirrors and a new edit still propagates; the claim of a bound binding
+  deleted by hand and written again at the next re-check; a kind refused at
+  boot for a missing rule.
 
 ## 5. What is proved, what is assumed
 
