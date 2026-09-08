@@ -49,6 +49,15 @@ const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 // pod's readiness. Nothing else is signalled: the binary has no health endpoint.
 const READY_FILE_ENV: &str = "READY_FILE";
 
+// If JANITOR_PAUSE_FILE is set, the shim withholds every Delete request of this
+// process while a file exists at that path, answering the reconciler with a
+// Timeout instead (controller_runtime::deletes_withheld). The janitor is the
+// only reconciler here that deletes. deploy/widget_sync/deploy_local.yaml points
+// it at the key `pause` of the ConfigMap widget-sync-janitor, so an operator can
+// pause the janitor around a restore of the outer cluster that issues new uids
+// (deploy/widget_sync/README.md, "Before restoring the outer cluster").
+const JANITOR_PAUSE_FILE_ENV: &str = "JANITOR_PAUSE_FILE";
+
 // The verbs the sync and janitor reconcilers issue on Widgets in the remote
 // cluster (see deploy/widget_sync/rbac_inner.yaml).
 const REMOTE_WIDGET_VERBS: [&str; 6] = ["get", "list", "watch", "create", "patch", "delete"];
@@ -120,6 +129,11 @@ async fn main() -> Result<()> {
             let remote_kubeconfig =
                 env::var("REMOTE_KUBECONFIG").unwrap_or_else(|_| DEFAULT_REMOTE_KUBECONFIG.to_string());
             let ready_file = env::var(READY_FILE_ENV).ok();
+            let janitor_pause_file = env::var(JANITOR_PAUSE_FILE_ENV).ok();
+            match &janitor_pause_file {
+                Some(path) => info!("deletes are withheld while {} exists", path),
+                None => info!("{} is unset; deletes cannot be paused", JANITOR_PAUSE_FILE_ENV),
+            }
             if let Some(path) = &ready_file {
                 // Ignore a missing file; anything else is reported when it is created.
                 let _ = fs::remove_file(path);
@@ -135,15 +149,20 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // The sync reconciler never deletes (its guarantee), so the pause file
+            // only ever acts on the janitor; it is given to both so that the gate
+            // holds for every Delete this process could send.
             let sync = run_controller_with_same_name_watch::<Widget, WidgetSyncReconciler, VoidExternalShimLayer, Widget>(
                 clusters.clone(),
                 ClusterId::Remote,
                 Some(FIELD_MANAGER.to_string()),
+                janitor_pause_file.clone(),
                 fault_injection,
             );
             let janitor = run_controller_in_clusters::<Widget, WidgetJanitorReconciler, VoidExternalShimLayer>(
                 clusters,
                 Some(FIELD_MANAGER.to_string()),
+                janitor_pause_file,
                 fault_injection,
             );
             tokio::try_join!(sync, janitor)?;

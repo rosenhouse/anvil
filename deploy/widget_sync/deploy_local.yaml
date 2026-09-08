@@ -11,6 +11,21 @@
 # is no liveness probe: the binary exposes nothing that reflects whether the
 # reconcilers are still making progress, and a probe that does not measure that
 # would only restart a healthy pod.
+#
+# The ConfigMap widget-sync-janitor is the janitor's pause gate. It is mounted
+# read-only at /etc/widget-sync/janitor and the binary is told, through
+# JANITOR_PAUSE_FILE, to withhold every Delete while the file `pause` exists
+# there. It ships empty, so the mount exists and nothing is paused; adding the
+# key `pause` (any content) pauses within the kubelet's ConfigMap sync period,
+# removing it resumes. See "Before restoring the outer cluster" in README.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: widget-sync-janitor
+  namespace: widget-sync
+  labels:
+    app.kubernetes.io/name: widget-sync-controller
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -49,6 +64,8 @@ spec:
               value: /etc/widget-sync/remote-kubeconfig/kubeconfig
             - name: READY_FILE
               value: /run/widget-sync/ready
+            - name: JANITOR_PAUSE_FILE
+              value: /etc/widget-sync/janitor/pause
           # A startup probe, not a readiness probe: the file appears once the
           # access check has passed and never disappears, so there is nothing
           # to re-check afterwards.
@@ -77,6 +94,10 @@ spec:
             - name: remote-kubeconfig
               mountPath: /etc/widget-sync/remote-kubeconfig
               readOnly: true
+            # The janitor's pause gate: the file `pause` here withholds deletes.
+            - name: janitor
+              mountPath: /etc/widget-sync/janitor
+              readOnly: true
             # The only writable path; it holds the ready file.
             - name: run
               mountPath: /run/widget-sync
@@ -84,6 +105,9 @@ spec:
         - name: remote-kubeconfig
           secret:
             secretName: widget-sync-remote-kubeconfig
+        - name: janitor
+          configMap:
+            name: widget-sync-janitor
         - name: run
           emptyDir:
             medium: Memory

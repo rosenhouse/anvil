@@ -122,6 +122,17 @@ pointing at the wrong cluster answers `NotFound` for every key. A same-named
 parent with another uid counts as absent, so a recreated outer copy gets a
 fresh mirror. The uid precondition is what garbage collectors use.
 
+Because absence is matched on uid, a restore of the outer cluster that
+issues new uids makes every mirror stale at once; for that event the shim
+carries an operator gate that withholds the janitor's Delete requests while a
+mounted file exists, answering the reconciler with `Timeout` instead
+(`controller_runtime::deletes_withheld`; the deployment in section 4). The
+gate is safe without any change to the model or the proofs: to the verified
+reconciler a withheld delete is a failed request, which the model covers as
+the `drop_req` fault, and withholding a delete can only defer R3 and R3s,
+which resume when the gate is cleared, never violate the janitor's soundness
+fact, which is about the deletes that are sent.
+
 ### 1.4 Generation and status, as an observer reads them
 
 Kubernetes bumps `metadata.generation` of a custom resource with a status
@@ -282,6 +293,7 @@ reconcilers.
 | Out-of-band edit of a mirror's spec, or of its other labels and annotations (a `kubectl edit` in the inner cluster) | yes, as another controller's write | the rely permits it; the reconciler overwrites a spec edit and never copies a status computed for it; R1 and R2 hold once such edits stop (`mirror_spec_undisturbed`). The disturber (section 2.4) is a controller model doing the spec edit, on one store and on two |
 | Out-of-band delete of a mirror; inner cluster rebuilt | yes, as another controller's delete | the rely permits any Delete; the reconciler recovers (NotFound → Create); R1 and R2 hold once such deletes stop landing on the live mirror (`mirror_undeleted`); R3 and R3s hold throughout. The disturber (section 2.4) is a controller model doing exactly this, on one store and on two |
 | Out-of-band edit that removes the mirror's label or `parent-uid` annotation | excluded by the rely | the object becomes foreign to both reconcilers, which refuse to adopt; no recovery is possible without adoption (section 1.1) |
+| Outer cluster restored with new uids | operational | the janitor pause gate (shim) withholds deletes; the model sees a failed request (`drop_req`); cleanup under R3 and R3s resumes when the gate is cleared (section 1.3) |
 | A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
 | Two outer clusters feeding one inner cluster; many outer namespaces each with its own inner cluster | no | assumed away for the single pair; the fan-out and parent-cluster identity are follow-up work (issue #15) |
@@ -507,6 +519,12 @@ disturber (section 2.4) as a third member with an empty ESR and no rely;
   sync secondary, mapped by name).
 - Requeue: fixed intervals after `Done` and after an error; the remote client
   has a short request timeout so a partition surfaces as a failed reconcile.
+- The janitor pause gate: the ConfigMap `widget-sync-janitor` in the
+  controller's namespace, shipped empty and mounted read-only at
+  `/etc/widget-sync/janitor`; `JANITOR_PAUSE_FILE` points the binary at the
+  key `pause` there. While the key exists the shim withholds every Delete
+  (section 1.3); the README gives the pause and resume commands and the
+  sequence to follow around a restore of the outer cluster.
 
 Of the operability and hardening work issues #9 and #10 listed, the branch
 has: a usage error instead of a silent exit, a field manager on every write,
