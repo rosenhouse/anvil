@@ -449,6 +449,7 @@ pub proof fn lemma_mirror_collected_after_step(k: SyncKind, b: Binding, bs: Set<
                                     &&& outer.kind == k.outer_kind
                                     &&& outer.object_ref() == ck
                                     &&& outer.metadata.uid is Some
+                                    &&& cluster_of(k.selector, outer) is Some
                                     &&& req.namespace == ck.namespace
                                     &&& req.obj == #[trigger] marshal(make_inner(k, outer))
                                     &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, ck)(s)

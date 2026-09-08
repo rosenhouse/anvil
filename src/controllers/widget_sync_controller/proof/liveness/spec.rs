@@ -179,6 +179,7 @@ pub proof fn lemma_sync_rely_implies_mirror_write_facts(k: SyncKind, b: Binding,
                                 &&& outer.kind == k.outer_kind
                                 &&& outer.object_ref() == okey
                                 &&& outer.metadata.uid is Some
+                                &&& cluster_of(k.selector, outer) is Some
                                 &&& req.namespace == okey.namespace
                                 &&& req.obj == #[trigger] marshal(make_inner(k, outer))
                                 &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, okey)(s)
@@ -247,6 +248,7 @@ pub open spec fn sync_invariants(k: SyncKind, b: Binding, bs: Set<Binding>, spec
     .and(always(lift_state(every_in_flight_inner_create_is_a_mirror_create(k))))
     .and(always(lift_state(every_in_flight_inner_update_preserves_identity(k))))
     .and(always(lift_state(every_mirror_is_bound(k, b))))
+    .and(always(lift_state(every_mirror_selects_its_cluster(k, b))))
     .and(always(lift_state(sync_scheduled_crs_are_bound(k, controller_id))))
     .and(always(lift_state(sync_triggering_crs_are_bound(k, controller_id))))
     .and(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id))))
@@ -296,6 +298,7 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, bs: Set<Binding>
     always_p_is_stable(lift_state(every_in_flight_inner_create_is_a_mirror_create(k)));
     always_p_is_stable(lift_state(every_in_flight_inner_update_preserves_identity(k)));
     always_p_is_stable(lift_state(every_mirror_is_bound(k, b)));
+    always_p_is_stable(lift_state(every_mirror_selects_its_cluster(k, b)));
     always_p_is_stable(lift_state(sync_scheduled_crs_are_bound(k, controller_id)));
     always_p_is_stable(lift_state(sync_triggering_crs_are_bound(k, controller_id)));
     always_p_is_stable(lift_state(janitor_deletes_are_sound(k, b, janitor_id)));
@@ -339,6 +342,7 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, bs: Set<Binding>
         always(lift_state(every_in_flight_inner_create_is_a_mirror_create(k))),
         always(lift_state(every_in_flight_inner_update_preserves_identity(k))),
         always(lift_state(every_mirror_is_bound(k, b))),
+        always(lift_state(every_mirror_selects_its_cluster(k, b))),
         always(lift_state(sync_scheduled_crs_are_bound(k, controller_id))),
         always(lift_state(sync_triggering_crs_are_bound(k, controller_id))),
         always(lift_state(janitor_deletes_are_sound(k, b, janitor_id))),
@@ -423,6 +427,7 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spe
     lemma_always_widget_sync_guarantee(spec, cluster, k, spec_ok, controller_id);
     lemma_sync_rely_implies_mirror_write_facts(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_every_mirror_is_bound(spec, cluster, k, b, spec_ok);
+    lemma_always_every_mirror_selects_its_cluster(spec, cluster, k, b, spec_ok);
     lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, controller_id);
     lemma_always_builtin_deletes_never_target_mirrors(spec, cluster, k, b, spec_ok);
     lemma_always_sync_pending_requests_match_snapshots(spec, cluster, k, controller_id);
@@ -465,6 +470,7 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spe
         lift_state(every_in_flight_inner_create_is_a_mirror_create(k)),
         lift_state(every_in_flight_inner_update_preserves_identity(k)),
         lift_state(every_mirror_is_bound(k, b)),
+        lift_state(every_mirror_selects_its_cluster(k, b)),
         lift_state(sync_scheduled_crs_are_bound(k, controller_id)),
         lift_state(sync_triggering_crs_are_bound(k, controller_id)),
         lift_state(janitor_deletes_are_sound(k, b, janitor_id)),
@@ -574,6 +580,7 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, bs: Set<Bindi
         spec.entails(always(lift_state(widget_janitor_guarantee(k, b, janitor_id)))),
         spec.entails(always(lift_state(every_in_flight_inner_update_preserves_identity(k)))),
         spec.entails(always(lift_state(every_mirror_is_bound(k, b)))),
+        spec.entails(always(lift_state(every_mirror_selects_its_cluster(k, b)))),
         spec.entails(always(lift_state(sync_triggering_crs_are_bound(k, controller_id)))),
         spec.entails(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))),
         spec.entails(always(lift_state(builtin_deletes_never_target_mirrors(k, b)))),
@@ -668,6 +675,8 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, bs: Set<Bindi
     entails_trans(spec, inv, always(lift_state(every_in_flight_inner_update_preserves_identity(k))));
     assert(inv.entails(always(lift_state(every_mirror_is_bound(k, b)))));
     entails_trans(spec, inv, always(lift_state(every_mirror_is_bound(k, b))));
+    assert(inv.entails(always(lift_state(every_mirror_selects_its_cluster(k, b)))));
+    entails_trans(spec, inv, always(lift_state(every_mirror_selects_its_cluster(k, b))));
     assert(inv.entails(always(lift_state(sync_triggering_crs_are_bound(k, controller_id)))));
     entails_trans(spec, inv, always(lift_state(sync_triggering_crs_are_bound(k, controller_id))));
     assert(inv.entails(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))));
@@ -1522,6 +1531,7 @@ pub open spec fn sync_step_ctx(k: SyncKind, b: Binding, bs: Set<Binding>, spec_o
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
         &&& cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s)
         &&& every_mirror_is_bound(k, b)(s)
+        &&& every_mirror_selects_its_cluster(k, b)(s)
         &&& every_in_flight_inner_update_preserves_identity(k)(s)
         &&& janitor_deletes_are_sound(k, b, janitor_id)(s)
         &&& builtin_deletes_never_target_mirrors(k, b)(s)
@@ -1575,6 +1585,7 @@ pub proof fn lemma_always_sync_step_next(k: SyncKind, b: Binding, bs: Set<Bindin
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
         lift_state(cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))),
         lift_state(every_mirror_is_bound(k, b)),
+        lift_state(every_mirror_selects_its_cluster(k, b)),
         lift_state(every_in_flight_inner_update_preserves_identity(k)),
         lift_state(janitor_deletes_are_sound(k, b, janitor_id)),
         lift_state(builtin_deletes_never_target_mirrors(k, b)),
@@ -1600,6 +1611,7 @@ pub proof fn lemma_always_sync_step_next(k: SyncKind, b: Binding, bs: Set<Bindin
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())
             .and(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))))
             .and(lift_state(every_mirror_is_bound(k, b)))
+            .and(lift_state(every_mirror_selects_its_cluster(k, b)))
             .and(lift_state(every_in_flight_inner_update_preserves_identity(k)))
             .and(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))
             .and(lift_state(builtin_deletes_never_target_mirrors(k, b)))

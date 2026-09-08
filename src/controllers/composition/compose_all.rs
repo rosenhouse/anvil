@@ -264,6 +264,7 @@ proof fn widget_sync_guarantee_implies_widget_kinds_only(k: SyncKind, id: int)
                         &&& outer.kind == k.outer_kind
                         &&& outer.object_ref() == outer_key
                         &&& outer.metadata.uid is Some
+                        &&& cluster_of(k.selector, outer) is Some
                         &&& req.namespace == outer_key.namespace
                         &&& req.obj == #[trigger] marshal(make_inner(k, outer))
                         &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
