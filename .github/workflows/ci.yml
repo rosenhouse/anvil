@@ -57,11 +57,23 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      # Verification only depends on the library sources and the Verus build
+      # they're checked against, so a successful run is memoized under a key
+      # covering exactly that. When neither has changed since the last green
+      # run, the cache hits and the (slow) verify step below is skipped.
+      - name: Check for a previous successful verification of this source
+        id: verify-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/full-verification.ok
+          key: full-verification-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml') }}
       - name: Verify all controllers
+        if: steps.verify-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           cargo verus verify --lib
+          mkdir -p .ci-cache && touch .ci-cache/full-verification.ok
 
   vreplicaset-admission-e2e-test:
     needs: setup-toolchain
@@ -77,20 +89,36 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      # Memoize a green run under a key covering everything that can change
+      # its outcome: the controller/e2e sources, the deploy tooling, and the
+      # Verus build they run against. Unchanged since the last green run ->
+      # skip the build/deploy/test steps below.
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/vreplicaset-admission-e2e-test.ok
+          key: vreplicaset-admission-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy vreplicaset admission controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh vreplicaset-admission --build
       - name: Run vreplicaset e2e tests for admission
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- vreplicaset-admission
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- vreplicaset-admission
+          mkdir -p ../.ci-cache && touch ../.ci-cache/vreplicaset-admission-e2e-test.ok
 
   vdeployment-admission-e2e-test:
     needs: setup-toolchain
@@ -106,20 +134,32 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/vdeployment-admission-e2e-test.ok
+          key: vdeployment-admission-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy vdeployment admission controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh vdeployment-admission --build
       - name: Run vdeployment e2e tests for admission
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- vdeployment-admission
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- vdeployment-admission
+          mkdir -p ../.ci-cache && touch ../.ci-cache/vdeployment-admission-e2e-test.ok
 
   vreplicaset-e2e-test:
     needs: setup-toolchain
@@ -135,20 +175,32 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/vreplicaset-e2e-test.ok
+          key: vreplicaset-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy vreplicaset controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh vreplicaset --build
       - name: Run vreplicaset e2e tests
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- vreplicaset
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- vreplicaset
+          mkdir -p ../.ci-cache && touch ../.ci-cache/vreplicaset-e2e-test.ok
 
   vdeployment-e2e-test:
     needs: setup-toolchain
@@ -164,20 +216,32 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/vdeployment-e2e-test.ok
+          key: vdeployment-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy vdeployment controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh vdeployment --build
       - name: Run vdeployment e2e tests
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- vdeployment
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- vdeployment
+          mkdir -p ../.ci-cache && touch ../.ci-cache/vdeployment-e2e-test.ok
 
   vstatefulset-e2e-test:
     needs: setup-toolchain
@@ -193,20 +257,32 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/vstatefulset-e2e-test.ok
+          key: vstatefulset-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy vstatefulset controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh vstatefulset --build
       - name: Run vstatefulset e2e tests
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- vstatefulset
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- vstatefulset
+          mkdir -p ../.ci-cache && touch ../.ci-cache/vstatefulset-e2e-test.ok
 
   rabbitmq-e2e-test:
     needs: setup-toolchain
@@ -222,20 +298,32 @@ jobs:
             rust-toolchain.toml
             target
           key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
+      - name: Check for a previous successful e2e run of this source
+        id: e2e-cache
+        uses: actions/cache@v6
+        with:
+          path: .ci-cache/rabbitmq-e2e-test.ok
+          key: rabbitmq-e2e-test-${{ needs.setup-toolchain.outputs.verus-sha }}-${{ hashFiles('src/**', 'Cargo.toml', 'Cargo.lock', 'rust-toolchain.toml', 'e2e/**', 'docker/**', 'deploy/**', 'tools/local-test.sh', 'tools/deploy.sh') }}
       - name: Setup Go
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         uses: actions/setup-go@v6
         with:
           go-version: ${{ env.go_version }}
           cache: false
       - name: Install kind
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Deploy rabbitmq controller
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/local-test.sh rabbitmq --build
       - name: Run rabbitmq e2e tests
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- rabbitmq
+        if: steps.e2e-cache.outputs.cache-hit != 'true'
+        run: |
+          . "$HOME/.cargo/env" && cd e2e && cargo run -- rabbitmq
+          mkdir -p ../.ci-cache && touch ../.ci-cache/rabbitmq-e2e-test.ok
 
   # Aggregates every other job into a single status, so branch protection can
   # require one check instead of being updated whenever a job is added, renamed
