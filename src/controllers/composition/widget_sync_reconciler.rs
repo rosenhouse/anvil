@@ -22,6 +22,7 @@ use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;
 use vstd::prelude::*;
+use vstd::set_lib::*;
 
 verus! {
 
@@ -316,12 +317,9 @@ pub proof fn sync_guarantee_implies_janitor_rely(k: SyncKind, id: int)
 
 // The pair {janitor of `b`, sync of `k`} for a single binding: the janitor's ESR
 // discharges the sync reconciler's liveness dependency, and the two guarantees
-// discharge each other's relies.
-//
-// TODO (doc/widget_sync_fanout_design.md, section 5.1): the same statement for a
-// finite set of bindings, composing the janitors one at a time. What is proved
-// here is the one-binding case, which is what the deployed binary runs; the
-// two-binding case is widget_two_binding_core_holds below.
+// discharge each other's relies. This is the case the deployed binary runs and
+// the one compose_all puts beside the other four controllers;
+// widget_fanout_core_holds below is the same statement for a set of bindings.
 pub proof fn widget_pair_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, janitor_id: int, sync_id: int)
     requires
         cluster.registry.contains_pair(janitor_id, widget_janitor_controller_spec(k, b, Set::empty().insert(b), spec_ok, janitor_id)),
@@ -408,6 +406,309 @@ pub proof fn widget_pair_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
         entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
     }
 
+    compose_dep(cluster, s1, s2);
+}
+
+// ---------------------------------------------------------------------------
+// Composing the janitors of a finite set of bindings with the sync reconciler.
+// ---------------------------------------------------------------------------
+
+// A janitor's guarantee implies every other janitor's rely: the rely constrains
+// Creates and Updates of mirrors, and a janitor sends neither.
+pub proof fn janitor_guarantee_implies_janitor_rely(k: SyncKind, b: Binding, id: int)
+    ensures lift_state(widget_janitor_guarantee(k, b, id)).entails(lift_state(widget_janitor_rely(k, id))),
+{
+    assert forall |s: ClusterState| #[trigger] widget_janitor_guarantee(k, b, id)(s) implies widget_janitor_rely(k, id)(s) by {
+        assert forall |msg| #[trigger] s.in_flight().contains(msg)
+            && msg.content is APIRequest
+            && msg.src.is_controller_id(id)
+            implies (match msg.content->APIRequest_0 {
+                APIRequest::CreateRequest(req) => is_inner_kind(k, req.obj.kind) ==> {
+                    &&& req.obj.metadata.name is Some
+                    &&& mirror_create_req(k, req, ObjectRef {
+                        kind: k.outer_kind,
+                        namespace: req.namespace,
+                        name: req.obj.metadata.name->0,
+                    })(s)
+                },
+                APIRequest::UpdateRequest(req) => mirror_update_req(k, req)(s),
+                APIRequest::GetThenUpdateRequest(req) => mirror_get_then_update_req(k, req)(s),
+                _ => true,
+            }) by {
+            match msg.content->APIRequest_0 {
+                APIRequest::ListRequest(_) => {},
+                APIRequest::DeleteRequest(_) => {},
+                _ => { assert(false); },
+            }
+        }
+    }
+}
+
+// The ids of the janitors of the bindings in `sub`, and the core set they form.
+// Their liveness dependency is empty: a janitor's ESR rests on its rely alone.
+pub open spec fn janitor_ids_of(sub: Set<Binding>, ids: Map<Binding, int>) -> Set<int> {
+    sub.map(|b: Binding| ids[b])
+}
+
+pub open spec fn widget_janitors_core_set(sub: Set<Binding>, ids: Map<Binding, int>) -> CoreSet {
+    CoreSet {
+        members: janitor_ids_of(sub, ids),
+        liveness_dependency: true_pred(),
+    }
+}
+
+// Every bound binding's janitor is registered under its own id, with its own
+// spec, and its membership holds of the cluster.
+pub open spec fn janitors_registered(k: SyncKind, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>) -> bool {
+    forall |b: Binding| #[trigger] bs.contains(b) ==> {
+        &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, bs, spec_ok, ids[b]))
+        &&& (widget_janitor_controller_spec(k, b, bs, spec_ok, ids[b]).membership)(cluster.cluster, ids[b])
+    }
+}
+
+// An id of the janitor core set is the id of one bound binding, and ids_ok's
+// injectivity names it.
+pub proof fn lemma_janitor_id_is_a_binding(bs: Set<Binding>, sub: Set<Binding>, ids: Map<Binding, int>, controller_id: int, id: int)
+    requires
+        ids_ok(bs, ids, controller_id),
+        sub.subset_of(bs),
+        janitor_ids_of(sub, ids).contains(id),
+    ensures
+        sub.contains(binding_at(bs, ids, id)),
+        ids[binding_at(bs, ids, id)] == id,
+        is_janitor_id(bs, ids, id),
+{
+    broadcast use Set::lemma_map_contains;
+    let f = |b: Binding| ids[b];
+    assert(exists |b: Binding| sub.contains(b) && id == f(b));
+    let b0 = choose |b: Binding| sub.contains(b) && id == f(b);
+    assert(bs.contains(b0) && ids[b0] == id);
+    assert(is_janitor_id(bs, ids, id));
+    let b1 = binding_at(bs, ids, id);
+    assert(bs.contains(b1) && ids[b1] == id);
+    assert(b1 == b0);
+}
+
+// The id of a bound binding is in the core set of any subset that holds it.
+pub proof fn lemma_binding_id_is_a_member(bs: Set<Binding>, sub: Set<Binding>, ids: Map<Binding, int>, controller_id: int, b: Binding)
+    requires
+        ids_ok(bs, ids, controller_id),
+        sub.subset_of(bs),
+        sub.contains(b),
+    ensures
+        janitor_ids_of(sub, ids).contains(ids[b]),
+        is_janitor_id(bs, ids, ids[b]),
+        binding_at(bs, ids, ids[b]) == b,
+{
+    broadcast use Set::lemma_map_contains;
+    let f = |b2: Binding| ids[b2];
+    assert(sub.contains(b) && ids[b] == f(b));
+    assert(bs.contains(b) && ids[b] == ids[b]);
+    let b1 = binding_at(bs, ids, ids[b]);
+    assert(bs.contains(b1) && ids[b1] == ids[b]);
+}
+
+// The janitors of a set of bindings compose into one core set, one binding at a
+// time: each janitor's guarantee is what every other janitor relies on, and none
+// of them has a liveness dependency, so `compose` applies at every step.
+pub proof fn widget_janitors_core_holds(k: SyncKind, bs: Set<Binding>, sub: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, controller_id: int)
+    requires
+        ids_ok(bs, ids, controller_id),
+        sub.subset_of(bs),
+        janitors_registered(k, bs, spec_ok, cluster, ids),
+    ensures
+        well_formed(cluster, widget_janitors_core_set(sub, ids)),
+        core(cluster, widget_janitors_core_set(sub, ids)),
+    decreases sub.len(),
+{
+    broadcast use Set::lemma_map_contains;
+    let s = widget_janitors_core_set(sub, ids);
+    let spec = cluster_model(cluster);
+    assert(well_formed(cluster, s)) by {
+        assert forall |i: int| #[trigger] s.members.contains(i) implies cluster.registry.contains_key(i)
+            && (cluster.registry[i].membership)(cluster.cluster, i) by {
+            lemma_janitor_id_is_a_binding(bs, sub, ids, controller_id, i);
+            let b = binding_at(bs, ids, i);
+            assert(bs.contains(b) && ids[b] == i);
+        }
+    }
+    if sub.is_empty() {
+        // No members: every conjunct of the ESR is true_pred.
+        let g_fn = |c: int| if s.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let r_fn = |pair: (int, int)| if s.members.contains(pair.0) && !s.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+        let env_fn = |c: int| if s.members.contains(c) { cluster.registry[c].environment_rely } else { true_pred::<ClusterState>() };
+        let esr_fn = |c: int| if s.members.contains(c) { cluster.registry[c].esr } else { true_pred::<ClusterState>() };
+        assert(s.members =~= Set::<int>::empty());
+        assert forall |c: int| spec.entails(#[trigger] g_fn(c)) by {
+            assert(!s.members.contains(c));
+            assert(g_fn(c) == true_pred::<ClusterState>());
+        }
+        spec_entails_tla_forall(spec, g_fn);
+        assert forall |c: int| spec.entails(#[trigger] esr_fn(c)) by {
+            assert(!s.members.contains(c));
+            assert(esr_fn(c) == true_pred::<ClusterState>());
+        }
+        spec_entails_tla_forall(spec, esr_fn);
+        let rest = tla_forall(r_fn).and(s.liveness_dependency).and(tla_forall(env_fn));
+        entails_implies(spec, rest, tla_forall(esr_fn));
+        entails_and(spec, tla_forall(g_fn), rest.implies(tla_forall(esr_fn)));
+    } else {
+        let b0 = sub.choose();
+        assert(sub.contains(b0));
+        let rest_bs = sub.remove(b0);
+        vstd::set::lemma_set_remove_len(sub, b0);
+        assert(rest_bs.len() < sub.len());
+        assert(rest_bs.subset_of(bs));
+        widget_janitors_core_holds(k, bs, rest_bs, spec_ok, cluster, ids, controller_id);
+        let s1 = widget_janitors_core_set(rest_bs, ids);
+        let s2 = widget_janitor_core_set(k, b0, bs, spec_ok, ids[b0]);
+        assert(bs.contains(b0));
+        assert(cluster.registry.contains_pair(ids[b0], widget_janitor_controller_spec(k, b0, bs, spec_ok, ids[b0])));
+        assert(well_formed(cluster, s2));
+        widget_janitor_singleton_core_holds(k, b0, bs, spec_ok, cluster, ids[b0]);
+        assert(compatible(cluster, s1, s2)) by {
+            let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+            let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+            let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+            let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+            // What one janitor relies on of another is that other's guarantee.
+            assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
+                if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
+                    lemma_janitor_id_is_a_binding(bs, rest_bs, ids, controller_id, pair.1);
+                    let b2 = binding_at(bs, ids, pair.1);
+                    assert(pair.0 == ids[b0]);
+                    assert(r21_fn(pair) == always(lift_state(widget_janitor_rely(k, pair.1))));
+                    tla_forall_apply(g_fn_s1, pair.1);
+                    assert(g_fn_s1(pair.1) == always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
+                    janitor_guarantee_implies_janitor_rely(k, b2, pair.1);
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(widget_janitor_rely(k, pair.1)));
+                    entails_trans(spec.and(tla_forall(g_fn_s1)), tla_forall(g_fn_s1), always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
+                    entails_trans(spec.and(tla_forall(g_fn_s1)), always(lift_state(widget_janitor_guarantee(k, b2, pair.1))), always(lift_state(widget_janitor_rely(k, pair.1))));
+                }
+            }
+            spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
+            entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
+            assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
+                if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
+                    lemma_janitor_id_is_a_binding(bs, rest_bs, ids, controller_id, pair.0);
+                    assert(pair.1 == ids[b0]);
+                    assert(r12_fn(pair) == always(lift_state(widget_janitor_rely(k, pair.1))));
+                    tla_forall_apply(g_fn_s2, pair.1);
+                    assert(g_fn_s2(pair.1) == always(lift_state(widget_janitor_guarantee(k, b0, ids[b0]))));
+                    janitor_guarantee_implies_janitor_rely(k, b0, ids[b0]);
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b0, ids[b0])), lift_state(widget_janitor_rely(k, ids[b0])));
+                    entails_trans(spec.and(tla_forall(g_fn_s2)), tla_forall(g_fn_s2), always(lift_state(widget_janitor_guarantee(k, b0, ids[b0]))));
+                    entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_janitor_guarantee(k, b0, ids[b0]))), always(lift_state(widget_janitor_rely(k, ids[b0]))));
+                }
+            }
+            spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
+            entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
+            entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
+        }
+        compose(cluster, s1, s2);
+        assert(union_coreset(s1, s2, true_pred()).members =~= s.members) by {
+            assert forall |i: int| s1.members.union(s2.members).contains(i) implies s.members.contains(i) by {
+                if s1.members.contains(i) {
+                    lemma_janitor_id_is_a_binding(bs, rest_bs, ids, controller_id, i);
+                    let b2 = binding_at(bs, ids, i);
+                    lemma_binding_id_is_a_member(bs, sub, ids, controller_id, b2);
+                } else {
+                    assert(i == ids[b0]);
+                    lemma_binding_id_is_a_member(bs, sub, ids, controller_id, b0);
+                }
+            }
+            assert forall |i: int| s.members.contains(i) implies s1.members.union(s2.members).contains(i) by {
+                lemma_janitor_id_is_a_binding(bs, sub, ids, controller_id, i);
+                let b2 = binding_at(bs, ids, i);
+                if b2 == b0 {
+                    assert(s2.members.contains(i));
+                } else {
+                    assert(rest_bs.contains(b2));
+                    lemma_binding_id_is_a_member(bs, rest_bs, ids, controller_id, b2);
+                }
+            }
+        }
+        assert(union_coreset(s1, s2, true_pred()) == s);
+    }
+}
+
+// The whole pair for a finite set of bindings: the janitors of `bs` composed
+// together, then composed with the sync reconciler, whose liveness dependency
+// (janitors_esr) their ESRs discharge. The singleton case is
+// widget_pair_core_holds; this is the general one
+// (doc/widget_sync_fanout_design.md, section 5.1).
+pub proof fn widget_fanout_core_holds(k: SyncKind, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int)
+    requires
+        ids_ok(bs, ids, sync_id),
+        janitors_registered(k, bs, spec_ok, cluster, ids),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, bs, spec_ok, sync_id, ids)),
+        (widget_sync_controller_spec(k, bs, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id),
+    ensures
+        well_formed(cluster, union_coreset(widget_janitors_core_set(bs, ids), widget_sync_core_set(k, bs, spec_ok, sync_id, ids), true_pred())),
+        core(cluster, union_coreset(widget_janitors_core_set(bs, ids), widget_sync_core_set(k, bs, spec_ok, sync_id, ids), true_pred())),
+{
+    broadcast use Set::lemma_map_contains;
+    let s1 = widget_janitors_core_set(bs, ids);
+    let s2 = widget_sync_core_set(k, bs, spec_ok, sync_id, ids);
+    let spec = cluster_model(cluster);
+    widget_janitors_core_holds(k, bs, bs, spec_ok, cluster, ids, sync_id);
+    assert(well_formed(cluster, s2));
+    widget_sync_singleton_core_holds(k, bs, spec_ok, cluster, sync_id, ids);
+    // The sync reconciler's dependency is the conjunction of the janitors' ESRs.
+    assert(satisfies_dependency(cluster, s1, s2)) by {
+        let esr_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].esr } else { true_pred::<ClusterState>() };
+        let esr_s1 = tla_forall(esr_fn_s1);
+        let dep_fn = |b2: Binding| if bs.contains(b2) { widget_janitor_esr(k, b2, ids[b2]) } else { true_pred::<ClusterState>() };
+        assert forall |b2: Binding| spec.and(esr_s1).entails(#[trigger] dep_fn(b2)) by {
+            if bs.contains(b2) {
+                lemma_binding_id_is_a_member(bs, bs, ids, sync_id, b2);
+                tla_forall_apply(esr_fn_s1, ids[b2]);
+                assert(esr_fn_s1(ids[b2]) == widget_janitor_esr(k, b2, ids[b2]));
+                entails_trans(spec.and(esr_s1), esr_s1, widget_janitor_esr(k, b2, ids[b2]));
+            }
+        }
+        spec_entails_tla_forall(spec.and(esr_s1), dep_fn);
+        assert(s2.liveness_dependency == janitors_esr(k, bs, ids));
+        entails_implies(spec, esr_s1, s2.liveness_dependency);
+    }
+    assert(compatible(cluster, s1, s2)) by {
+        let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+        let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+        // The sync reconciler relies on each janitor through that janitor's guarantee.
+        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
+            if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
+                assert(pair.0 == sync_id);
+                lemma_janitor_id_is_a_binding(bs, bs, ids, sync_id, pair.1);
+                let b2 = binding_at(bs, ids, pair.1);
+                assert(r21_fn(pair) == always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
+                tla_forall_apply(g_fn_s1, pair.1);
+                assert(g_fn_s1(pair.1) == always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
+                entails_trans(spec.and(tla_forall(g_fn_s1)), tla_forall(g_fn_s1), always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
+            }
+        }
+        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
+        entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
+        // Each janitor's rely on the sync reconciler follows from its guarantee.
+        sync_guarantee_implies_janitor_rely(k, sync_id);
+        entails_preserved_by_always(lift_state(widget_sync_guarantee(k, sync_id)), lift_state(widget_janitor_rely(k, sync_id)));
+        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
+            if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
+                assert(pair.1 == sync_id);
+                lemma_janitor_id_is_a_binding(bs, bs, ids, sync_id, pair.0);
+                let b2 = binding_at(bs, ids, pair.0);
+                assert(r12_fn(pair) == always(lift_state(widget_janitor_rely(k, sync_id))));
+                tla_forall_apply(g_fn_s2, sync_id);
+                assert(g_fn_s2(sync_id) == always(lift_state(widget_sync_guarantee(k, sync_id))));
+                entails_trans(spec.and(tla_forall(g_fn_s2)), tla_forall(g_fn_s2), always(lift_state(widget_sync_guarantee(k, sync_id))));
+                entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_sync_guarantee(k, sync_id))), always(lift_state(widget_janitor_rely(k, sync_id))));
+            }
+        }
+        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
+        entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
+        entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
+    }
     compose_dep(cluster, s1, s2);
 }
 

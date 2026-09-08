@@ -408,17 +408,21 @@ The statements of the main design, section 3.3, with parameters:
   compose with each other and with the four other controllers of the
   repository by kind disjointness, exactly as the pair does today.
 
-  **TODO (open).** What is proved is the closed statement for a singleton
-  `B = {b}`: `widget_pair_core_holds` composes `sync_k` with the one janitor
-  `janitor_{k,b}`, and `compose_all` puts that pair beside the four other
-  controllers. The sync controller's liveness dependency is already written
-  as `janitors_esr(k, B, ids)`, the `tla_forall` over bindings of the
-  janitors' ESRs, so the statement is the general one; what is missing is the
-  induction that discharges it for `|B| > 1` by composing the janitors one
-  binding at a time (a `Set<Binding>` with `finite()`, or a `Seq<Binding>`).
-  Welder's `compose_dep` composes two core sets at a time, and each step of
-  the induction has to re-establish `satisfies_dependency` for the partial
-  union, which did not fall out in the time available.
+  `widget_fanout_core_holds` is that statement, for any `B` and any
+  assignment `ids` of janitor ids that is injective on `B` and misses the sync
+  controller's. It is proved in two moves. `widget_janitors_core_holds`
+  composes the janitors of a subset of `B` one binding at a time, by induction
+  on the subset's size (`Set` is finite, so `remove` decreases `len`); every
+  step is Welder's `compose`, since no janitor has a liveness dependency, and
+  the compatibility of each step is one fact, that a janitor's guarantee -- a
+  List of outer copies and a Delete of its own mirror -- implies every other
+  janitor's rely, which constrains only Creates and Updates of mirrors
+  (`janitor_guarantee_implies_janitor_rely`). The union is then composed with
+  the sync controller by `compose_dep`: the janitors' ESRs, read off the
+  members of the union, are exactly `janitors_esr(k, B, ids)`, and recovering
+  the binding of a member's id is where the injectivity of `ids` is used.
+  `widget_pair_core_holds` remains the singleton case, which is what
+  `compose_all` puts beside the four other controllers.
 
 Hypotheses added to the theorems, in place of the lemmas that today prove
 them from the literal strings:
