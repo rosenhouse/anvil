@@ -29,8 +29,9 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   `TwoCluster`, with a proof that every execution of it is, under an injective
   relabeling of uids and resource versions (and of the `parent-uid`
   annotation through it), an execution of the one-store model. R1, R2, R3,
-  R3s and the janitor's delete soundness (less its uid-counter clause) are
-  then stated on two-store executions (`widget_two_cluster_theorem`; `widget_instance_two_cluster_theorem`
+  R3s and the janitor's delete soundness (less the clause that no uid the
+  primary counter may still issue names the parent) are then stated on
+  two-store executions (`widget_two_cluster_theorem`; `widget_instance_two_cluster_theorem`
   for the concrete cluster of the pair).
 
 ## 1. Design
@@ -206,10 +207,15 @@ execution from init and next, so the transfer is not circular).
 Both reconcilers commute with the relabeling. `widget_two_cluster_theorem`
 states R1, R2, R3 and R3s of every execution of the two-store model that runs
 the pair under its fairness assumptions and D3, each property read on the
-store its objects live in. It also states the janitor's delete soundness in a
-present-tense form: no outer copy in the primary store carries the parent uid
-of a mirror a janitor Delete would remove. The uid-counter clause and the
-"never will" half of the one-store fact do not survive the relabeling.
+store its objects live in. It also states the janitor's delete soundness: a
+janitor Delete in flight names a uid below the uid counter of the store of its
+kind, and no outer copy in the primary store carries the parent uid of a mirror
+the Delete would remove. The first clause is an invariant of the two-store
+model itself (the janitor deletes by the uid of a stored mirror), not a
+pull-back: a uid a store's counter never reaches relabels to a negative value,
+about which no one-store fact says anything, so the "never will" half of the
+one-store fact, that no uid at or above the counter names the parent, does not
+survive the relabeling.
 
 The cluster may run other controllers beside the pair
 (`widget_cluster_with_others`). Each other controller must meet hypotheses 1
