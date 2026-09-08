@@ -171,7 +171,6 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         }
     })
     .await?;
-    let alpha_seen_at = Instant::now();
     let (o, i) = (outer.clone(), inner_b.clone());
     wait_until("beta is mirrored into cluster b and reports Synced=True", TIMEOUT, move || {
         let (o, i) = (o.clone(), i.clone());
@@ -200,6 +199,11 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         Err(kube::Error::Api(ErrorResponse { code: 409, .. })) => info!("the outer namespace {} is already there", TENANT),
         Err(e) => return Err(failed("create the tenant namespace")(e)),
     }
+    // From here the second binding onto cluster a exists; the survival check
+    // below covers a janitor window that starts now, so that what it shows is
+    // that the refused binding ran no janitor, not that the window passed
+    // before it existed.
+    let refused_at = Instant::now();
     tenant_secrets
         .create(&PostParams::default(), &copy_of(&a_secret, TENANT, A_SECRET))
         .await
@@ -227,7 +231,7 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
             async move {
                 must_stay_absent(&ta, "gamma", "the refused binding wrote into its inner cluster").await?;
                 still_the_same_mirror(&i.get("alpha").await?, &u)?;
-                Ok(alpha_seen_at.elapsed() >= JANITOR_WINDOW)
+                Ok(refused_at.elapsed() >= JANITOR_WINDOW)
             }
         },
     )
