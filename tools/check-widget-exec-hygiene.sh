@@ -9,6 +9,13 @@ if grep -rn "resource_version()" "$dir"; then
     echo "widget sync exec code must not read resourceVersion values" >&2
     exit 1
 fi
+## DynamicObject::kind() reports the API server's kind string, not the model
+## kind, for custom resources (issue #19); the wrappers' has_kind is the exec
+## counterpart of a model kind test.
+if grep -rn '\.kind()' "$dir" | grep -v '^\s*//'; then
+    echo "widget sync exec code must test kinds through the wrappers' has_kind, not DynamicObject::kind()" >&2
+    exit 1
+fi
 count=$(grep -rh "as_annotation_value()" "$dir" | grep -v '^\s*//' | grep -o "as_annotation_value()" | wc -l | tr -d ' ')
 if [ "$count" != "1" ]; then
     echo "expected exactly one as_annotation_value() call in $dir, found $count" >&2
