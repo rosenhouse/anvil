@@ -293,6 +293,24 @@ pub open spec fn parent_absent_forever(k: SyncKind, b: Binding, parent: StringVi
     }
 }
 
+// A Delete the janitor has in flight is sound: it names an issued uid, and if it
+// would remove a mirror of `b`, no outer copy of `k` that selects `b`'s cluster
+// carries that mirror's parent uid, and no uid the counter may still issue names
+// it (parent_absent_forever).
+//
+// The cluster conjunct of parent_absent_forever -- only outer copies whose
+// selector names `b.name` are considered -- is admissible because it is exactly
+// what the janitor's own decision checks: it lists the outer copies of the
+// mirror's namespace and keeps the mirror only when one of them has the parent
+// uid *and* selects its cluster (doc/widget_sync_fanout_design.md, section 3.3).
+// Without the CEL immutability rule on the selector field it costs one case: a
+// parent that moved from `b`'s cluster to another while keeping its uid would
+// still be a stored outer copy carrying that uid, and this clause would not
+// forbid `b`'s janitor from collecting the mirror it left behind. Under the rule
+// that case cannot arise -- cluster_of is preserved across every update of an
+// installed object (Cluster::lemma_api_server_step_preserves_cluster_of) -- and
+// without it the collected mirror is one no parent points at any more, which is
+// the right outcome operationally but not what this clause says.
 pub open spec fn janitor_delete_is_sound(k: SyncKind, b: Binding, msg: Message, s: ClusterState) -> bool {
     let req = msg.content.get_delete_request();
     let obj = s.resources()[req.key];

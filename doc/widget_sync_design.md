@@ -275,13 +275,31 @@ states R1, R2, R3 and R3s of every execution of the two-store model that runs
 the pair under its fairness assumptions and D3, each property read on the
 store its objects live in. It also states the janitor's delete soundness: a
 janitor Delete in flight names a uid below the uid counter of the store of its
-kind, and no outer copy in the primary store carries the parent uid of a mirror
-the Delete would remove. The first clause is an invariant of the two-store
+kind, and no outer copy of `k` in the primary store *whose selector names the
+binding's cluster* carries the parent uid of a mirror the Delete would remove.
+The counter clause is an invariant of the two-store
 model itself (the janitor deletes by the uid of a stored mirror), not a
 pull-back: a uid a store's counter never reaches relabels to a negative value,
 about which no one-store fact says anything, so the "never will" half of the
 one-store fact, that no uid at or above the counter names the parent, does not
 survive the relabeling.
+
+The cluster conjunct narrows the second clause from every stored outer copy to
+the outer copies of the binding the janitor serves, and it is what the janitor's
+own decision checks (`doc/widget_sync_fanout_design.md`, section 3.3): the
+janitor lists the outer copies of the mirror's namespace and keeps the mirror
+only if one of them has its parent uid *and* selects its cluster. The clause
+therefore says exactly what the janitor looked at before deleting, which is what
+makes it provable at all once a parent may name a cluster other than the
+janitor's. What it costs is the case the CEL immutability rule rules out: if a
+parent could move from cluster `c1` to `c2` while keeping its uid, an outer copy
+carrying that parent uid would still be stored, selecting `c2`, and the statement
+would not forbid `c1`'s janitor from collecting the mirror it left behind. Under
+the rule that case does not arise, because `cluster_of` is preserved across every
+update of an installed object
+(`Cluster::lemma_api_server_step_preserves_cluster_of`); without the rule the
+mirror `c1`'s janitor collects is one no parent points at any more, which is the
+right outcome operationally but is not the clause as stated.
 
 The cluster may run other controllers beside the pair
 (`widget_cluster_with_others`). Each other controller must meet hypotheses 1
@@ -407,7 +425,18 @@ model reads only the namespace, name and spec of its object and tests nothing,
 so it commutes with the relabeling by computation, and its guarantee gives the
 pair's relies in the form the two-store theorem asks for (section 2.2).
 
-The disturber adds no assumption. What it buys is a witness that the relaxed
+The value it writes over the spec, `disturbed_spec`, is an uninterpreted
+function of the value it found: nothing the pair proves depends on which value
+it is. One thing is assumed about it, and only in the model:
+`disturbed_spec_changes_the_spec` (`model/install.rs`) says the edit is really an
+edit, `disturbed_spec(v) != v` for every `v`. Without it the identity would be a
+model of `disturbed_spec`, and a disturber that writes the spec back unchanged is
+not a disturbance -- the premises of R1 and R2, "no edit of the mirror's spec is
+in flight", would be met by a Patch that changes nothing. The axiom is
+model-only: the disturber stands for a `kubectl edit` and has no exec twin, and
+it is inventoried below with the other trusted items.
+
+The disturber adds no assumption beyond that one. What it buys is a witness that the relaxed
 sync rely (any Delete, any Patch) is satisfiable by something that deletes and
 edits mirrors, and that the premises of R1 and R2 are the only place where "the
 disturbance has stopped" is said. A cluster-model step in the style of the pod
@@ -430,8 +459,10 @@ which names the model kind of a configured kind in a cluster. `π` is
 Trusted beyond the specification, under `widget_sync_controller/`: one
 `external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
 which builds the outer status, its three conditions included, by hand to match
-the spec's definition — the three `Marshallable` instances of the reconcile
-states in `model/install.rs`, and one uninterpreted spec function,
+the spec's definition — four `external_body` items in `model/install.rs` — the
+three `Marshallable` instances of the reconcile states and
+`disturbed_spec_changes_the_spec`, the model-only axiom that the disturber's edit
+changes the spec (section 2.4) — and one uninterpreted spec function,
 `default_status_rest()` in `trusted/spec_types.rs`, the mirrored remainder of a
 status that was never written.
 

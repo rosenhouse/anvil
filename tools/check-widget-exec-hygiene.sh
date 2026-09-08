@@ -26,7 +26,7 @@ fi
 ## (section 3). A new external_body or external item anywhere under the
 ## controller must be added there deliberately, so its location is pinned here.
 root=src/controllers/widget_sync_controller
-expected="$root/model/install.rs:3
+expected="$root/model/install.rs:4
 $root/trusted/exec_types.rs:1"
 actual=$(grep -rc --exclude-dir=target --exclude-dir='target-*' 'external_body' "$root" | grep -v ':0$' | sort)
 if [ "$actual" != "$expected" ]; then

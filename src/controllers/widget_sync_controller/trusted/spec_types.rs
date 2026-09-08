@@ -103,6 +103,62 @@ pub proof fn lemma_inner_kind_same_namespace_injective(k: SyncKind, ns: StringVi
     }
 }
 
+// Two configured kinds with distinct outer kinds share no mirror kind, whatever
+// bindings the two are read at -- including bindings no boot check has seen, which
+// is what the relies quantify over (is_inner_kind). This is what makes two kinds
+// compose: neither one's sync controller ever writes an object of the other's
+// kinds.
+pub proof fn lemma_kinds_of_distinct_configurations(k1: SyncKind, k2: SyncKind)
+    requires
+        sync_kind_ok(k1),
+        sync_kind_ok(k2),
+        k1.outer_kind != k2.outer_kind,
+    ensures
+        k1.name != k2.name,
+        forall |b: Binding| #[trigger] inner_kind(k1, b) != k2.outer_kind,
+        forall |b: Binding| #[trigger] inner_kind(k2, b) != k1.outer_kind,
+        !is_inner_kind(k2, k1.outer_kind),
+        !is_inner_kind(k1, k2.outer_kind),
+        forall |b1: Binding, b2: Binding| #![trigger inner_kind(k1, b1), inner_kind(k2, b2)]
+            inner_kind(k1, b1) != inner_kind(k2, b2),
+        forall |b1: Binding| #[trigger] is_inner_kind(k1, inner_kind(k1, b1)) && !is_inner_kind(k2, inner_kind(k1, b1)),
+        forall |b2: Binding| #[trigger] is_inner_kind(k2, inner_kind(k2, b2)) && !is_inner_kind(k1, inner_kind(k2, b2)),
+{
+    assert(k1.name != k2.name);
+    assert forall |b: Binding| #[trigger] inner_kind(k1, b) != k2.outer_kind by {
+        lemma_remote_kind_name_is_not_primary(k2.name, k1.name, b);
+    }
+    assert forall |b: Binding| #[trigger] inner_kind(k2, b) != k1.outer_kind by {
+        lemma_remote_kind_name_is_not_primary(k1.name, k2.name, b);
+    }
+    assert forall |b1: Binding, b2: Binding| #![trigger inner_kind(k1, b1), inner_kind(k2, b2)]
+        inner_kind(k1, b1) != inner_kind(k2, b2) by {
+        lemma_remote_kind_names_of_distinct_kinds(k1.name, k2.name, b1, b2);
+    }
+    lemma_outer_kind_is_not_any_inner(k1);
+    lemma_outer_kind_is_not_any_inner(k2);
+    assert(!is_inner_kind(k2, k1.outer_kind)) by {
+        assert forall |b: Binding| k1.outer_kind != #[trigger] inner_kind(k2, b) by {
+            lemma_remote_kind_name_is_not_primary(k1.name, k2.name, b);
+        }
+    }
+    assert(!is_inner_kind(k1, k2.outer_kind)) by {
+        assert forall |b: Binding| k2.outer_kind != #[trigger] inner_kind(k1, b) by {
+            lemma_remote_kind_name_is_not_primary(k2.name, k1.name, b);
+        }
+    }
+    assert forall |b1: Binding| #[trigger] is_inner_kind(k1, inner_kind(k1, b1)) && !is_inner_kind(k2, inner_kind(k1, b1)) by {
+        assert forall |b2: Binding| inner_kind(k1, b1) != #[trigger] inner_kind(k2, b2) by {
+            lemma_remote_kind_names_of_distinct_kinds(k1.name, k2.name, b1, b2);
+        }
+    }
+    assert forall |b2: Binding| #[trigger] is_inner_kind(k2, inner_kind(k2, b2)) && !is_inner_kind(k1, inner_kind(k2, b2)) by {
+        assert forall |b1: Binding| inner_kind(k2, b2) != #[trigger] inner_kind(k1, b1) by {
+            lemma_remote_kind_names_of_distinct_kinds(k1.name, k2.name, b1, b2);
+        }
+    }
+}
+
 // Distinct bindings give distinct mirror kinds.
 pub proof fn lemma_inner_kind_injective(k: SyncKind, b1: Binding, b2: Binding)
     requires

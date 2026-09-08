@@ -323,9 +323,24 @@ model_kind(k: KindName, cluster: ClusterIdView) -> Kind
 
 with `k` the CRD name `<plural>.<group>` (`widgets.anvil.dev`). Since `k`,
 `ns` and `name` are DNS names and contain no `@`, `model_kind` is
-injective; the lemma is proved once on the spec side and is what the
-distinctness hypotheses of the theorems are discharged with for a concrete
-configuration.
+injective; the lemma is proved once on the spec side
+(`kubernetes_api_objects/spec/model_kind.rs`: `lemma_model_kind_injective`,
+`lemma_model_kind_distinct`, `lemma_remote_kind_name_is_not_primary`) and is what
+every distinctness hypothesis of the theorems is discharged with, for *any*
+configuration and not only a concrete one.
+
+"No `@`" is a hypothesis of those lemmas, and it is a real hypothesis of the
+theorems too: `sync_kind_ok(k)` (the CRD name is free of `@`, and the outer kind
+is the primary model kind of that name) and `binding_ok(b)` (the namespace free
+of `@` and `/`, the cluster name free of `@`), in
+`widget_sync_controller/trusted/spec_types.rs`. The boot checks are what
+discharge them in the deployment: `check_kind_name`
+(`shim_layer/crd_shape.rs`), run on each configured kind's CRD name before
+anything else, refuses a name carrying `@`, and `binding_of_secret`
+(`shim_layer/bindings.rs`) refuses a Secret whose namespace or cluster name
+carries `@` or `/`. A configuration that reaches the running controller has
+therefore already been checked for exactly what the proofs assume, and the demo
+configuration discharges them from its literals in one line.
 
 `ClusterId` becomes `Primary | Remote(ClusterRef { namespace, name })`, a
 value; the wrapper's `has_kind(obj)` compares the object's tag and kube
@@ -345,17 +360,25 @@ is only an adapter from a type-level reconciler. The pair's models are
 built directly:
 
 ```
-sync_model(k: SyncKind) -> ReconcileModel          // kind: k.outer_kind
-janitor_model(k: SyncKind, b: Binding) -> ReconcileModel   // kind: inner_kind(k, b)
-SyncKind { outer_kind: Kind, name: KindName, selector: ClusterSelector }
+widget_sync_controller_model(k: SyncKind) -> ControllerModel        // kind: k.outer_kind
+widget_janitor_controller_model(k: SyncKind, b: Binding) -> ControllerModel  // kind: inner_kind(k, b)
+SyncKind { outer_kind: Kind, name: KindName, selector: ClusterSelector, bindings: Set<Binding> }
 inner_kind(k, b) := model_kind(k.name, Remote(b))
 ```
+
+(`model/install.rs`. `bindings` is the finite set of section 3.2, added after this
+was first written; section 5.2 says what it is for.)
 
 The exec reconcilers carry the same data (`SyncReconciler { kind, registry
 entry }`), and their conformance proofs relate them to the model with the
 data as a parameter. The exec `Reconciler` trait is static today; a
-`DynReconciler` variant with `&self` is added to the framework, with the
-shim's `reconcile_with` accepting either.
+`DynReconciler` variant with `&self` is added to the framework. The shim keeps
+two entry points rather than one overloaded `reconcile_with`:
+`reconcile_with` for a static `Reconciler` and `reconcile_dyn_with` for a
+`DynReconciler` built per reconcile from a factory. What they share is the
+`ReconcileDriver` trait and `run_reconcile`, the one loop; `StaticDriver` and
+`DynDriver` are its two implementations
+(`shim_layer::controller_runtime`).
 
 ### 3.2 The sync reconciler
 
@@ -379,9 +402,11 @@ reconcile is the one of the main design, section 1.2, with two changes:
   refused) and is there so that every Create the model emits names a mirror kind
   of `k.bindings` for *any* triggering object, which is what `models_ok` of the
   two-store refinement asks (section 5.2).
-- The mirror key is `inner_key(k, outer) = (inner_kind(k, cluster_of(outer)), ns, name)`;
-  the Get, Create and Patch of the mirror carry that kind, and the shim
-  routes them to the binding `(ns, cluster_of(outer))`.
+- The mirror key is `inner_key(k, outer) = (inner_kind(k, binding_of(k, outer)), ns, name)`,
+  where `binding_of(k, outer) = (outer.metadata.namespace, cluster_of(outer))` --
+  the mirror kind carries the namespace as well as the cluster name, because a
+  binding is the pair. The Get, Create and Patch of the mirror carry that kind,
+  and the shim routes them to the binding `binding_of(k, outer)`.
 
 Exec side, `k.bindings` is a snapshot: the dynamic runners hold a *factory*
 (`shim_layer::controller_runtime::ReconcilerFactory`) rather than a reconciler
@@ -402,6 +427,22 @@ one change: the parent is listed when some listed outer object has the
 mirror's parent uid **and** `cluster_of` equal to the binding's cluster
 name. Under the CEL rule the second conjunct is redundant; without it the
 janitor of the old cluster collects the mirror of a parent that moved.
+
+R3's premise is the other side of that asymmetry: `parent_absent` says no outer
+copy of the kind carries the mirror's parent uid, with nothing said about which
+cluster such a copy would select, while the janitor's decision does check the
+cluster. So there is a state R3 does not speak about and the janitor still acts
+on: a stored outer copy with the mirror's parent uid that selects *another*
+cluster, which the janitor reads as an absent parent and collects. Under the CEL
+rule that state cannot arise -- the parent uid was issued for one object, and
+that object's `cluster_of` never changes
+(`Cluster::lemma_api_server_step_preserves_cluster_of`), so an outer copy with
+that uid selects the binding it was created in -- and a uid is never reissued,
+so no later object carries it either. Without the rule the janitor collects a
+mirror whose parent has moved away, which is what one wants operationally; it is
+simply not the case R3 is stated for. The delete-soundness invariant, which does
+carry the cluster conjunct, is the statement that covers it
+(`doc/widget_sync_design.md`, section 2.2).
 
 A binding's janitors start when the binding is bound and its claim is
 held, and stop when the Secret goes away. A mirror in a cluster whose
@@ -484,6 +525,20 @@ The statements of the main design, section 3.3, with parameters:
   ESRs, discharged by composing the janitors one binding at a time. Kinds
   compose with each other and with the four other controllers of the
   repository by kind disjointness, exactly as the pair does today.
+  `widget_two_kind_core_holds` (`composition/widget_two_kinds.rs`) is the first
+  of those: two kinds `k1`, `k2` with `k1.outer_kind != k2.outer_kind` (and
+  `sync_kind_ok` of both) compose, because each side's guarantee already implies
+  the other's relies -- a sync controller touches only its own outer kind and its
+  own mirror kinds, a janitor only its own outer kind (a List) and its own mirror
+  (a Delete). The disjointness of the mirror kinds is
+  `lemma_kinds_of_distinct_configurations`, and it holds for *every* binding, not
+  only the configured ones, because the relies quantify over `is_inner_kind`.
+  Neither side has a liveness dependency left, so this is plain `compose`.
+  `two_kind_demo_core_holds` instantiates it for `widgets.anvil.dev` and
+  `gadgets.anvil.dev` in one cluster. `core_holds_for`
+  (`composition/compose_all.rs`) is the other: the four controllers of the
+  repository beside the sync controller and janitors of any configured kind whose
+  outer kind is none of the four framework kinds.
 
   `widget_fanout_core_holds` is that statement, for any `B` and any
   assignment `ids` of janitor ids that is injective on `B` and misses the sync
@@ -498,18 +553,33 @@ The statements of the main design, section 3.3, with parameters:
   the sync controller by `compose_dep`: the janitors' ESRs, read off the
   members of the union, are exactly `janitors_esr(k, B, ids)`, and recovering
   the binding of a member's id is where the injectivity of `ids` is used.
-  `widget_pair_core_holds` remains the singleton case, which is what
-  `compose_all` puts beside the four other controllers, and
-  `widget_fanout_instance_core_holds` is a closed two-binding instance: one kind,
-  the bindings `default/inner` and `default/second`, a janitor for each, and the
-  three model kinds they need installed.
+  `widget_pair_core_holds` is the singleton instance of it -- a call plus set
+  extensionality, since the janitors' core set of a one-element binding set has
+  the one janitor's id as its only member -- and it is what
+  `composition/widget_disturber_reconciler.rs` puts beside the disturber.
+  `widget_core_holds` closes the statement for the cluster of *any*
+  configuration: `widget_cluster_for(k, spec_ok, sync_id, ids)` installs
+  `k.outer_kind` and `inner_kind(k, b)` for each `b ∈ k.bindings` and runs the
+  sync controller at `sync_id` and one janitor per binding at the ids an
+  injective `ids` gives, under `sync_kind_ok(k)`, `binding_ok` of each binding,
+  and `ids_ok`. `widget_demo_core_holds` and `widget_fanout_instance_core_holds`
+  are two applications of it: the demo's one binding, and a two-binding cluster
+  with the bindings `default/inner` and `default/second`, a janitor for each and
+  the three model kinds they need installed.
 
 Hypotheses added to the theorems, in place of the lemmas that today prove
-them from the literal strings:
+them from the literal strings. `sync_kind_ok(k)` and `binding_ok(b)` are real
+hypotheses of every statement that needs distinctness -- of the general theorems
+and of the closed ones alike, since the closed ones are now stated for any
+configuration. The boot checks discharge them for a running controller
+(`check_kind_name` and `binding_of_secret`, section 2.4); the demo configuration
+discharges them from its literals in one line, and that is the only thing the
+literals are used for.
 
 - the model kinds of the configuration are pairwise distinct custom kinds
-  (discharged for a concrete configuration by the injectivity of
-  `model_kind`);
+  (discharged by the injectivity of `model_kind`:
+  `lemma_model_kind_distinct`, `lemma_inner_kind_injective`,
+  `lemma_kinds_of_distinct_configurations`, never by the length of a name);
 - every kind is installed with `synced_installed_type(spec_ok, selector)`,
   the same `spec_ok` and selector for the outer kind and each of its inner
   kinds (schema parity);
@@ -615,7 +685,12 @@ The assumptions of the main design, section 3.5, plus:
   API server. Enforced operationally by the claim (section 1.3).
 - Schema parity per kind between the outer cluster and every inner
   cluster, and the shape of section 2.2 not shrinking while the
-  controller runs.
+  controller runs. The immutability rule on the selector field (section 1.1) is
+  part of that parity, not a property of the outer CRD alone: the theorems
+  install the outer kind and every inner kind with the same
+  `synced_installed_type(spec_ok, selector)`, whose `valid_transition` *is* the
+  rule, so an inner CRD that does not carry it is a parity failure like any
+  other schema drift.
 - The registry's `model_kind` is the model kind of the objects the shim
   returns for a binding, which the model cannot check (the trusted
   routing of section 2.2 of the main design, now per binding).

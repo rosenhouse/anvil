@@ -151,6 +151,33 @@ pub proof fn lemma_remote_kind_name_is_not_primary(k1: StringView, k2: StringVie
     lemma_free_of_is_not_split(k1, k2, tail, '@');
 }
 
+// Two kinds with different names have no mirror kind in common, whatever the
+// clusters. Unlike lemma_remote_kind_name_injective this asks nothing of the
+// ClusterRefs: the '@' of the first name already splits both sides, so the kind
+// names must agree. It is what tells the mirror kinds of two configured kinds
+// apart, where the bindings are whatever an object's selector named.
+pub proof fn lemma_remote_kind_names_of_distinct_kinds(k1: StringView, k2: StringView, r1: ClusterRefView, r2: ClusterRefView)
+    requires
+        kind_name_ok(k1),
+        kind_name_ok(k2),
+        k1 != k2,
+    ensures
+        remote_kind_name(k1, r1) != remote_kind_name(k2, r2),
+{
+    lemma_at_sign_is_seq();
+    let tail1 = r1.namespace + slash() + r1.name;
+    let tail2 = r2.namespace + slash() + r2.name;
+    assert(remote_kind_name(k1, r1) == k1 + seq!['@'] + tail1) by {
+        assert(k1 + at_sign() + r1.namespace + slash() + r1.name =~= k1 + seq!['@'] + tail1);
+    }
+    assert(remote_kind_name(k2, r2) == k2 + seq!['@'] + tail2) by {
+        assert(k2 + at_sign() + r2.namespace + slash() + r2.name =~= k2 + seq!['@'] + tail2);
+    }
+    if remote_kind_name(k1, r1) == remote_kind_name(k2, r2) {
+        lemma_split_at_separator(k1, k2, tail1, tail2, '@');
+    }
+}
+
 // model_kind is injective on well-formed inputs: two equal model kinds come from
 // the same kind name in the same cluster.
 pub proof fn lemma_model_kind_injective(k1: StringView, c1: ClusterIdView, k2: StringView, c2: ClusterIdView)
