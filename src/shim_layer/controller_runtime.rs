@@ -238,7 +238,10 @@ impl ClusterClients {
 
 // remote_clients_from_kubeconfig builds the pair of clients for another cluster
 // from a kubeconfig file (e.g. one mounted from a Secret). `request_timeout` bounds
-// each reconcile request; the watch client keeps kube's defaults.
+// each reconcile request; the watch client keeps kube's defaults. It is for a
+// process with one mounted credential; the widget sync controller reads a
+// binding's kubeconfig out of its Secret instead
+// (remote_clients_from_kubeconfig_yaml, shim_layer::bindings).
 //
 // The credential should be a `tokenFile` (a relative path is resolved against the
 // kubeconfig's directory): kube re-reads it at least once a minute, so a rotated
@@ -638,7 +641,10 @@ where
 // secondary watch on objects of the kind `watched_entry` in `watched_cluster`:
 // a change to one of them triggers a reconcile of the object of the same
 // namespace and name of the controller's kind, the same-name trigger of
-// run_controller_with_same_name_watch.
+// run_controller_with_same_name_watch. The watched cluster is fixed at
+// construction, so this is the runner of a process whose remote cluster is
+// configured once; a controller whose bindings come and go takes the same
+// triggers through run_dyn_controller_with_triggers.
 pub async fn run_dyn_controller_with_same_name_watch<R, E>(
     clusters: ClusterClients,
     reconciler: R,
