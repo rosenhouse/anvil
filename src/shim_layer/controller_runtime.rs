@@ -22,7 +22,7 @@ use kube::{
 };
 use kube_core::{ErrorResponse, NamespaceResourceScope};
 use serde::{de::DeserializeOwned, Serialize};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use crate::crds::Error;
 use std::sync::Arc;
 use std::time::Duration;
@@ -155,7 +155,7 @@ where
     info!("starting controller");
     Controller::new(crs, watcher::Config::default()) // The controller's reconcile is triggered when a CR is created/updated
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -207,7 +207,7 @@ where
         .owns(Api::<Pod>::all(client.clone()), watcher::Config::default()) // Watch owned Pods
         .owns(Api::<O>::all(client.clone()), watcher::Config::default()) // Watch owned CRs of type O
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -222,8 +222,12 @@ where
 // run_controller_in_clusters runs a controller whose custom resource K lives in
 // the cluster its wrapper type R::K is bound to (its watch and quorum reads go to
 // that cluster's client) and whose requests may target either cluster.
+// `field_manager`, if set, is sent as the fieldManager of every create, update
+// and patch the controller issues, so the API server records the controller by
+// that name in the objects' managedFields.
 pub async fn run_controller_in_clusters<K, R, E>(
     clusters: ClusterClients,
+    field_manager: Option<String>,
     fault_injection: bool,
 ) -> Result<()>
 where
@@ -256,7 +260,7 @@ where
     info!("starting controller (custom resource in {:?} cluster)", cr_cluster);
     Controller::new(crs, watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -277,6 +281,7 @@ where
 pub async fn run_controller_with_same_name_watch<K, R, E, O>(
     clusters: ClusterClients,
     watched_cluster: ClusterId,
+    field_manager: Option<String>,
     fault_injection: bool,
 ) -> Result<()>
 where
@@ -322,7 +327,7 @@ where
                 .map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
         })
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -363,6 +368,9 @@ where
     // The custom resource is read from the cluster it lives in; every other request
     // is routed by the cluster named in its ApiResource.
     let cr_client = ctx.clusters.client_of(ctx.cr_cluster)?;
+    // Every write below carries the controller's field manager, if it has one.
+    let post_params = PostParams { field_manager: ctx.field_manager.clone(), ..PostParams::default() };
+    let patch_params = PatchParams { field_manager: ctx.field_manager.clone(), ..PatchParams::default() };
 
     let cr_name = cr.meta().name.as_ref().ok_or_else(|| {
         Error::ShimLayerError("Custom resource misses \".metadata.name\"".to_string())
@@ -400,7 +408,14 @@ where
     // Wrap the custom resource with Verus-friendly wrapper type (which has a ghost version, i.e., view)
     let cr = get_cr_resp.unwrap();
     info!(
-        "{} Get cr {}",
+        object = %cr_key,
+        generation = cr.meta().generation,
+        "{} Get cr done",
+        log_header
+    );
+    debug!(
+        object = %cr_key,
+        "{} cr {}",
         log_header,
         k8s_openapi::serde_json::to_string(&cr).unwrap()
     );
@@ -445,7 +460,7 @@ where
                                     kube_resp = KubeAPIResponse::GetResponse(KubeGetResponse {
                                         res: Err(kube_error_to_api_error(&err)),
                                     });
-                                    info!("{} Get {} failed with error: {}", log_header, key, err);
+                                    log_request_failure(&log_header, "Get", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::GetResponse(KubeGetResponse {
@@ -469,7 +484,7 @@ where
                                     kube_resp = KubeAPIResponse::ListResponse(KubeListResponse {
                                         res: Err(kube_error_to_api_error(&err)),
                                     });
-                                    info!("{} List {} failed with error: {}", log_header, key, err);
+                                    log_request_failure(&log_header, "List", cluster, &key, &err);
                                 }
                                 Ok(obj_list) => {
                                     kube_resp = KubeAPIResponse::ListResponse(KubeListResponse {
@@ -491,7 +506,7 @@ where
                                 &create_req.namespace,
                                 create_req.api_resource.as_kube_ref(),
                             );
-                            let pp = PostParams::default();
+                            let pp = post_params.clone();
                             let key = create_req.key();
                             let obj_to_create = create_req.obj.into_kube();
                             match api.create(&pp, &obj_to_create).await {
@@ -500,10 +515,7 @@ where
                                         KubeAPIResponse::CreateResponse(KubeCreateResponse {
                                             res: Err(kube_error_to_api_error(&err)),
                                         });
-                                    info!(
-                                        "{} Create {} failed with error: {}",
-                                        log_header, key, err
-                                    );
+                                    log_request_failure(&log_header, "Create", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp =
@@ -516,8 +528,9 @@ where
                         }
                         KubeAPIRequest::DeleteRequest(delete_req) => {
                             check_fault_timing = true;
+                            let cluster = delete_req.api_resource.cluster();
                             let api = Api::<kube::api::DynamicObject>::namespaced_with(
-                                ctx.clusters.client_for(&delete_req.api_resource)?.clone(),
+                                ctx.clusters.client_of(cluster)?.clone(),
                                 &delete_req.namespace,
                                 delete_req.api_resource.as_kube_ref(),
                             );
@@ -534,10 +547,7 @@ where
                                         KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
                                             res: Err(kube_error_to_api_error(&err)),
                                         });
-                                    info!(
-                                        "{} Delete {} failed with error: {}",
-                                        log_header, key, err
-                                    );
+                                    log_request_failure(&log_header, "Delete", cluster, &key, &err);
                                 }
                                 Ok(_) => {
                                     kube_resp =
@@ -556,7 +566,7 @@ where
                                 &update_req.namespace,
                                 update_req.api_resource.as_kube_ref(),
                             );
-                            let pp = PostParams::default();
+                            let pp = post_params.clone();
                             let key = update_req.key();
                             let obj_to_update = update_req.obj.into_kube();
                             match api.replace(&update_req.name, &pp, &obj_to_update).await {
@@ -565,10 +575,7 @@ where
                                         KubeAPIResponse::UpdateResponse(KubeUpdateResponse {
                                             res: Err(kube_error_to_api_error(&err)),
                                         });
-                                    info!(
-                                        "{} Update {} failed with error: {}",
-                                        log_header, key, err
-                                    );
+                                    log_request_failure(&log_header, "Update", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp =
@@ -587,7 +594,7 @@ where
                                 &update_status_req.namespace,
                                 update_status_req.api_resource.as_kube_ref(),
                             );
-                            let pp = PostParams::default();
+                            let pp = post_params.clone();
                             let key = update_status_req.key();
                             let obj_to_update = update_status_req.obj.into_kube();
                             // Here we assume serde_json always succeed
@@ -606,10 +613,7 @@ where
                                             res: Err(kube_error_to_api_error(&err)),
                                         },
                                     );
-                                    info!(
-                                        "{} UpdateStatus {} failed with error: {}",
-                                        log_header, key, err
-                                    );
+                                    log_request_failure(&log_header, "UpdateStatus", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::UpdateStatusResponse(
@@ -639,14 +643,14 @@ where
                                 .unwrap_or(serde_json::Value::Null);
                             let patch = json_patch_with_tests(&patch_req.tests, "/spec", spec);
                             match api
-                                .patch(&patch_req.name, &PatchParams::default(), &Patch::<()>::Json(patch))
+                                .patch(&patch_req.name, &patch_params, &Patch::<()>::Json(patch))
                                 .await
                             {
                                 Err(err) => {
                                     kube_resp = KubeAPIResponse::PatchResponse(KubePatchResponse {
                                         res: Err(kube_error_to_api_error(&err)),
                                     });
-                                    info!("{} Patch {} failed with error: {}", log_header, key, err);
+                                    log_request_failure(&log_header, "Patch", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::PatchResponse(KubePatchResponse {
@@ -674,14 +678,14 @@ where
                                 .unwrap_or(serde_json::Value::Null);
                             let patch = json_patch_with_tests(&patch_status_req.tests, "/status", status);
                             match api
-                                .patch_status(&patch_status_req.name, &PatchParams::default(), &Patch::<()>::Json(patch))
+                                .patch_status(&patch_status_req.name, &patch_params, &Patch::<()>::Json(patch))
                                 .await
                             {
                                 Err(err) => {
                                     kube_resp = KubeAPIResponse::PatchStatusResponse(KubePatchStatusResponse {
                                         res: Err(kube_error_to_api_error(&err)),
                                     });
-                                    info!("{} PatchStatus {} failed with error: {}", log_header, key, err);
+                                    log_request_failure(&log_header, "PatchStatus", cluster, &key, &err);
                                 }
                                 Ok(obj) => {
                                     kube_resp = KubeAPIResponse::PatchStatusResponse(KubePatchStatusResponse {
@@ -1027,11 +1031,77 @@ where
 }
 
 // Data is passed to reconcile_with.
-// It carries the clients that communicate with the Kubernetes API servers, and
-// which of them hosts the custom resource this controller reconciles.
+// It carries the clients that communicate with the Kubernetes API servers,
+// which of them hosts the custom resource this controller reconciles, and the
+// fieldManager the controller's writes are sent with (None: unset, so the API
+// server records them under the client's default manager name).
 pub struct Data {
     pub clusters: ClusterClients,
     pub cr_cluster: ClusterId,
+    pub field_manager: Option<String>,
+}
+
+// The message the API server puts on a 422 it raises itself while applying a
+// JSON patch (apiserver's jsonPatcher answers a failed Apply with
+// NewGenericServerResponse(422, ...) and no resource, so the message is this
+// fixed string). A 422 raised by validation of the patched object names the
+// object and the offending field instead.
+const JSON_PATCH_REJECTED_MESSAGE: &str = "the server rejected our request due to an error in our request";
+
+// is_failed_patch_test reports whether `err` is the API server rejecting a JSON
+// patch because it could not be applied, which for the patches this shim builds
+// (json_patch_with_tests: tests, then one `add`) means a `test` operation failed:
+// the object's uid or generation changed between the read the reconciler decided
+// on and the write. That is the expected outcome of a lost race, not a fault.
+pub fn is_failed_patch_test(err: &kube::Error) -> bool {
+    match err {
+        kube::Error::Api(ErrorResponse { code: 422, reason, message, .. }) => {
+            reason == "Invalid" && message.starts_with(JSON_PATCH_REJECTED_MESSAGE)
+        }
+        _ => false,
+    }
+}
+
+fn is_not_found(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(ErrorResponse { reason, .. }) if reason == "NotFound")
+}
+
+// log_request_failure records a failed API request with the object key, the
+// request kind, the cluster and the error as fields. A NotFound answer to a Get
+// or Delete is an ordinary outcome the reconcilers branch on (create the missing
+// object, treat the deleted one as gone), so it stays at info; every other
+// failure is a warning. A Patch or PatchStatus rejected by its own test is
+// reported as such: the object changed under the reconciler, which ends this
+// reconcile in error and is retried by error_policy.
+fn log_request_failure(log_header: &str, request: &'static str, cluster: ClusterId, key: &str, err: &kube::Error) {
+    if is_not_found(err) && (request == "Get" || request == "Delete") {
+        info!(
+            object = %key,
+            request = request,
+            cluster = ?cluster,
+            "{} {} {} failed with NotFound",
+            log_header, request, key
+        );
+    } else if is_failed_patch_test(err) {
+        warn!(
+            object = %key,
+            request = request,
+            cluster = ?cluster,
+            cause = "patch test failed",
+            error = %err,
+            "{} {} {} rejected: the object changed since it was read, the reconcile is retried",
+            log_header, request, key
+        );
+    } else {
+        warn!(
+            object = %key,
+            request = request,
+            cluster = ?cluster,
+            error = %err,
+            "{} {} {} failed",
+            log_header, request, key
+        );
+    }
 }
 
 // kube_error_to_api_error translates the API error from kube-rs APIs
