@@ -16,8 +16,9 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   `metadata.generation`. No owner references cross clusters; neither reconciler
   uses finalizers.
 - Proved (section 3): R1, the mirror eventually and stably carries the outer
-  spec; R2, the outer status eventually and stably carries the inner status for
-  that spec, stamped with the outer generation; R3, a mirror whose parent is
+  spec; R2, the outer status eventually and stably is the one derived from the
+  inner status for that spec (its fields mirrored, its conditions merged),
+  stamped with the outer generation; R3, a mirror whose parent is
   gone is eventually removed; R3s, no mirror pointing at a departed parent
   persists. All four are ESR-style properties in the sense of the Anvil paper.
 - Assumed: D3, the inner side eventually releases terminating objects; exactly
@@ -54,9 +55,12 @@ reconciler refuses to write an inner object it does not own.
   own finalizers on mirrors; the janitor's Delete then stamps a deletion
   timestamp and the object lingers until the inner side releases it (D3).
 - Refuse to adopt. The sync reconciler writes an existing inner object only if
-  it carries the label and its `parent-uid` equals the current outer uid.
-  Anything else is reported as `ForeignObject` and never touched. Adoption
-  would let anyone who can create `Outer{ns,name}` overwrite `Inner{ns,name}`.
+  it carries the label and its `parent-uid` equals the current outer uid. An
+  object with the label and a `parent-uid` annotation naming another uid is a
+  mirror of a previous incarnation: it is reported as `StaleMirror` and left
+  to the janitor. Anything else is reported as `ForeignObject`. Neither is
+  ever touched. Adoption would let anyone who can create `Outer{ns,name}`
+  overwrite `Inner{ns,name}`.
 - Chains compose and cycles are inert, by the adoption rule rather than by
   proof: a second sync controller in the inner
   cluster sees our mirror as its outer copy; a cycle back finds an unlabeled
@@ -70,24 +74,48 @@ same-named inner `Widget`s (a latency optimization; liveness rests on requeue).
 ```
 Init
  └─ Get Inner{ns,name}                                   (inner cluster, quorum read)
-      ├─ NotFound → Create Inner{ns,name; label; parent-uid=u; spec=σ} → Done
-      ├─ Found, deletionTimestamp set → status Synced=False/InnerTerminating → Done
-      ├─ Found, not ours (label missing or parent-uid ≠ u) → status Synced=False/ForeignObject → Done
-      ├─ Found, ours, spec ≠ σ → Patch Inner {test uid, test generation; add /spec := σ} → Done
+      ├─ NotFound → Create Inner{ns,name; label; parent-uid=u; spec=σ}
+      │     ├─ Ok → Done
+      │     └─ error e → report Failed(e)
+      ├─ error e → report Failed(e)
+      ├─ Found, deletionTimestamp set → status InnerTerminating → Done
+      ├─ Found, label and parent-uid present, parent-uid ≠ u → status StaleMirror → Done
+      ├─ Found, label or parent-uid missing → status ForeignObject → Done
+      ├─ Found, ours, spec ≠ σ → Patch Inner {test uid, test generation; add /spec := σ}
+      │     ├─ Ok → Done
+      │     └─ error e → report Failed(e)
       ├─ Found, ours, spec == σ, Inner.status.observedGeneration == Inner.metadata.generation
-      │     → status { observedGeneration: g, mirrored fields: π(Inner.status),
-      │                Synced: True, condition.observedGeneration: g }
-      └─ Found, ours, spec == σ, inner not caught up
-            → status { observedGeneration: g, mirrored fields: as previously reported,
-                       Synced: False/InnerConverging, condition.observedGeneration: g }
-      "status X" means: Outer.status == X → Done,
-                        else PatchStatus Outer {test uid=u, test generation=g; add /status := X} → Done
-Error (any unexpected response) → requeue
+      │     → status Synced, from Inner.status → Done
+      └─ Found, ours, spec == σ, inner not caught up → status InnerConverging → Done
+      "status c[, from S]" means: X := outer_status_for(g, S or Outer.status, c) (section 3.3);
+                                  Outer.status == X → Done,
+                                  else PatchStatus Outer {test uid=u, test generation=g; add /status := X} → Done
+      "report Failed(e)" means:   X := outer_status_for(g, Outer.status, Failed(reason(e)));
+                                  Outer.status == X → Error,
+                                  else PatchStatus Outer {test uid=u, test generation=g; add /status := X}
+                                       → Error, whatever the answer (the write is not retried)
+Error (any other unexpected response, and after every report) → requeue
 ```
 
 `π` projects a status onto the mirrored fields (everything except
-`observedGeneration` and `conditions`). The reconciler never writes outer spec
-or metadata, never writes inner status or metadata, never deletes.
+`observedGeneration` and `conditions`); `outer_status_for` (section 3.3)
+builds the outer status from the generation, a source status and the
+outcome. The reconciler never writes outer spec or metadata, never writes
+inner status or metadata, never deletes.
+
+**Error reasons.** `reason(e)` maps the model's API errors to the reason of
+the `Synced` condition: `Forbidden` for an authorization error;
+`InnerUnreachable` for `Timeout`, `ServerTimeout` and `InternalError`;
+`CreateFailed` for a `NotFound` answering the Create (the inner namespace is
+missing); `Rejected` for `Invalid`, `BadRequest` and `NotSupported`;
+`RequestFailed` otherwise (a `NotFound` answering the Patch, an
+`AlreadyExists`, a `Conflict`). A failed JSON patch `test` is also answered
+`Invalid`, so `Rejected` can follow a race on the mirror; the next reconcile
+clears it. The shim maps a connection failure or a client-side request
+timeout to `Timeout`, so a partition from the inner cluster reads
+`InnerUnreachable`. `ForeignObject`, `Forbidden` and `Rejected` are the
+permanent cases: nothing the reconciler does again changes the answer, and
+`Stalled` is `True` for them (section 1.4).
 
 **Patches test uid and generation.** A patch carries no `resourceVersion`, so
 writes by other actors to fields the patch does not test (inner status, labels,
@@ -142,21 +170,44 @@ subresource when its spec changes and when a deletion timestamp is stamped
 unusual: the sync reconciler writes the spec, the inner implementation writes
 the status with its own `observedGeneration`.
 
-On the **outer** copy every status write by the sync reconciler sets
-`status.observedGeneration := g`, the generation of the snapshot it reconciled,
-and the patch's generation test makes it land only while the copy is still at
-`g`. The condition `Synced` is `True` with `condition.observedGeneration == g`
+On the **outer** copy every status write by the sync reconciler, the ones
+that report a failure included, sets `status.observedGeneration := g`, the
+generation of the snapshot it reconciled, and the patch's generation test
+makes it land only while the copy is still at `g`. The status carries three
+conditions, `Synced`, `Ready` and `Stalled`, all with
+`condition.observedGeneration == g` (G-gen, section 3.1). `Synced` is `True`
 exactly when the reconcile verified `Inner.spec == σ` and the inner status
 observes the mirror's current generation.
 
 > `status.observedGeneration == metadata.generation` means the sync controller
-> has acted on the current spec. `Synced == True` at that generation means the
-> spec is in the inner cluster and the mirrored fields are the inner
-> implementation's status for it.
+> has acted on the current spec, whether or not it succeeded. `Synced == True`
+> at that generation means the spec is in the inner cluster and the mirrored
+> fields are the inner implementation's status for it.
 
 Otherwise `Synced` is `False` with reason `InnerConverging`,
-`InnerTerminating` or `ForeignObject`. An inner implementation that never sets
-`observedGeneration` never reaches `Synced=True`.
+`InnerTerminating`, `StaleMirror`, `ForeignObject`, or, after a failed
+request, `Forbidden`, `InnerUnreachable`, `CreateFailed`, `Rejected` or
+`RequestFailed` (section 1.2); the mirrored fields keep their last reported
+values. An inner implementation that never sets `observedGeneration` never
+reaches `Synced=True`.
+
+`Ready` and `Stalled` combine the sync reconciler's own outcome with the inner
+copy's conditions of the same type, which are consulted only when the inner
+status is, that is when `Synced` is `True`:
+
+- `Ready` is `True` exactly when `Synced` is `True`, the inner `Ready`
+  condition, if present, is `True`, and the inner `Stalled` condition, if
+  present, is not `True`. Otherwise it is `False`: with reason `NotSynced`
+  when not synced, else with the reason and message of the inner condition
+  that denies it. When synced with no inner `Ready` condition it is `True`
+  with reason `Synced`.
+- `Stalled` is `True` when the outcome is permanent (`ForeignObject`,
+  `Forbidden`, `Rejected`), with that reason, or when the inner `Stalled`
+  condition is `True`, with that condition's reason and message. Otherwise it
+  is `False`, with the inner `Stalled` condition's reason and message when
+  synced and present, else with the outcome's reason.
+- `Ready` and `Stalled` are never both `True`
+  (`lemma_ready_and_stalled_exclusive`).
 
 ## 2. The model
 
@@ -304,7 +355,9 @@ reconcilers.
 | Out-of-band edit that removes the mirror's label or `parent-uid` annotation | excluded by the rely | the object becomes foreign to both reconcilers, which refuse to adopt; no recovery is possible without adoption (section 1.1) |
 | Outer cluster restored with new uids | operational | the janitor pause gate (shim) withholds deletes; the model sees a failed request (`drop_req`); cleanup under R3 and R3s resumes when the gate is cleared (section 1.3) |
 | A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
-| Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
+| Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt and reports `ForeignObject` with `Stalled=True` |
+| Stale mirror of an earlier incarnation of the outer copy | yes | reported as `StaleMirror` until the janitor removes it (R3); R1's settling argument covers the wait |
+| Error responses to the reconcile's requests | yes | `drop_req` answers any request with any `APIError`; the reconcile reports the mapped reason once and requeues; the report is one more step of the reconcile in the liveness proofs |
 | Two outer clusters feeding one inner cluster; many outer namespaces each with its own inner cluster | no | assumed away for the single pair; the fan-out and parent-cluster identity are follow-up work (issue #15) |
 | Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
 | Two replicas of the controller | no | one replica assumed; a second is benign for safety (every write tests uid and generation or carries a uid precondition) but is outside the model, and costs status flapping and `AlreadyExists` noise |
@@ -369,8 +422,8 @@ copy at `outer_key` is one of: `Get` of the mirror key; `Create`, in that
 namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
-`Synced` condition carry the tested generation as `observedGeneration`
-(G-gen). Nothing else.
+`Synced`, `Ready` and `Stalled` conditions carry the tested generation as
+`observedGeneration` (G-gen). Nothing else.
 
 **Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
 mirror's namespace, or a `Delete` of the mirror with a uid precondition.
@@ -414,10 +467,14 @@ outer_stable(outer)(s) :=
  && s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
 
 spec_synced(outer)(s)            := the mirror exists, is not terminating, is a mirror of outer, has spec outer.spec
-inner_settled(outer, mirrored)(s) := spec_synced(outer)(s) && inner_caught_up(inner) && π(inner.status) == mirrored
-status_synced(outer, mirrored)(s) := the outer copy's status has π == mirrored,
-                                     observedGeneration == its generation,
-                                     Synced == True with observedGeneration == its generation
+inner_settled(outer, settled)(s)  := spec_synced(outer)(s) && inner_caught_up(inner)
+                                  && π(inner.status) == π(settled) && inner.status.conditions == settled.conditions
+status_synced(outer, settled)(s)  := the outer copy's status == outer_status_for(its generation, settled, Synced)
+
+outer_status_for(g, src, c) := { observedGeneration: g, π: π(src),
+                                 conditions: [Synced(g, c), Ready(g, src, c), Stalled(g, src, c)] }
+    // src is the inner status when c is Synced (its conditions are read), else the previous outer status;
+    // the three conditions are defined in section 1.4; every one carries observedGeneration g
 
 mirror_object_is(k, a, u)(s) := an object with uid u at k is a mirror pointing at a
 object_is_gone(k, u)(s)      := no object with uid u is at k
@@ -428,7 +485,7 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 | | Statement | Proved in |
 |---|---|---|
 | R1 | `∀outer. □outer_spec_stable(outer) ~> □spec_synced(outer)` | `proof/liveness/sync_spec_proof.rs` |
-| R2 | `∀outer, mirrored. □(outer_stable(outer) ∧ inner_settled(outer, mirrored)) ~> □status_synced(outer, mirrored)` | `proof/liveness/sync_status_proof.rs` |
+| R2 | `∀outer, settled. □(outer_stable(outer) ∧ inner_settled(outer, settled)) ~> □status_synced(outer, settled)` | `proof/liveness/sync_status_proof.rs` |
 | R3 | `∀k, a, u. (□parent_absent(k, a) ∧ mirror_object_is(k, a, u)) ~> object_is_gone(k, u)` | `proof/liveness/janitor_proof.rs` |
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
 | D3 | `∀k, u. inner_terminating_object(k, u) ~> object_is_gone(k, u)` | assumed |
@@ -460,7 +517,9 @@ R2 is the only form in which "that actor has stopped" can be said. The
 disturber (section 2.4) shows the premise is satisfiable and not vacuous
 under the relaxed rely, and `janitor_deletes_are_sound` shows the janitor's
 own Deletes satisfy it. R2's premise fixes the inner status instead of assuming
-the inner implementation is live, so R2 holds for any inner implementation. R3
+the inner implementation is live, so R2 holds for any inner implementation;
+it fixes the inner conditions beside the mirrored fields because the outer
+status is a function of both, and R2 promises the whole status. R3
 is per object; R3s is the stable form and is the sync reconciler's promise
 given R3. Neither R3 nor R3s needs a premise about deletes: the janitor's rely
 already admits any Delete, and an extra delete of a mirror only helps them.
@@ -540,9 +599,11 @@ has: a usage error instead of a silent exit, a field manager on every write,
 warn-level structured error logs that tell a failed patch `test` apart from
 other errors, token rotation through the token file, a startup access check
 against the inner cluster with a readiness marker, a non-root image, a
-security context and resources. Declined for this branch, with the reasons on
-the issues: error reasons in the `Synced` condition, Events, per-object
-backoff, KEP-1623 condition fields, a name selector on the janitor's List,
+security context and resources; and, decided later (#17), the error reasons
+in the `Synced` condition and the `Ready` and `Stalled` conditions of
+section 1.4. Declined for this branch, with the reasons on the issues:
+Events, per-object backoff, KEP-1623 condition fields (no
+`lastTransitionTime`), a name selector on the janitor's List,
 leader election (one replica with `Recreate` is not at-most-one; the deploy
 README says so), a deletion rate limit and dry-run mode. A cluster identity
 on mirrors moved to the fan-out follow-up (#15).
