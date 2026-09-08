@@ -26,6 +26,8 @@ use vstd::{multiset::*, prelude::*, string::*};
 verus !{
 
 
+// Near the default budget on CI's runners with the wider cluster model.
+#[verifier(rlimit(100))]
 #[verifier(spinoff_prover)]
 pub proof fn guarantee_condition_holds(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires

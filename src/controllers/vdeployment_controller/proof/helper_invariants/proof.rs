@@ -32,6 +32,8 @@ use vstd::{map_lib::*, multiset::*, prelude::*};
 
 verus! {
 
+// Near the default budget on CI's runners with the wider cluster model.
+#[verifier(rlimit(100))]
 pub proof fn lemma_eventually_always_no_other_pending_request_interferes_with_vd_reconcile(
     spec: TempPred<ClusterState>, vd: VDeploymentView, cluster: Cluster, controller_id: int,
 )
