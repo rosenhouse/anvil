@@ -15,7 +15,10 @@
 //   spec                   for a `field` selector: the path is a required
 //                          string, every step of it required in its parent,
 //                          with the rule `self == oldSelf` on the field or
-//                          `self.<path> == oldSelf.<path>` on spec
+//                          `self.<path> == oldSelf.<path>` on the object that
+//                          holds it or on spec (has_immutability_rule), in
+//                          every served version of the CRD and not only in the
+//                          configured one
 // A status (or a conditions item) with x-kubernetes-preserve-unknown-fields
 // passes the rows for the fields it does not declare; the ones it declares
 // must still have the right type, since a declared string would reject the
@@ -44,6 +47,10 @@ pub enum ShapeError {
     StatusConditions(String),
     /// `spec` row, for a `field` selector: `path` is the dotted path.
     SelectorField { path: String, reason: String },
+    /// The `spec` row on another served version of the CRD: an update sent
+    /// through that version is an update, so the immutability rule has to be
+    /// there too.
+    SelectorFieldInVersion { version: String, path: String, reason: String },
 }
 
 impl fmt::Display for ShapeError {
@@ -64,6 +71,12 @@ impl fmt::Display for ShapeError {
             ShapeError::SelectorField { path, reason } => {
                 write!(f, "spec: selector field {}: {}", path, reason)
             }
+            ShapeError::SelectorFieldInVersion { version, path, reason } => write!(
+                f,
+                "spec of the served version {}: selector field {}: {} (an update sent through \
+                 another served version is an update, so every served version must guard the field)",
+                version, path, reason
+            ),
         }
     }
 }
@@ -102,6 +115,23 @@ pub fn check_shape(crd: &CustomResourceDefinition, kind: &KindConfig) -> Result<
     if let ClusterSelector::Field(path) = &kind.selector {
         if let Err(reason) = check_selector_field(schema, path) {
             errors.push(ShapeError::SelectorField { path: kind.selector.dotted_path(), reason });
+        }
+        // Every other served version too. An object is one object whichever
+        // version it is written through, so a version that does not guard the
+        // selector field is a way to move an object between inner clusters,
+        // which is what the rule is there to prevent (design section 1.1).
+        for other in crd.spec.versions.iter().filter(|v| v.served && v.name != version.name) {
+            let reason = match other.schema.as_ref().and_then(|s| s.open_api_v3_schema.as_ref()) {
+                Some(schema) => check_selector_field(schema, path),
+                None => Err("the version has no openAPIV3Schema".to_string()),
+            };
+            if let Err(reason) = reason {
+                errors.push(ShapeError::SelectorFieldInVersion {
+                    version: other.name.clone(),
+                    path: kind.selector.dotted_path(),
+                    reason,
+                });
+            }
         }
     }
 
@@ -525,6 +555,38 @@ mod tests {
         let errors = check_shape(&good_crd(spec, widget_status()), &kind).unwrap_err();
         assert_eq!(errors.len(), 1, "{:?}", errors);
         assert!(errors[0].to_string().contains("spec.placement must be required"), "{}", errors[0]);
+    }
+
+    // A second served version is a second way to write the object, so the rule
+    // has to be there too; a version that is not served is not.
+    #[test]
+    fn every_served_version_must_guard_the_selector_field() {
+        let with_versions = |v2_served: bool, v2_guarded: bool| {
+            let spec = with_cluster_name(old_widget_spec(), true);
+            let mut crd = crd("Namespaced", true, spec.clone(), widget_status());
+            let v2_spec = with_cluster_name(old_widget_spec(), v2_guarded);
+            let mut v2 = crd.spec.versions[0].clone();
+            v2.name = "v2".to_string();
+            v2.served = v2_served;
+            v2.storage = false;
+            v2.schema = serde_json::from_value(json!({ "openAPIV3Schema": {
+                "type": "object",
+                "required": ["spec"],
+                "properties": { "spec": v2_spec, "status": widget_status() }
+            } }))
+            .unwrap();
+            crd.spec.versions.push(v2);
+            crd
+        };
+        assert_eq!(check_shape(&with_versions(true, true), &by_field()), Ok(()));
+        // Not served: nothing can be written through it.
+        assert_eq!(check_shape(&with_versions(false, false), &by_field()), Ok(()));
+        let errors = check_shape(&with_versions(true, false), &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].to_string().contains("served version v2"), "{}", errors[0]);
+        assert!(errors[0].to_string().contains("self == oldSelf"), "{}", errors[0]);
+        // A `name` selector needs no rule in any version.
+        assert_eq!(check_shape(&with_versions(true, false), &by_name()), Ok(()));
     }
 
     #[test]

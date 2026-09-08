@@ -49,9 +49,11 @@ A configured kind carries a **cluster selector**, one of:
 - `field:<path>`: a string field of the spec, for example
   `spec.clusterName`. The CRD must declare the field as a required string
   and guard it with an immutability rule, `x-kubernetes-validations:
-  [{rule: "self == oldSelf"}]` on the field, or the equivalent rule on
-  `spec` naming the field. The controller reads the CRD at boot and refuses
-  the kind without the rule.
+  [{rule: "self == oldSelf"}]` on the field, or the equivalent rule naming
+  the field on the object that holds it or on `spec`. The controller reads
+  the CRD at boot and refuses the kind without the rule; it requires the rule
+  in every *served* version of the CRD, since an update sent through another
+  served version is an update.
 - `name`: the object's `metadata.name` is the cluster name. This is the
   shape of Cluster API's `Cluster` object itself, and it is immutable by
   construction.

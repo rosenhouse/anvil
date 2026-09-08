@@ -145,6 +145,11 @@ Anything else — a rule that says the same thing another way, a rule with a
 whose rule is written differently is not wrong, but this controller will not
 run against it until the rule is spelled one of these ways.
 
+The rule must be in **every served version** of the CRD, not only the
+configured one: an object is one object whichever version it is written
+through, so a served version without the rule is a way to move an object to
+another inner cluster. A version that is not served is not checked.
+
 `Widget` uses `field:spec.clusterName`, `Gadget` uses `name` — its own name is
 the cluster, the shape of Cluster API's `Cluster` object. Immutability matters
 beyond the operational point that editing the field would tear a workload
@@ -202,7 +207,7 @@ The log ends with
 
 ```
 --kind anvil.dev/v1/Widget:field:spec.clusterName: CRD widgets.anvil.dev does not have the shape the sync controller needs:
-  - spec: selector field spec.clusterName: must carry the x-kubernetes-validations rule `self == oldSelf` (or spec the rule `self.clusterName == oldSelf.clusterName`)
+  - spec: selector field spec.clusterName: must carry the x-kubernetes-validations rule `self == oldSelf` (or spec the rule `self.clusterName == oldSelf.clusterName`; either side may come first and the spacing does not matter)
 ```
 
 and the container exits 2. `kubectl apply -f deploy/widget_sync/crd.yaml`
