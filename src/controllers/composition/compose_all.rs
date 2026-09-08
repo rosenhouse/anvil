@@ -23,6 +23,7 @@ use crate::kubernetes_api_objects::spec::api_resource::*;
 use crate::composition::{rabbitmq_reconciler::*, vdeployment_reconciler::*, vreplicaset_reconciler::*, vstatefulset_reconciler::*};
 use crate::composition::{widget_janitor_reconciler::*, widget_sync_reconciler::*};
 use crate::composition::widget_sync_reconciler;
+use crate::composition::widget_two_kinds::*;
 use crate::vstd_ext::string_view::*;
 use vstd::prelude::*;
 use vstd::set_lib::*;
@@ -672,118 +673,32 @@ proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: i
         core(cluster, core_set_for(k, sync_id, ids)),
 {
     broadcast use Set::lemma_map_contains;
-    let s1 = vrs_vd_vsts_rmq_set();
-    let s2 = widget_set_for(k, sync_id, ids);
-    let spec = cluster_model(cluster);
-
-    vrs_vd_vsts_rmq_core_holds(cluster);
-    widget_fanout_core_holds(k, spec_ok, cluster, ids, sync_id);
-
-    assert(compatible(cluster, s1, s2)) by {
-        let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
-        let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
-        let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
-        let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
-
-        assert(s1.members =~= set![vrs_id(), vd_id(), vsts_id(), rmq_id()]);
-        assert(s2.members =~= janitor_ids_of(k.bindings, ids).insert(sync_id));
-
-        // A framework id is never one of the Widget controllers'.
-        assert forall |i: int| s1.members.contains(i) implies !is_janitor_id(k.bindings, ids, i) && i != sync_id by {
-            if is_janitor_id(k.bindings, ids, i) {
-                let b = binding_at(k.bindings, ids, i);
-                assert(k.bindings.contains(b) && ids[b] == i);
-            }
+    // One kind is the one-element deployment.
+    let setups = Map::<SyncKind, KindSetup>::empty()
+        .insert(k, KindSetup { spec_ok: spec_ok, sync_id: sync_id, janitor_ids: ids });
+    assert(setups.dom() =~= Set::<SyncKind>::empty().insert(k));
+    assert(setups[k] == KindSetup { spec_ok: spec_ok, sync_id: sync_id, janitor_ids: ids });
+    assert(kinds_registered(setups, cluster));
+    assert(kinds_separate(setups));
+    assert(kinds_off_framework(setups));
+    framework_and_kinds_core_holds(setups, cluster);
+    // The one-element fold is that kind's own core set.
+    lemma_kinds_core_set_members(setups);
+    lemma_widget_core_set_members(k, sync_id, ids);
+    assert(widget_kinds_core_set(setups).members =~= widget_core_set_for(k, sync_id, ids).members) by {
+        assert forall |id: int| #[trigger] widget_kinds_core_set(setups).members.contains(id)
+            implies widget_core_set_for(k, sync_id, ids).members.contains(id) by {
+            let k2 = choose |k2: SyncKind| setups.contains_key(k2)
+                && #[trigger] widget_ids_of(k2, setups[k2].janitor_ids, setups[k2].sync_id).contains(id);
+            assert(k2 == k);
         }
-
-        vrs_guarantee_implies_widget_relies(k, vrs_id());
-        vd_guarantee_implies_widget_relies(k, vd_id());
-        vsts_guarantee_implies_widget_relies(k, vsts_id());
-        rmq_guarantee_implies_widget_relies(k, rmq_id());
-        entails_preserved_by_always(lift_state(vrs_guarantee(vrs_id())), lift_state(widget_sync_rely(k, vrs_id())));
-        entails_preserved_by_always(lift_state(vrs_guarantee(vrs_id())), lift_state(widget_janitor_rely(k, vrs_id())));
-        entails_preserved_by_always(lift_state(vd_guarantee(vd_id())), lift_state(widget_sync_rely(k, vd_id())));
-        entails_preserved_by_always(lift_state(vd_guarantee(vd_id())), lift_state(widget_janitor_rely(k, vd_id())));
-        entails_preserved_by_always(lift_state(vsts_guarantee(vsts_id())), lift_state(widget_sync_rely(k, vsts_id())));
-        entails_preserved_by_always(lift_state(vsts_guarantee(vsts_id())), lift_state(widget_janitor_rely(k, vsts_id())));
-        entails_preserved_by_always(lift_state(rmq_guarantee(rmq_id())), lift_state(widget_sync_rely(k, rmq_id())));
-        entails_preserved_by_always(lift_state(rmq_guarantee(rmq_id())), lift_state(widget_janitor_rely(k, rmq_id())));
-
-        // r_21: what the Widget controllers rely on from the other four. The sync
-        // reconciler's partial rely on a non-janitor id is widget_sync_rely, and a
-        // janitor's is widget_janitor_rely whatever its binding.
-        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
-            if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
-                let spec_g1 = spec.and(tla_forall(g_fn_s1));
-                tla_forall_apply(g_fn_s1, vrs_id());
-                tla_forall_apply(g_fn_s1, vd_id());
-                tla_forall_apply(g_fn_s1, vsts_id());
-                tla_forall_apply(g_fn_s1, rmq_id());
-                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vrs_guarantee(vrs_id()))));
-                entails_trans(spec_g1, always(lift_state(vrs_guarantee(vrs_id()))), always(lift_state(widget_sync_rely(k, vrs_id()))));
-                entails_trans(spec_g1, always(lift_state(vrs_guarantee(vrs_id()))), always(lift_state(widget_janitor_rely(k, vrs_id()))));
-                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vd_guarantee(vd_id()))));
-                entails_trans(spec_g1, always(lift_state(vd_guarantee(vd_id()))), always(lift_state(widget_sync_rely(k, vd_id()))));
-                entails_trans(spec_g1, always(lift_state(vd_guarantee(vd_id()))), always(lift_state(widget_janitor_rely(k, vd_id()))));
-                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vsts_guarantee(vsts_id()))));
-                entails_trans(spec_g1, always(lift_state(vsts_guarantee(vsts_id()))), always(lift_state(widget_sync_rely(k, vsts_id()))));
-                entails_trans(spec_g1, always(lift_state(vsts_guarantee(vsts_id()))), always(lift_state(widget_janitor_rely(k, vsts_id()))));
-                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(rmq_guarantee(rmq_id()))));
-                entails_trans(spec_g1, always(lift_state(rmq_guarantee(rmq_id()))), always(lift_state(widget_sync_rely(k, rmq_id()))));
-                entails_trans(spec_g1, always(lift_state(rmq_guarantee(rmq_id()))), always(lift_state(widget_janitor_rely(k, rmq_id()))));
-                if pair.0 == sync_id {
-                    assert(!is_janitor_id(k.bindings, ids, pair.1));
-                    assert(r21_fn(pair) == always(lift_state(widget_sync_rely(k, pair.1))));
-                } else {
-                    lemma_janitor_id_is_a_binding(k.bindings, k.bindings, ids, sync_id, pair.0);
-                    assert(r21_fn(pair) == always(lift_state(widget_janitor_rely(k, pair.1))));
-                }
-            }
+        assert forall |id: int| widget_core_set_for(k, sync_id, ids).members.contains(id)
+            implies #[trigger] widget_kinds_core_set(setups).members.contains(id) by {
+            assert(widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id));
         }
-        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
-        entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
-
-        // r_12: what the other four rely on from the Widget controllers.
-        widget_sync_guarantee_implies_relies(k, sync_id);
-        entails_preserved_by_always(lift_state(widget_sync_guarantee(k, sync_id)), lift_state(vrs_rely(sync_id)));
-        entails_preserved_by_always(lift_state(widget_sync_guarantee(k, sync_id)), lift_state(vd_rely(sync_id)));
-        entails_preserved_by_always(lift_state(widget_sync_guarantee(k, sync_id)), lift_state(vsts_rely(sync_id)));
-        entails_preserved_by_always(lift_state(widget_sync_guarantee(k, sync_id)), lift_state(rmq_rely(sync_id)));
-        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
-            if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
-                let spec_g2 = spec.and(tla_forall(g_fn_s2));
-                tla_forall_apply(g_fn_s2, pair.1);
-                if pair.1 == sync_id {
-                    assert(g_fn_s2(sync_id) == always(lift_state(widget_sync_guarantee(k, sync_id))));
-                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_sync_guarantee(k, sync_id))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, sync_id))), always(lift_state(vrs_rely(sync_id))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, sync_id))), always(lift_state(vd_rely(sync_id))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, sync_id))), always(lift_state(vsts_rely(sync_id))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, sync_id))), always(lift_state(rmq_rely(sync_id))));
-                } else {
-                    lemma_janitor_id_is_a_binding(k.bindings, k.bindings, ids, sync_id, pair.1);
-                    let b2 = binding_at(k.bindings, ids, pair.1);
-                    assert(cluster.registry.contains_pair(pair.1, widget_janitor_controller_spec(k, b2, spec_ok, pair.1)));
-                    assert(g_fn_s2(pair.1) == always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
-                    widget_janitor_guarantee_implies_relies(k, b2, pair.1);
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(vrs_rely(pair.1)));
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(vd_rely(pair.1)));
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(vsts_rely(pair.1)));
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(rmq_rely(pair.1)));
-                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b2, pair.1))), always(lift_state(vrs_rely(pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b2, pair.1))), always(lift_state(vd_rely(pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b2, pair.1))), always(lift_state(vsts_rely(pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b2, pair.1))), always(lift_state(rmq_rely(pair.1))));
-                }
-            }
-        }
-        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
-        entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
-        entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
     }
-
-    compose(cluster, s1, s2);
+    assert(widget_kinds_core_set(setups) == widget_set_for(k, sync_id, ids));
+    assert(core_set_for_kinds(setups) == core_set_for(k, sync_id, ids));
 }
 
 // The four controllers of the repository beside the sync controller of ANY
@@ -840,6 +755,166 @@ pub proof fn core_holds_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_i
         }
     }
     all_core_holds(k, spec_ok, sync_id, ids, cluster);
+}
+
+
+// ============================================================
+// The four framework controllers beside ANY finite set of configured kinds
+// ============================================================
+
+// Each configured kind keeps off the four framework kinds and the four framework
+// ids. Nothing is asked of one kind about another here; that is kinds_separate.
+pub open spec fn kinds_off_framework(setups: Map<SyncKind, KindSetup>) -> bool {
+    forall |k: SyncKind| #[trigger] setups.contains_key(k) ==> {
+        &&& widget_kinds_off_framework(k)
+        &&& widget_ids_off_framework(k.bindings, setups[k].janitor_ids, setups[k].sync_id)
+    }
+}
+
+pub open spec fn core_set_for_kinds(setups: Map<SyncKind, KindSetup>) -> CoreSet {
+    union_coreset(vrs_vd_vsts_rmq_set(), widget_kinds_core_set(setups), true_pred())
+}
+
+// The whole repository in one `core`: the four framework controllers beside the
+// sync controller and janitors of every kind of a deployment, for any finite set
+// of configured kinds. The configurations enter only through the hypotheses --
+// each kind is well formed and registered (kinds_registered), distinct kinds have
+// distinct outer kinds and disjoint ids (kinds_separate), and no kind touches a
+// framework kind or a framework id (kinds_off_framework) -- and the deployment's
+// side is composed by widget_kinds_core_holds, one kind at a time.
+// `core_holds_for` above is the one-kind instance of this statement.
+pub proof fn framework_and_kinds_core_holds(setups: Map<SyncKind, KindSetup>, cluster: CoreCluster)
+    requires
+        kinds_registered(setups, cluster),
+        kinds_separate(setups),
+        kinds_off_framework(setups),
+        cluster.registry.contains_pair(vrs_id(), vrs_controller_spec(vrs_id())),
+        cluster.registry.contains_pair(vd_id(), vd_controller_spec(vd_id())),
+        cluster.registry.contains_pair(vsts_id(), vsts_controller_spec(vsts_id())),
+        cluster.registry.contains_pair(rmq_id(), rmq_controller_spec(rmq_id())),
+        well_formed(cluster, vrs_core_set(vrs_id())),
+        well_formed(cluster, vd_core_set(vd_id())),
+        well_formed(cluster, vsts_core_set(vsts_id())),
+        well_formed(cluster, rmq_core_set(rmq_id())),
+    ensures
+        well_formed(cluster, core_set_for_kinds(setups)),
+        core(cluster, core_set_for_kinds(setups)),
+{
+    broadcast use Set::lemma_map_contains;
+    let s1 = vrs_vd_vsts_rmq_set();
+    let s2 = widget_kinds_core_set(setups);
+    let spec = cluster_model(cluster);
+
+    vrs_vd_vsts_rmq_core_holds(cluster);
+    widget_kinds_core_holds(setups, cluster);
+    lemma_kinds_core_set_members(setups);
+    assert(s1.members =~= set![vrs_id(), vd_id(), vsts_id(), rmq_id()]);
+
+    // The kind a configured member id belongs to, and the two facts about it the
+    // compatibility argument reads off: its core set is the ids it occupies, and
+    // no framework id is among them.
+    assert forall |i: int| #[trigger] s2.members.contains(i) implies {
+        &&& setups.contains_key(kind_at(setups, i))
+        &&& widget_core_set_for(kind_at(setups, i), setups[kind_at(setups, i)].sync_id, setups[kind_at(setups, i)].janitor_ids).members.contains(i)
+        &&& !s1.members.contains(i)
+    } by {
+        let k = kind_at(setups, i);
+        lemma_widget_core_set_members(k, setups[k].sync_id, setups[k].janitor_ids);
+        assert(widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(i));
+        assert(widget_ids_off_framework(k.bindings, setups[k].janitor_ids, setups[k].sync_id));
+        if i != setups[k].sync_id {
+            lemma_janitor_id_is_a_binding(k.bindings, k.bindings, setups[k].janitor_ids, setups[k].sync_id, i);
+        }
+    }
+
+    assert(compatible(cluster, s1, s2)) by {
+        let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+        let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+
+        // r_21: what a configured controller relies on of one of the four is what
+        // that one guarantees -- its kind is none of the four framework kinds.
+        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
+            if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
+                let spec_g1 = spec.and(tla_forall(g_fn_s1));
+                let k = kind_at(setups, pair.0);
+                let c = setups[k];
+                lemma_member_rely(k, c.spec_ok, cluster, c.janitor_ids, c.sync_id, pair.0, pair.1);
+                vrs_guarantee_implies_widget_relies(k, vrs_id());
+                vd_guarantee_implies_widget_relies(k, vd_id());
+                vsts_guarantee_implies_widget_relies(k, vsts_id());
+                rmq_guarantee_implies_widget_relies(k, rmq_id());
+                entails_preserved_by_always(lift_state(vrs_guarantee(vrs_id())), lift_state(widget_sync_rely(k, vrs_id())));
+                entails_preserved_by_always(lift_state(vrs_guarantee(vrs_id())), lift_state(widget_janitor_rely(k, vrs_id())));
+                entails_preserved_by_always(lift_state(vd_guarantee(vd_id())), lift_state(widget_sync_rely(k, vd_id())));
+                entails_preserved_by_always(lift_state(vd_guarantee(vd_id())), lift_state(widget_janitor_rely(k, vd_id())));
+                entails_preserved_by_always(lift_state(vsts_guarantee(vsts_id())), lift_state(widget_sync_rely(k, vsts_id())));
+                entails_preserved_by_always(lift_state(vsts_guarantee(vsts_id())), lift_state(widget_janitor_rely(k, vsts_id())));
+                entails_preserved_by_always(lift_state(rmq_guarantee(rmq_id())), lift_state(widget_sync_rely(k, rmq_id())));
+                entails_preserved_by_always(lift_state(rmq_guarantee(rmq_id())), lift_state(widget_janitor_rely(k, rmq_id())));
+                tla_forall_apply(g_fn_s1, vrs_id());
+                tla_forall_apply(g_fn_s1, vd_id());
+                tla_forall_apply(g_fn_s1, vsts_id());
+                tla_forall_apply(g_fn_s1, rmq_id());
+                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vrs_guarantee(vrs_id()))));
+                entails_trans(spec_g1, always(lift_state(vrs_guarantee(vrs_id()))), always(lift_state(widget_sync_rely(k, vrs_id()))));
+                entails_trans(spec_g1, always(lift_state(vrs_guarantee(vrs_id()))), always(lift_state(widget_janitor_rely(k, vrs_id()))));
+                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vd_guarantee(vd_id()))));
+                entails_trans(spec_g1, always(lift_state(vd_guarantee(vd_id()))), always(lift_state(widget_sync_rely(k, vd_id()))));
+                entails_trans(spec_g1, always(lift_state(vd_guarantee(vd_id()))), always(lift_state(widget_janitor_rely(k, vd_id()))));
+                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(vsts_guarantee(vsts_id()))));
+                entails_trans(spec_g1, always(lift_state(vsts_guarantee(vsts_id()))), always(lift_state(widget_sync_rely(k, vsts_id()))));
+                entails_trans(spec_g1, always(lift_state(vsts_guarantee(vsts_id()))), always(lift_state(widget_janitor_rely(k, vsts_id()))));
+                entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(rmq_guarantee(rmq_id()))));
+                entails_trans(spec_g1, always(lift_state(rmq_guarantee(rmq_id()))), always(lift_state(widget_sync_rely(k, rmq_id()))));
+                entails_trans(spec_g1, always(lift_state(rmq_guarantee(rmq_id()))), always(lift_state(widget_janitor_rely(k, rmq_id()))));
+            }
+        }
+        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
+        entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
+
+        // r_12: what the four rely on of a configured controller is what that
+        // controller guarantees, by the same kind disjointness.
+        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
+            if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
+                let spec_g2 = spec.and(tla_forall(g_fn_s2));
+                let k = kind_at(setups, pair.1);
+                let c = setups[k];
+                lemma_member_guarantee(k, c.spec_ok, cluster, c.janitor_ids, c.sync_id, pair.1);
+                tla_forall_apply(g_fn_s2, pair.1);
+                if pair.1 == c.sync_id {
+                    widget_sync_guarantee_implies_relies(k, pair.1);
+                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k, pair.1)), lift_state(vrs_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k, pair.1)), lift_state(vd_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k, pair.1)), lift_state(vsts_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k, pair.1)), lift_state(rmq_rely(pair.1)));
+                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_sync_guarantee(k, pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, pair.1))), always(lift_state(vrs_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, pair.1))), always(lift_state(vd_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, pair.1))), always(lift_state(vsts_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k, pair.1))), always(lift_state(rmq_rely(pair.1))));
+                } else {
+                    let b = binding_at(k.bindings, c.janitor_ids, pair.1);
+                    widget_janitor_guarantee_implies_relies(k, b, pair.1);
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b, pair.1)), lift_state(vrs_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b, pair.1)), lift_state(vd_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b, pair.1)), lift_state(vsts_rely(pair.1)));
+                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b, pair.1)), lift_state(rmq_rely(pair.1)));
+                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_janitor_guarantee(k, b, pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b, pair.1))), always(lift_state(vrs_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b, pair.1))), always(lift_state(vd_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b, pair.1))), always(lift_state(vsts_rely(pair.1))));
+                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k, b, pair.1))), always(lift_state(rmq_rely(pair.1))));
+                }
+            }
+        }
+        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
+        entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
+        entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
+    }
+
+    compose(cluster, s1, s2);
 }
 
 // ============================================================

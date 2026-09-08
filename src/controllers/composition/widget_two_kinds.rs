@@ -190,7 +190,7 @@ pub open spec fn widget_ids_of(k: SyncKind, ids: Map<Binding, int>, sync_id: int
 // The guarantee registered at a member id of one configuration's core set, read
 // off the registry: the sync controller's, or the janitor of the binding whose id
 // it is.
-proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int)
+pub proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int)
     requires
         ids_ok(k.bindings, ids, sync_id),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
@@ -212,7 +212,7 @@ proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cl
 
 // The partial rely one configuration's member id places on an id outside the
 // configuration: the sync controller's rely, or a janitor's.
-proof fn lemma_member_rely(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int, other: int)
+pub proof fn lemma_member_rely(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int, other: int)
     requires
         ids_ok(k.bindings, ids, sync_id),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
@@ -233,6 +233,291 @@ proof fn lemma_member_rely(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster
         }
     } else {
         lemma_janitor_id_is_a_binding(k.bindings, k.bindings, ids, sync_id, id);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Any finite set of configured kinds.
+// ---------------------------------------------------------------------------
+
+// What a configuration adds to a kind: the schema its types are installed with,
+// the id its sync controller runs at, and the ids of its janitors. A whole
+// deployment is a finite map from kinds to these, which is what the binary's
+// `--kind` flags amount to (doc/widget_sync_fanout_design.md, section 3.4).
+pub struct KindSetup {
+    pub spec_ok: spec_fn(Value) -> bool,
+    pub sync_id: int,
+    pub janitor_ids: Map<Binding, int>,
+}
+
+// The core set of a whole deployment: the kinds' core sets, one kind at a time.
+// Like each kind's own core set it has no liveness dependency left -- the
+// janitors' ESRs discharge their sync controller's inside each kind, and no kind
+// depends on another for liveness -- so the union carries true_pred throughout.
+//
+// It is written as a fold rather than as a comprehension because a vstd `Set` is
+// finite by construction -- `Set::new` of a predicate is an Option -- and the
+// union of a finite family is not a set one can write down without the induction.
+// That the deployment is finite therefore needs no hypothesis: a `Map`'s domain
+// is a `Set`, and every `Set` is finite.
+pub open spec fn widget_kinds_core_set(setups: Map<SyncKind, KindSetup>) -> CoreSet
+    decreases setups.dom().len()
+    via widget_kinds_core_set_decreases
+{
+    if setups.dom().is_empty() {
+        CoreSet { members: Set::empty(), liveness_dependency: true_pred() }
+    } else {
+        let k = setups.dom().choose();
+        union_coreset(
+            widget_core_set_for(k, setups[k].sync_id, setups[k].janitor_ids),
+            widget_kinds_core_set(setups.remove(k)),
+            true_pred())
+    }
+}
+
+#[via_fn]
+proof fn widget_kinds_core_set_decreases(setups: Map<SyncKind, KindSetup>) {
+    if !setups.dom().is_empty() {
+        let k = setups.dom().choose();
+        assert(setups.dom().contains(k));
+        assert(setups.remove(k).dom() =~= setups.dom().remove(k));
+        vstd::set::lemma_set_remove_len(setups.dom(), k);
+    }
+}
+
+// The members of that core set are exactly the ids the kinds occupy.
+pub proof fn lemma_kinds_core_set_members(setups: Map<SyncKind, KindSetup>)
+    ensures
+        widget_kinds_core_set(setups).liveness_dependency == true_pred::<ClusterState>(),
+        forall |id: int| #[trigger] widget_kinds_core_set(setups).members.contains(id)
+            ==> exists |k: SyncKind| setups.contains_key(k)
+                && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id),
+        forall |k: SyncKind, id: int| setups.contains_key(k)
+            && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id)
+            ==> widget_kinds_core_set(setups).members.contains(id),
+    decreases setups.dom().len(),
+{
+    if !setups.dom().is_empty() {
+        let k0 = setups.dom().choose();
+        assert(setups.dom().contains(k0));
+        let rest = setups.remove(k0);
+        assert(rest.dom() =~= setups.dom().remove(k0));
+        vstd::set::lemma_set_remove_len(setups.dom(), k0);
+        lemma_kinds_core_set_members(rest);
+        assert forall |id: int| #[trigger] widget_kinds_core_set(setups).members.contains(id)
+            implies exists |k: SyncKind| setups.contains_key(k)
+                && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id) by {
+            if widget_kinds_core_set(rest).members.contains(id) {
+                let k = choose |k: SyncKind| rest.contains_key(k)
+                    && #[trigger] widget_ids_of(k, rest[k].janitor_ids, rest[k].sync_id).contains(id);
+                assert(setups.contains_key(k) && setups[k] == rest[k]);
+                assert(widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id));
+            } else {
+                assert(widget_ids_of(k0, setups[k0].janitor_ids, setups[k0].sync_id).contains(id)) by {
+                    lemma_widget_core_set_members(k0, setups[k0].sync_id, setups[k0].janitor_ids);
+                }
+            }
+        }
+        assert forall |k: SyncKind, id: int| setups.contains_key(k)
+            && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id)
+            implies widget_kinds_core_set(setups).members.contains(id) by {
+            if k == k0 {
+                lemma_widget_core_set_members(k0, setups[k0].sync_id, setups[k0].janitor_ids);
+            } else {
+                assert(rest.contains_key(k) && rest[k] == setups[k]);
+            }
+        }
+    }
+}
+
+// The kind a member id belongs to. Well defined because distinct kinds occupy
+// disjoint ids (kinds_separate).
+pub open spec fn kind_at(setups: Map<SyncKind, KindSetup>, id: int) -> SyncKind {
+    choose |k: SyncKind| setups.contains_key(k)
+        && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id)
+}
+
+// Every configured kind is well formed, occupies ids of its own, and runs the
+// sync controller and the janitors its spec names: what one kind's
+// widget_fanout_core_holds asks for, of every kind of the deployment.
+pub open spec fn kinds_registered(setups: Map<SyncKind, KindSetup>, cluster: CoreCluster) -> bool {
+    forall |k: SyncKind| #[trigger] setups.contains_key(k) ==> {
+        &&& sync_kind_ok(k)
+        &&& ids_ok(k.bindings, setups[k].janitor_ids, setups[k].sync_id)
+        &&& cluster.registry.contains_pair(setups[k].sync_id,
+                widget_sync_controller_spec(k, setups[k].spec_ok, setups[k].sync_id, setups[k].janitor_ids))
+        &&& janitors_registered(k, setups[k].spec_ok, cluster, setups[k].janitor_ids)
+        &&& (widget_sync_controller_spec(k, setups[k].spec_ok, setups[k].sync_id, setups[k].janitor_ids).membership)(cluster.cluster, setups[k].sync_id)
+    }
+}
+
+// Two configured kinds are told apart by their outer kinds -- from which
+// lemma_kinds_of_distinct_configurations tells their mirror kinds apart, for
+// every binding -- and they occupy disjoint ids.
+pub open spec fn kinds_separate(setups: Map<SyncKind, KindSetup>) -> bool {
+    forall |k1: SyncKind, k2: SyncKind| #![trigger setups[k1], setups[k2]]
+        setups.contains_key(k1) && setups.contains_key(k2) && k1 != k2 ==> {
+            &&& k1.outer_kind != k2.outer_kind
+            &&& widget_ids_of(k1, setups[k1].janitor_ids, setups[k1].sync_id)
+                    .disjoint(widget_ids_of(k2, setups[k2].janitor_ids, setups[k2].sync_id))
+        }
+}
+
+// One kind's core set is exactly the ids it occupies.
+pub proof fn lemma_widget_core_set_members(k: SyncKind, sync_id: int, ids: Map<Binding, int>)
+    ensures widget_core_set_for(k, sync_id, ids).members == widget_ids_of(k, ids, sync_id),
+{
+    assert(widget_core_set_for(k, sync_id, ids).members =~= widget_ids_of(k, ids, sync_id));
+}
+
+// The one compatibility fact of the whole induction: what a controller of one
+// configuration relies on of a controller of another is what that other one
+// guarantees. Two cases, by the role of the other one, and each is one of the
+// cross implications above.
+proof fn lemma_cross_configuration_rely(k1: SyncKind, c1: KindSetup, k2: SyncKind, c2: KindSetup, cluster: CoreCluster, id: int, other: int)
+    requires
+        sync_kind_ok(k1),
+        sync_kind_ok(k2),
+        k1.outer_kind != k2.outer_kind,
+        ids_ok(k1.bindings, c1.janitor_ids, c1.sync_id),
+        ids_ok(k2.bindings, c2.janitor_ids, c2.sync_id),
+        cluster.registry.contains_pair(c1.sync_id, widget_sync_controller_spec(k1, c1.spec_ok, c1.sync_id, c1.janitor_ids)),
+        janitors_registered(k1, c1.spec_ok, cluster, c1.janitor_ids),
+        cluster.registry.contains_pair(c2.sync_id, widget_sync_controller_spec(k2, c2.spec_ok, c2.sync_id, c2.janitor_ids)),
+        janitors_registered(k2, c2.spec_ok, cluster, c2.janitor_ids),
+        widget_ids_of(k1, c1.janitor_ids, c1.sync_id).contains(id),
+        widget_ids_of(k2, c2.janitor_ids, c2.sync_id).contains(other),
+        widget_ids_of(k1, c1.janitor_ids, c1.sync_id).disjoint(widget_ids_of(k2, c2.janitor_ids, c2.sync_id)),
+    ensures
+        cluster.registry[other].safety_guarantee.entails((cluster.registry[id].safety_partial_rely)(other)),
+{
+    broadcast use Set::lemma_map_contains;
+    lemma_widget_core_set_members(k1, c1.sync_id, c1.janitor_ids);
+    lemma_widget_core_set_members(k2, c2.sync_id, c2.janitor_ids);
+    assert(!widget_ids_of(k1, c1.janitor_ids, c1.sync_id).contains(other));
+    lemma_member_rely(k1, c1.spec_ok, cluster, c1.janitor_ids, c1.sync_id, id, other);
+    lemma_member_guarantee(k2, c2.spec_ok, cluster, c2.janitor_ids, c2.sync_id, other);
+    if other == c2.sync_id {
+        sync_guarantee_implies_other_sync_rely(k2, k1, other);
+        sync_guarantee_implies_other_janitor_rely(k2, k1, other);
+        entails_preserved_by_always(lift_state(widget_sync_guarantee(k2, other)), lift_state(widget_sync_rely(k1, other)));
+        entails_preserved_by_always(lift_state(widget_sync_guarantee(k2, other)), lift_state(widget_janitor_rely(k1, other)));
+    } else {
+        let b2 = binding_at(k2.bindings, c2.janitor_ids, other);
+        janitor_guarantee_implies_other_relies(k2, b2, k1, other);
+        entails_preserved_by_always(lift_state(widget_janitor_guarantee(k2, b2, other)), lift_state(widget_sync_rely(k1, other)));
+        entails_preserved_by_always(lift_state(widget_janitor_guarantee(k2, b2, other)), lift_state(widget_janitor_rely(k1, other)));
+    }
+}
+
+// Any finite set of configured kinds composes, one kind at a time, by induction
+// on the number of kinds -- the same induction widget_janitors_core_holds runs
+// over a kind's bindings. Every step is Welder's `compose`: neither side has a
+// liveness dependency left, so all a step needs is that the two sides' guarantees
+// imply each other's relies, which is lemma_cross_configuration_rely.
+// widget_two_kind_core_holds below is the two-element instance.
+pub proof fn widget_kinds_core_holds(setups: Map<SyncKind, KindSetup>, cluster: CoreCluster)
+    requires
+        kinds_registered(setups, cluster),
+        kinds_separate(setups),
+    ensures
+        well_formed(cluster, widget_kinds_core_set(setups)),
+        core(cluster, widget_kinds_core_set(setups)),
+    decreases setups.dom().len(),
+{
+    broadcast use Set::lemma_map_contains;
+    let spec = cluster_model(cluster);
+
+    if setups.dom().is_empty() {
+        // No members: every conjunct of the ESR is true_pred.
+        let s = widget_kinds_core_set(setups);
+        let g_fn = |c: int| if s.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+        let r_fn = |pair: (int, int)| if s.members.contains(pair.0) && !s.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+        let env_fn = |c: int| if s.members.contains(c) { cluster.registry[c].environment_rely } else { true_pred::<ClusterState>() };
+        let esr_fn = |c: int| if s.members.contains(c) { cluster.registry[c].esr } else { true_pred::<ClusterState>() };
+        assert(s.members =~= Set::<int>::empty());
+        assert forall |c: int| spec.entails(#[trigger] g_fn(c)) by {
+            assert(!s.members.contains(c));
+            assert(g_fn(c) == true_pred::<ClusterState>());
+        }
+        spec_entails_tla_forall(spec, g_fn);
+        assert forall |c: int| spec.entails(#[trigger] esr_fn(c)) by {
+            assert(!s.members.contains(c));
+            assert(esr_fn(c) == true_pred::<ClusterState>());
+        }
+        spec_entails_tla_forall(spec, esr_fn);
+        let rest = tla_forall(r_fn).and(s.liveness_dependency).and(tla_forall(env_fn));
+        entails_implies(spec, rest, tla_forall(esr_fn));
+        entails_and(spec, tla_forall(g_fn), rest.implies(tla_forall(esr_fn)));
+    } else {
+        let k0 = setups.dom().choose();
+        let c0 = setups[k0];
+        let rest = setups.remove(k0);
+        assert(setups.contains_key(k0));
+        assert(rest.dom() =~= setups.dom().remove(k0));
+        vstd::set::lemma_set_remove_len(setups.dom(), k0);
+        assert(kinds_registered(rest, cluster));
+        assert(kinds_separate(rest)) by {
+            assert forall |k1: SyncKind, k2: SyncKind| #![trigger rest[k1], rest[k2]]
+                rest.contains_key(k1) && rest.contains_key(k2) && k1 != k2 implies {
+                    &&& k1.outer_kind != k2.outer_kind
+                    &&& widget_ids_of(k1, rest[k1].janitor_ids, rest[k1].sync_id)
+                            .disjoint(widget_ids_of(k2, rest[k2].janitor_ids, rest[k2].sync_id))
+                } by {
+                assert(setups.contains_key(k1) && setups.contains_key(k2));
+                assert(rest[k1] == setups[k1] && rest[k2] == setups[k2]);
+            }
+        }
+        widget_kinds_core_holds(rest, cluster);
+        widget_fanout_core_holds(k0, c0.spec_ok, cluster, c0.janitor_ids, c0.sync_id);
+        lemma_kinds_core_set_members(rest);
+        let s1 = widget_core_set_for(k0, c0.sync_id, c0.janitor_ids);
+        let s2 = widget_kinds_core_set(rest);
+        lemma_widget_core_set_members(k0, c0.sync_id, c0.janitor_ids);
+
+        assert(compatible(cluster, s1, s2)) by {
+            let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+            let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
+            let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+            let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
+
+            // What the other kinds' controllers rely on of the new kind's.
+            assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
+                if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
+                    let spec_g1 = spec.and(tla_forall(g_fn_s1));
+                    let k1 = kind_at(rest, pair.0);
+                    assert(rest.contains_key(k1) && widget_ids_of(k1, rest[k1].janitor_ids, rest[k1].sync_id).contains(pair.0));
+                    assert(setups.contains_key(k1) && rest[k1] == setups[k1]);
+                    assert(k1 != k0);
+                    lemma_cross_configuration_rely(k1, setups[k1], k0, c0, cluster, pair.0, pair.1);
+                    tla_forall_apply(g_fn_s1, pair.1);
+                    entails_trans(spec_g1, tla_forall(g_fn_s1), cluster.registry[pair.1].safety_guarantee);
+                    entails_trans(spec_g1, cluster.registry[pair.1].safety_guarantee, r21_fn(pair));
+                }
+            }
+            spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
+            entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
+
+            // And what the new kind's rely on of the other kinds'.
+            assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
+                if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
+                    let spec_g2 = spec.and(tla_forall(g_fn_s2));
+                    let k1 = kind_at(rest, pair.1);
+                    assert(rest.contains_key(k1) && widget_ids_of(k1, rest[k1].janitor_ids, rest[k1].sync_id).contains(pair.1));
+                    assert(setups.contains_key(k1) && rest[k1] == setups[k1]);
+                    assert(k1 != k0);
+                    lemma_cross_configuration_rely(k0, c0, k1, setups[k1], cluster, pair.0, pair.1);
+                    tla_forall_apply(g_fn_s2, pair.1);
+                    entails_trans(spec_g2, tla_forall(g_fn_s2), cluster.registry[pair.1].safety_guarantee);
+                    entails_trans(spec_g2, cluster.registry[pair.1].safety_guarantee, r12_fn(pair));
+                }
+            }
+            spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
+            entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
+            entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
+        }
+        compose(cluster, s1, s2);
+        assert(widget_kinds_core_set(setups) == union_coreset(s1, s2, true_pred()));
     }
 }
 
@@ -267,82 +552,59 @@ pub proof fn widget_two_kind_core_holds(
             widget_core_set_for(k2, sync2, ids2), true_pred())),
 {
     broadcast use Set::lemma_map_contains;
-    let s1 = widget_core_set_for(k1, sync1, ids1);
-    let s2 = widget_core_set_for(k2, sync2, ids2);
-    let spec = cluster_model(cluster);
-
-    widget_fanout_core_holds(k1, spec_ok1, cluster, ids1, sync1);
-    widget_fanout_core_holds(k2, spec_ok2, cluster, ids2, sync2);
-    assert(s1.members =~= widget_ids_of(k1, ids1, sync1));
-    assert(s2.members =~= widget_ids_of(k2, ids2, sync2));
-
-    assert(compatible(cluster, s1, s2)) by {
-        let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
-        let g_fn_s2 = |c: int| if s2.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
-        let r12_fn = |pair: (int, int)| if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
-        let r21_fn = |pair: (int, int)| if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() };
-
-        // What `k2`'s controllers rely on of one of `k1`'s is what that one guarantees.
-        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s1)).entails(#[trigger] r21_fn(pair)) by {
-            if s2.members.contains(pair.0) && !s2.members.contains(pair.1) && s1.members.contains(pair.1) {
-                let spec_g1 = spec.and(tla_forall(g_fn_s1));
-                lemma_member_rely(k2, spec_ok2, cluster, ids2, sync2, pair.0, pair.1);
-                lemma_member_guarantee(k1, spec_ok1, cluster, ids1, sync1, pair.1);
-                tla_forall_apply(g_fn_s1, pair.1);
-                if pair.1 == sync1 {
-                    sync_guarantee_implies_other_sync_rely(k1, k2, pair.1);
-                    sync_guarantee_implies_other_janitor_rely(k1, k2, pair.1);
-                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k1, pair.1)), lift_state(widget_sync_rely(k2, pair.1)));
-                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k1, pair.1)), lift_state(widget_janitor_rely(k2, pair.1)));
-                    entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(widget_sync_guarantee(k1, pair.1))));
-                    entails_trans(spec_g1, always(lift_state(widget_sync_guarantee(k1, pair.1))), always(lift_state(widget_sync_rely(k2, pair.1))));
-                    entails_trans(spec_g1, always(lift_state(widget_sync_guarantee(k1, pair.1))), always(lift_state(widget_janitor_rely(k2, pair.1))));
-                } else {
-                    let b1 = binding_at(k1.bindings, ids1, pair.1);
-                    janitor_guarantee_implies_other_relies(k1, b1, k2, pair.1);
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k1, b1, pair.1)), lift_state(widget_sync_rely(k2, pair.1)));
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k1, b1, pair.1)), lift_state(widget_janitor_rely(k2, pair.1)));
-                    entails_trans(spec_g1, tla_forall(g_fn_s1), always(lift_state(widget_janitor_guarantee(k1, b1, pair.1))));
-                    entails_trans(spec_g1, always(lift_state(widget_janitor_guarantee(k1, b1, pair.1))), always(lift_state(widget_sync_rely(k2, pair.1))));
-                    entails_trans(spec_g1, always(lift_state(widget_janitor_guarantee(k1, b1, pair.1))), always(lift_state(widget_janitor_rely(k2, pair.1))));
-                }
-            }
+    let c1 = KindSetup { spec_ok: spec_ok1, sync_id: sync1, janitor_ids: ids1 };
+    let c2 = KindSetup { spec_ok: spec_ok2, sync_id: sync2, janitor_ids: ids2 };
+    let setups = Map::<SyncKind, KindSetup>::empty().insert(k1, c1).insert(k2, c2);
+    assert(k1 != k2);
+    assert(setups.dom() =~= Set::<SyncKind>::empty().insert(k1).insert(k2));
+    assert(setups[k1] == c1 && setups[k2] == c2);
+    assert(kinds_registered(setups, cluster)) by {
+        assert forall |k: SyncKind| #[trigger] setups.contains_key(k) implies {
+            &&& sync_kind_ok(k)
+            &&& ids_ok(k.bindings, setups[k].janitor_ids, setups[k].sync_id)
+            &&& cluster.registry.contains_pair(setups[k].sync_id,
+                    widget_sync_controller_spec(k, setups[k].spec_ok, setups[k].sync_id, setups[k].janitor_ids))
+            &&& janitors_registered(k, setups[k].spec_ok, cluster, setups[k].janitor_ids)
+            &&& (widget_sync_controller_spec(k, setups[k].spec_ok, setups[k].sync_id, setups[k].janitor_ids).membership)(cluster.cluster, setups[k].sync_id)
+        } by {
+            assert(k == k1 || k == k2);
         }
-        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s1)), r21_fn);
-        entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
-
-        // And the other way round.
-        assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
-            if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
-                let spec_g2 = spec.and(tla_forall(g_fn_s2));
-                lemma_member_rely(k1, spec_ok1, cluster, ids1, sync1, pair.0, pair.1);
-                lemma_member_guarantee(k2, spec_ok2, cluster, ids2, sync2, pair.1);
-                tla_forall_apply(g_fn_s2, pair.1);
-                if pair.1 == sync2 {
-                    sync_guarantee_implies_other_sync_rely(k2, k1, pair.1);
-                    sync_guarantee_implies_other_janitor_rely(k2, k1, pair.1);
-                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k2, pair.1)), lift_state(widget_sync_rely(k1, pair.1)));
-                    entails_preserved_by_always(lift_state(widget_sync_guarantee(k2, pair.1)), lift_state(widget_janitor_rely(k1, pair.1)));
-                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_sync_guarantee(k2, pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k2, pair.1))), always(lift_state(widget_sync_rely(k1, pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_sync_guarantee(k2, pair.1))), always(lift_state(widget_janitor_rely(k1, pair.1))));
-                } else {
-                    let b2 = binding_at(k2.bindings, ids2, pair.1);
-                    janitor_guarantee_implies_other_relies(k2, b2, k1, pair.1);
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k2, b2, pair.1)), lift_state(widget_sync_rely(k1, pair.1)));
-                    entails_preserved_by_always(lift_state(widget_janitor_guarantee(k2, b2, pair.1)), lift_state(widget_janitor_rely(k1, pair.1)));
-                    entails_trans(spec_g2, tla_forall(g_fn_s2), always(lift_state(widget_janitor_guarantee(k2, b2, pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k2, b2, pair.1))), always(lift_state(widget_sync_rely(k1, pair.1))));
-                    entails_trans(spec_g2, always(lift_state(widget_janitor_guarantee(k2, b2, pair.1))), always(lift_state(widget_janitor_rely(k1, pair.1))));
-                }
-            }
-        }
-        spec_entails_tla_forall(spec.and(tla_forall(g_fn_s2)), r12_fn);
-        entails_implies(spec, tla_forall(g_fn_s2), tla_forall(r12_fn));
-        entails_and(spec, tla_forall(g_fn_s1).implies(tla_forall(r21_fn)), tla_forall(g_fn_s2).implies(tla_forall(r12_fn)));
     }
-
-    compose(cluster, s1, s2);
+    assert(kinds_separate(setups)) by {
+        assert(widget_ids_of(k2, ids2, sync2).disjoint(widget_ids_of(k1, ids1, sync1)));
+        assert forall |x: SyncKind, y: SyncKind| #![trigger setups[x], setups[y]]
+            setups.contains_key(x) && setups.contains_key(y) && x != y implies {
+                &&& x.outer_kind != y.outer_kind
+                &&& widget_ids_of(x, setups[x].janitor_ids, setups[x].sync_id)
+                        .disjoint(widget_ids_of(y, setups[y].janitor_ids, setups[y].sync_id))
+            } by {
+            assert((x == k1 && y == k2) || (x == k2 && y == k1));
+        }
+    }
+    widget_kinds_core_holds(setups, cluster);
+    // The two-element fold is the union of the two kinds' core sets, whichever of
+    // the two the fold picks first.
+    lemma_kinds_core_set_members(setups);
+    lemma_widget_core_set_members(k1, sync1, ids1);
+    lemma_widget_core_set_members(k2, sync2, ids2);
+    let target = union_coreset(widget_core_set_for(k1, sync1, ids1), widget_core_set_for(k2, sync2, ids2), true_pred());
+    assert(widget_kinds_core_set(setups).members =~= target.members) by {
+        assert forall |id: int| #[trigger] widget_kinds_core_set(setups).members.contains(id)
+            implies target.members.contains(id) by {
+            let k = choose |k: SyncKind| setups.contains_key(k)
+                && #[trigger] widget_ids_of(k, setups[k].janitor_ids, setups[k].sync_id).contains(id);
+            assert(k == k1 || k == k2);
+        }
+        assert forall |id: int| target.members.contains(id)
+            implies #[trigger] widget_kinds_core_set(setups).members.contains(id) by {
+            if widget_ids_of(k1, ids1, sync1).contains(id) {
+                assert(widget_ids_of(k1, setups[k1].janitor_ids, setups[k1].sync_id).contains(id));
+            } else {
+                assert(widget_ids_of(k2, setups[k2].janitor_ids, setups[k2].sync_id).contains(id));
+            }
+        }
+    }
+    assert(widget_kinds_core_set(setups) == target);
 }
 
 // ---------------------------------------------------------------------------
