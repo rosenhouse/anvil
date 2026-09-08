@@ -216,17 +216,25 @@ status is, that is when `Synced` is `True`:
 ### 2.1 One store, two kinds, two controllers
 
 Anvil's model has one API server whose store is keyed by `(kind, namespace,
-name)`. The cluster is folded into the *model* kind at the exec boundary: the
-outer copy has kind `widget`, the mirror `widget@inner`. `OuterWidgetView` and
-`InnerWidgetView` are two view types with the same spec and status, differing
-only in `kind()`; on the exec side `OuterWidget` and `InnerWidget` wrap the
-same kube type and are bound to `ClusterId::Primary` and the pair's one
-binding, `ClusterId::Remote(ClusterRef)` (`exec_types::inner_cluster()`).
-Both kinds are installed in one `Cluster`; the two reconcilers are two
-controller ids. `schedule_controller_reconcile` fires for a reconciler's own
-kind, so outer copies schedule the sync reconciler and inner copies the
-janitor. The inner implementation is an ordinary other controller under a rely
-condition.
+name)`. The cluster is folded into the *model* kind at the exec boundary:
+`model_kind(name, cluster)` names the copies of the CRD `name` in `cluster`,
+so the outer copy has kind `model_kind(name, Primary)` and the mirror in the
+binding `b` has kind `model_kind(name, Remote(b))`, written `name@ns/cluster`.
+Objects are `SyncedObjectView`, one view type whose `kind` is data
+(doc/widget_sync_fanout_design.md, section 2.3); a configured kind is a
+`SyncKind { outer_kind, name, selector }` and a binding is a `ClusterRefView`.
+The pair is parameterized by them: `k.outer_kind` is the outer kind and
+`inner_kind(k, b)` the mirror kind of the binding `b`. On the exec side one
+`SyncedObject` wrapper carries the kind it was unmarshalled with, and
+`SyncKindExec` (the registry entry plus the selector) is what ties a runtime
+kind and a cluster to a model kind.
+
+The outer kind and every inner kind are installed in one `Cluster`; the sync
+reconciler is one controller id per kind and the janitor one controller id per
+(kind, binding). `schedule_controller_reconcile` fires for a reconciler's own
+kind, so outer copies schedule the sync reconciler and the mirrors of a
+binding schedule that binding's janitor. The inner implementation is an
+ordinary other controller under a rely condition.
 
 ### 2.2 Two stores, and the refinement into one
 
@@ -237,7 +245,9 @@ and failures are shared. Every step is a step of the one-store model taken on
 one of the two projections. A request is handled by the API server of its
 kind, the garbage collector of a side reads only that side's store, and a
 reconcile is scheduled from the store of the controller's kind. For the Widget
-pair the remote kinds are `{widget@inner}`.
+pair at a binding `b` the remote kinds are `{inner_kind(k, b)}`; the
+refinement is applied one binding at a time
+(doc/widget_sync_fanout_design.md, section 5.2).
 
 `kubernetes_cluster/proof/two_cluster/` proves that every execution of
 `TwoCluster` maps to an execution of `Cluster`. The map unions the two stores
@@ -397,26 +407,29 @@ expresses.
 ## 3. Specification
 
 The trusted specification is `src/controllers/widget_sync_controller/trusted/`:
-`spec_types.rs` (views and the mirror relation), `rely_guarantee.rs`,
-`liveness_theorem.rs` (R1, R2, R3, R3s, D3), `step.rs` (the reconcilers' step
-types) and `exec_types.rs` (the exec wrappers, bound to `ClusterId::Primary`
-and `inner_cluster()`; this binding is the routing the model trusts, section
-2.2). `π` is `WidgetStatusView::mirrored()`.
+`spec_types.rs` (`SyncKind`, `Binding`, `inner_kind`, `inner_key`, the mirror
+relation and the status builders), `rely_guarantee.rs`, `liveness_theorem.rs`
+(R1, R2, R3, R3s, D3), `step.rs` (the reconcilers' step types) and
+`exec_types.rs` (`SyncKindExec` and the outcome types). Every one of them is
+stated for a kind `k` and, where the mirrors are concerned, a binding `b`; the
+routing the model trusts (section 2.2) is now `RegistryEntry::api_resource`,
+which names the model kind of a configured kind in a cluster. `π` is
+`SyncedStatusView::mirrored()`.
 
-Trusted beyond the specification, all under `widget_sync_controller/`: the
-`external_body` accessors and constructors of `trusted/exec_types.rs`
-(`well_formed`, `spec`, `status`, `set_spec` and `set_status` of both
-wrappers; `count`, `message`, `observed_generation`, `ready` and
-`observed_count` of the status; `outer_status_for`, which builds the outer
-status, its three conditions included, by hand to match the spec's
-definition), and the three `Marshallable` instances of the
-reconcile states in `model/install.rs`. From the framework the pair relies on
-the wrapper macro's `unmarshal`, `marshal`, `api_resource` and `has_kind`
-postconditions, on `UidToken`, on the `PatchTests` and `Preconditions`
-setters, and on the shim's construction of the JSON `test` operations, which
-is where "patches test uid and generation" becomes real.
-`tools/check-widget-exec-hygiene.sh` fails when an `external_body` appears
-anywhere else under `widget_sync_controller/`.
+Trusted beyond the specification, all under `widget_sync_controller/`: one
+`external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
+which builds the outer status, its three conditions included, by hand to match
+the spec's definition — and the three `Marshallable` instances of the
+reconcile states in `model/install.rs`. Everything the pair used to trust
+about its own wrappers is now the shape's, in
+`kubernetes_api_objects/exec/synced_object.rs` and
+`kubernetes_api_objects/exec/registry.rs`. From the framework the pair relies
+on `SyncedObject`'s `unmarshal`, `marshal`, `has_kind` and accessor
+postconditions and on `RegistryEntry::api_resource`, on `UidToken`, on the
+`PatchTests` and `Preconditions` setters, and on the shim's construction of
+the JSON `test` operations, which is where "patches test uid and generation"
+becomes real. `tools/check-widget-exec-hygiene.sh` fails when an
+`external_body` appears anywhere else under `widget_sync_controller/`.
 
 ### 3.1 Guarantees
 

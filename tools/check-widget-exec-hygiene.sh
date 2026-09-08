@@ -27,15 +27,15 @@ fi
 ## controller must be added there deliberately, so its location is pinned here.
 root=src/controllers/widget_sync_controller
 expected="$root/model/install.rs:3
-$root/trusted/exec_types.rs:11"
-actual=$(grep -rc 'external_body' "$root" | grep -v ':0$' | sort)
+$root/trusted/exec_types.rs:1"
+actual=$(grep -rc --exclude-dir=target --exclude-dir='target-*' 'external_body' "$root" | grep -v ':0$' | sort)
 if [ "$actual" != "$expected" ]; then
     echo "external_body items under $root changed; update doc/widget_sync_design.md section 3 and this script" >&2
     echo "expected:" >&2; echo "$expected" >&2
     echo "found:" >&2; echo "$actual" >&2
     exit 1
 fi
-if grep -rn 'verifier(external)\]' "$root"; then
+if grep -rn --exclude-dir=target --exclude-dir='target-*' 'verifier(external)\]' "$root"; then
     echo "widget sync code must not declare verifier(external) items" >&2
     exit 1
 fi

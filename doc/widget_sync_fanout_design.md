@@ -65,9 +65,19 @@ mirror's identity: a parent uid is bound to one cluster for the life of the
 object, so a mirror in cluster `c` naming parent uid `u` is either the live
 mirror of `u` or stale, never the mirror of `u` "before it moved". The
 janitor nevertheless also checks the cluster (section 3.3), so that the
-proofs do not depend on the CEL rule; the rule's job is to keep an edit
-from tearing down and rebuilding a workload cluster, not to hold up a
-theorem.
+janitor's *decision* does not depend on the CEL rule; the rule's job is to
+keep an edit from tearing down and rebuilding a workload cluster.
+
+The proofs do lean on the rule in one place, which was not foreseen when
+this was written. The janitor's per-binding delete-soundness invariant says
+that a listed outer object stays selected for the binding it was seen in;
+that is stable only because the installed type's `valid_transition` — the
+model's reading of the CEL rule (section 2.3) — preserves `cluster_of`
+across an update. `Cluster::lemma_api_server_step_preserves_cluster_of`
+(`kubernetes_cluster/proof/synced_objects.rs`) is that step. So a kind
+configured with a `field` selector whose CRD does not carry the immutability
+rule breaks the invariant, not merely the operational guarantee. For a
+`name` selector nothing is needed: `metadata.name` cannot change.
 
 ### 1.2 Bindings and their kubeconfigs
 
@@ -398,6 +408,18 @@ The statements of the main design, section 3.3, with parameters:
   compose with each other and with the four other controllers of the
   repository by kind disjointness, exactly as the pair does today.
 
+  **TODO (open).** What is proved is the closed statement for a singleton
+  `B = {b}`: `widget_pair_core_holds` composes `sync_k` with the one janitor
+  `janitor_{k,b}`, and `compose_all` puts that pair beside the four other
+  controllers. The sync controller's liveness dependency is already written
+  as `janitors_esr(k, B, ids)`, the `tla_forall` over bindings of the
+  janitors' ESRs, so the statement is the general one; what is missing is the
+  induction that discharges it for `|B| > 1` by composing the janitors one
+  binding at a time (a `Set<Binding>` with `finite()`, or a `Seq<Binding>`).
+  Welder's `compose_dep` composes two core sets at a time, and each step of
+  the induction has to re-establish `satisfies_dependency` for the partial
+  union, which did not fall out in the time available.
+
 Hypotheses added to the theorems, in place of the lemmas that today prove
 them from the literal strings:
 
@@ -420,6 +442,17 @@ side as other controllers; they meet the refinement's hypotheses 1 to 3
 (they are the same reconcilers, whose commutation lemmas are proved once
 with the data as parameters). R1 to R3s and the delete soundness are then
 read on two-store executions per binding, as today.
+
+Two hypotheses the fixed pair did not need appear here. First, the folded
+one-store cluster installs the mirror kind of *every* binding of `k`, not
+only of `b`: the sync controller of `k` serves every binding, so a Create it
+sends for an outer copy of another binding must still name a known kind
+(`TwoCluster::request_ok`). The mirrors of the other bindings then live on
+the primary side, which is what the paragraph above says. Second, the
+selector of `k` must be a *field* of the spec, not `metadata.name`: the
+refinement asks that the API server's validation not read metadata
+(`installed_types_ignore_metadata`), and the immutability rule of a `name`
+selector reads `metadata.name`.
 
 ### 5.3 What that leaves unstated
 

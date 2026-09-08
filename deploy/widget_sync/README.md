@@ -96,6 +96,20 @@ ours.
 Manifests: `rbac_inner.yaml` (inner cluster), `rbac.yaml` and
 `deploy_local.yaml` (outer cluster).
 
+**The kind and the binding.** The reconcilers are parameterized by a kind and
+a binding (`doc/widget_sync_fanout_design.md`, sections 2.1 and 3.4). This
+binary instantiates them at one of each, named in
+`src/bin/widget_sync_controller.rs`: the kind
+`anvil.dev/v1/Widget:field:spec.clusterName` — an object's cluster is the
+string at `spec.clusterName` — and the binding `default/inner`, whose
+credential is the kubeconfig at `$REMOTE_KUBECONFIG` (default
+`/etc/widget-sync/remote-kubeconfig/kubeconfig`). At boot the binary
+discovers the kind in the outer cluster and checks that its CRD has the shape
+the reconcilers need (`doc/widget_sync_fanout_design.md`, section 2.2); a kind
+that is not served, or a CRD of the wrong shape, is a startup error. Taking
+the kinds from `--kind` flags and the bindings from Secrets are the follow-up
+issues. `widget_sync_controller export` prints the demo CRDs.
+
 **Remote credential.** The Secret `widget-sync-remote-kubeconfig` in the outer
 cluster has two keys, mounted into one directory: `kubeconfig`, which names the
 inner API server and its CA, and `token`, the bearer token of the inner
