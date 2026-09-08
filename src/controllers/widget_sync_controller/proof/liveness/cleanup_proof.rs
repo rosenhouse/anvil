@@ -454,6 +454,7 @@ pub proof fn lemma_mirror_collected_after_step(
                                     WidgetSyncStepView::AfterCreateInner => {},
                                     WidgetSyncStepView::AfterPatchInner => { assert(false); },
                                     WidgetSyncStepView::AfterPatchOuterStatus => { assert(false); },
+                                    WidgetSyncStepView::AfterReportError => { assert(false); },
                                     WidgetSyncStepView::Done => { assert(false); },
                                     WidgetSyncStepView::Error => { assert(false); },
                                 }

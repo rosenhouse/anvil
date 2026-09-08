@@ -371,6 +371,24 @@ proof fn lemma_sync_new_request_is_guaranteed(
                 _ => { assert(false); },
             }
         },
+        // After a failed Create or Patch of the mirror the reconciler reports the
+        // failure with a status patch of the outer copy.
+        WidgetSyncStepView::AfterCreateInner => {
+            match req {
+                APIRequest::PatchStatusRequest(patch_req) => {
+                    lemma_outer_status_patch_is_guaranteed(outer, patch_req, cr_key);
+                },
+                _ => { assert(false); },
+            }
+        },
+        WidgetSyncStepView::AfterPatchInner => {
+            match req {
+                APIRequest::PatchStatusRequest(patch_req) => {
+                    lemma_outer_status_patch_is_guaranteed(outer, patch_req, cr_key);
+                },
+                _ => { assert(false); },
+            }
+        },
         _ => { assert(false); },
     }
 }

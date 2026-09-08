@@ -53,6 +53,18 @@ pub open spec fn sync_step_after_get_inner() -> spec_fn(ReconcileLocalState) -> 
         ||| step == WidgetSyncStepView::AfterCreateInner
         ||| step == WidgetSyncStepView::AfterPatchInner
         ||| step == WidgetSyncStepView::AfterPatchOuterStatus
+        ||| step == WidgetSyncStepView::AfterReportError
+        ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
+    }
+}
+
+// Every step the sync reconciler can be at right after answering the Create or the
+// Patch of the mirror: done, or reporting the failure before ending in Error.
+pub open spec fn sync_step_after_mirror_write() -> spec_fn(ReconcileLocalState) -> bool {
+    |s: ReconcileLocalState| {
+        let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::AfterReportError
         ||| step == WidgetSyncStepView::Done
         ||| step == WidgetSyncStepView::Error
     }

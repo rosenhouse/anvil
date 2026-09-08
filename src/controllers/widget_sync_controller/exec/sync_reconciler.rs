@@ -1,5 +1,6 @@
 // Exec implementation of the sync reconciler; every function is proved to conform
 // to its counterpart in model::sync_reconciler, which carries the comments.
+use crate::kubernetes_api_objects::error::APIError;
 use crate::kubernetes_api_objects::exec::prelude::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
@@ -105,7 +106,8 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
             }
             let get_result = extract_some_k_get_resp!(resp_o);
             if get_result.is_err() {
-                if get_result.unwrap_err().is_object_not_found() {
+                let err = get_result.unwrap_err();
+                if err.is_object_not_found() {
                     let req = KubeAPIRequest::CreateRequest(KubeCreateRequest {
                         api_resource: InnerWidget::api_resource(),
                         namespace: namespace,
@@ -113,7 +115,7 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                     });
                     return (at_step(WidgetSyncStep::AfterCreateInner), Some(Request::KRequest(req)));
                 }
-                return (at_step(WidgetSyncStep::Error), None);
+                return report_error(outer, failure_status(outer, &err, false));
             }
             let unmarshalled = InnerWidget::unmarshal(get_result.unwrap());
             if unmarshalled.is_err() {
@@ -164,21 +166,32 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
             return write_outer_status_or_done(outer, status);
         },
         WidgetSyncStep::AfterCreateInner => {
-            if is_some_k_create_resp!(resp_o) && extract_some_k_create_resp_as_ref!(resp_o).is_ok() {
+            if !is_some_k_create_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let create_result = extract_some_k_create_resp!(resp_o);
+            if create_result.is_ok() {
                 return (at_step(WidgetSyncStep::Done), None);
             }
-            return (at_step(WidgetSyncStep::Error), None);
+            return report_error(outer, failure_status(outer, &create_result.unwrap_err(), true));
         },
         WidgetSyncStep::AfterPatchInner => {
-            if is_some_k_patch_resp!(resp_o) && extract_some_k_patch_resp_as_ref!(resp_o).is_ok() {
+            if !is_some_k_patch_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let patch_result = extract_some_k_patch_resp!(resp_o);
+            if patch_result.is_ok() {
                 return (at_step(WidgetSyncStep::Done), None);
             }
-            return (at_step(WidgetSyncStep::Error), None);
+            return report_error(outer, failure_status(outer, &patch_result.unwrap_err(), false));
         },
         WidgetSyncStep::AfterPatchOuterStatus => {
             if is_some_k_patch_status_resp!(resp_o) && extract_some_k_patch_status_resp_as_ref!(resp_o).is_ok() {
                 return (at_step(WidgetSyncStep::Done), None);
             }
+            return (at_step(WidgetSyncStep::Error), None);
+        },
+        WidgetSyncStep::AfterReportError => {
             return (at_step(WidgetSyncStep::Error), None);
         },
         _ => {
@@ -290,6 +303,53 @@ pub fn outer_status_patch(outer: &OuterWidget, status: WidgetStatus) -> (req: Ku
         namespace: outer.metadata().namespace().unwrap(),
         tests: tests,
         obj: with_status.marshal(),
+    }
+}
+
+// The reason reported for an error response. See spec_types::error_reason.
+pub fn error_reason(err: &APIError, answering_create: bool) -> (reason: FailureReason)
+    ensures reason@ == spec_types::error_reason(*err, answering_create),
+{
+    match err {
+        APIError::Forbidden => FailureReason::Forbidden,
+        APIError::Timeout => FailureReason::InnerUnreachable,
+        APIError::ServerTimeout => FailureReason::InnerUnreachable,
+        APIError::InternalError => FailureReason::InnerUnreachable,
+        APIError::ObjectNotFound => if answering_create { FailureReason::CreateFailed } else { FailureReason::RequestFailed },
+        APIError::Invalid => FailureReason::Rejected,
+        APIError::BadRequest => FailureReason::Rejected,
+        APIError::NotSupported => FailureReason::Rejected,
+        _ => FailureReason::RequestFailed,
+    }
+}
+
+// The status that reports a failed request. See model::failure_status.
+pub fn failure_status(outer: &OuterWidget, err: &APIError, answering_create: bool) -> (status: WidgetStatus)
+    requires outer@.well_formed(),
+    ensures status@ == model::failure_status(outer@, *err, answering_create),
+{
+    let generation = outer.metadata().generation();
+    proof {
+        assert(opt_i64_view(generation) == outer@.metadata.generation);
+    }
+    let previous = outer.status();
+    proof {
+        assert(previous.deep_view() == outer@.status);
+    }
+    WidgetStatus::outer_status_without_inner(generation, &previous, error_reason(err, answering_create).reason())
+}
+
+// Report a failed request in the outer status, then end in Error. See model::report_error.
+pub fn report_error(outer: &OuterWidget, status: WidgetStatus) -> (res: (WidgetSyncReconcileState, Option<Request<VoidEReq>>))
+    requires outer@.well_formed(),
+    ensures (res.0@, res.1.deep_view()) == model::report_error(outer@, status@),
+{
+    let current = outer.status();
+    if current.is_some() && current.as_ref().unwrap().eq(&status) {
+        (at_step(WidgetSyncStep::Error), None)
+    } else {
+        let req = KubeAPIRequest::PatchStatusRequest(outer_status_patch(outer, status));
+        (at_step(WidgetSyncStep::AfterReportError), Some(Request::KRequest(req)))
     }
 }
 

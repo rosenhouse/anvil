@@ -46,6 +46,7 @@ pub proof fn sync_reconcile_eventually_terminates(
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))),
     ensures
         spec.entails(tla_forall(|key: ObjectRef| true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key))))),
 {
@@ -57,6 +58,7 @@ pub proof fn sync_reconcile_eventually_terminates(
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))), key);
         if key.kind == OuterWidgetView::kind() {
             sync_reconcile_eventually_terminates_on_key(spec, cluster, controller_id, key);
         } else {
@@ -93,6 +95,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner))))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))),
     ensures
         spec.entails(true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key)))),
 {
@@ -118,10 +121,21 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
         idle
     );
 
-    // The three steps after a write end in Done or Error whatever the response is.
-    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner), sync_step_is_terminal());
-    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner), sync_step_is_terminal());
+    // The status write of the outer copy, and the one that reports a failure, end
+    // in Done or Error whatever the response is.
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus), sync_step_is_terminal());
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError), sync_step_is_terminal());
+
+    // The Create and the Patch of the mirror end in Done, or report their failure first.
+    or_leads_to_combine_and_equality!(
+        spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_mirror_write())),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
+        idle
+    );
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner), sync_step_after_mirror_write());
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner), sync_step_after_mirror_write());
 
     // After the Get of the mirror, the reconciler is at one of those steps, or done.
     or_leads_to_combine_and_equality!(
@@ -129,6 +143,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
         idle
@@ -149,6 +164,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
         idle
@@ -163,6 +179,7 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(controller_id: int, key: O
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error))),
 {
@@ -172,6 +189,7 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(controller_id: int, key: O
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error)));
     assert forall |ex| #![auto] true_pred::<ClusterState>().satisfied_by(ex) implies rhs.satisfied_by(ex) by {
@@ -184,6 +202,7 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(controller_id: int, key: O
                 WidgetSyncStepView::AfterCreateInner => {},
                 WidgetSyncStepView::AfterPatchInner => {},
                 WidgetSyncStepView::AfterPatchOuterStatus => {},
+                WidgetSyncStepView::AfterReportError => {},
                 WidgetSyncStepView::Done => {},
                 WidgetSyncStepView::Error => {},
             }
