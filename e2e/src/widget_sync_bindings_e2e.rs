@@ -18,7 +18,9 @@
 //      janitor window untouched (a refused binding runs no janitor);
 //   3. a missing Secret reads as an unreachable cluster: deleting `b-kubeconfig`
 //      makes the Widget bound to `b` report Synced=False/InnerUnreachable within
-//      two requeues, and re-creating the Secret brings it back to Synced=True;
+//      two requeues, and re-creating the Secret brings it back to Synced=True at
+//      a spec edited while it was down -- so the mirror it ends up with was
+//      written through the clients built after the Secret came back;
 //   4. a rotated credential: the `value` of `a-kubeconfig` is replaced by an
 //      equivalent kubeconfig with different bytes, which rebuilds the binding's
 //      clients and restarts its janitors. The bound Widget keeps its mirror and
@@ -32,10 +34,11 @@ use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use k8s_openapi::ByteString;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::{
-    api::{Api, DeleteParams, ObjectMeta, PostParams, ResourceExt},
+    api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams, ResourceExt},
     core::ErrorResponse,
     Client,
 };
+use serde_json::json;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::*;
@@ -47,7 +50,8 @@ use verifiable_controllers::shim_layer::bindings::{
 use crate::common::*;
 use crate::widget_sync_e2e::{
     client_for_context, failed, is_mirror_of, outer_reports, still_the_same_mirror, synced_condition, uid, wait_for,
-    wait_until, Widgets, JANITOR_WINDOW, MARGIN, ONE_RECONCILE, OUTER_CONTEXT, REQUEUE, TIMEOUT,
+    wait_until, Widgets, BACKED_OFF_RETRY, JANITOR_WINDOW, MARGIN, ONE_RECONCILE, OUTER_CONTEXT, REMOTE_TIMEOUT,
+    REQUEUE, RETRY_BASE, TIMEOUT,
 };
 
 const INNER_A_CONTEXT: &str = "kind-widget-sync-inner-a";
@@ -59,13 +63,21 @@ const A_SECRET: &str = "a-kubeconfig";
 const B_SECRET: &str = "b-kubeconfig";
 
 // A binding whose Secret went away is not noticed by any watch of the object's
-// own cluster: the outer copy is repaired at its requeue, and the first attempt
-// after the Secret went may still be the one that ran just before. Two requeues
-// plus a failed attempt and slack is the bound a healthy controller meets.
-const TWO_RECONCILES: Duration = Duration::from_secs(2 * REQUEUE.as_secs() + ONE_RECONCILE.as_secs() - REQUEUE.as_secs());
+// own cluster: the object learns of it at its own next reconcile, and the
+// attempt that ran just before the Secret went still had the old client. Two
+// requeues, then one attempt, and slack. The object cannot be deeper into
+// error_policy's backoff schedule than its head when the fault arrives --
+// every reconcile of it up to then succeeded, and success forgets the count --
+// so RETRY_BASE and not RETRY_CAP is the retry this has to allow for.
+const FAULT_NOTICED: Duration = Duration::from_secs(
+    2 * REQUEUE.as_secs() + REMOTE_TIMEOUT.as_secs() + RETRY_BASE.as_secs() + MARGIN.as_secs(),
+);
 
 // A claim that was deleted is written again at the bound binding's next
 // re-check; this is that interval with the slack of a poll and a round trip.
+// The re-check is the binding manager's own timer and has nothing to do with
+// error_policy's per-object backoff: the binding is bound and its reconciles
+// are succeeding, and it is the claim rather than any object that went away.
 const CLAIM_RECHECK: Duration = Duration::from_secs(BOUND_RECHECK_INTERVAL.as_secs() + MARGIN.as_secs());
 
 fn widget_in(namespace: &str, name: &str, cluster: &str, count: i32) -> Widget {
@@ -284,8 +296,18 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         .create(&PostParams::default(), &widget_in(TENANT, "gamma", "a", 5))
         .await
         .map_err(failed("create the tenant widget gamma"))?;
+    // `gamma` starts failing the moment it is created -- until the manager has
+    // attempted the copied Secret the binding is not one this reconcile was
+    // built with, which reads as InnerUnreachable -- so it is already walking
+    // error_policy's backoff schedule by the time the refusal is decided, and
+    // the report of the refusal comes at whatever attempt is next after that.
+    // The attempt is a few seconds away in practice (the manager acts on the
+    // Secret's watch event and the refusal costs one access check and one claim
+    // read), which is why this normally passes at once; BACKED_OFF_RETRY is the
+    // bound for the case where gamma has been failing long enough to be at the
+    // cap when the refusal lands.
     let t = tenant_outer.clone();
-    wait_until("the tenant Widget reports Synced=False/Forbidden with Stalled=True", TIMEOUT, move || {
+    wait_until("the tenant Widget reports Synced=False/Forbidden with Stalled=True", BACKED_OFF_RETRY, move || {
         let t = t.clone();
         async move { Ok(reports_stalled(&t.get("gamma").await?, "Forbidden")) }
     })
@@ -316,12 +338,13 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
     info!("the claim refused the binding {}/a and cost the binding default/a nothing", TENANT);
 
     // 3. A binding whose Secret goes away is an unreachable inner cluster; the
-    //    Secret coming back binds it again.
+    //    Secret coming back binds it again, and the work that piled up while it
+    //    was gone follows.
     let b_secret = get_secret(&secrets, B_SECRET).await?;
     secrets.delete(B_SECRET, &DeleteParams::default()).await.map_err(failed("delete b-kubeconfig"))?;
     info!("deleted the binding Secret {}", B_SECRET);
     let o = outer.clone();
-    wait_until("the Widget bound to b reports Synced=False/InnerUnreachable", TWO_RECONCILES, move || {
+    wait_until("the Widget bound to b reports Synced=False/InnerUnreachable", FAULT_NOTICED, move || {
         let o = o.clone();
         async move { Ok(reports_reason(&o.get("beta").await?, "InnerUnreachable")) }
     })
@@ -331,13 +354,37 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         .await
         .map_err(failed("re-create b-kubeconfig"))?;
     info!("re-created the binding Secret {}", B_SECRET);
+    // `beta` has been failing for as long as the wait above took, so its retry
+    // schedule is at or near RETRY_CAP and the Secret coming back is, by itself,
+    // no event of beta's own cluster. Two things bring it back sooner than that
+    // retry, and the scenario asserts the outcome of both: re-binding starts a
+    // fresh watch of the mirrors in cluster b, whose initial list emits the
+    // existing mirror of beta and so sends the sync runner a same-name trigger;
+    // and the edit below is a change to beta itself, which the runner's own
+    // watch delivers. Neither is guaranteed -- the trigger queue is bounded and
+    // may drop, and an edit that lands before the binding is usable is one more
+    // failure rather than a repair -- so the bound is BACKED_OFF_RETRY, the
+    // object's own retry at the cap. It is a bound and not a wait: when either
+    // event arrives, which is the ordinary case, this passes in seconds.
+    //
+    // The edit also makes the check discriminate: count 6 is a value beta never
+    // carried while the binding was up, so a mirror that reports it can only
+    // have been written through the clients built after the Secret came back.
+    const AFTER_REBIND_COUNT: i32 = 6;
+    outer
+        .api
+        .patch("beta", &PatchParams::default(), &Patch::Merge(json!({ "spec": { "count": AFTER_REBIND_COUNT } })))
+        .await
+        .map_err(failed("edit beta after re-creating its binding Secret"))?;
     let (o, i) = (outer.clone(), inner_b.clone());
-    wait_until("the Widget bound to b is Synced=True again", TWO_RECONCILES, move || {
+    wait_until("the Widget bound to b is Synced=True again at the spec edited while it was down", BACKED_OFF_RETRY, move || {
         let (o, i) = (o.clone(), i.clone());
         async move {
             let outer_obj = o.get("beta").await?;
             let inner_obj = match i.get_opt("beta").await? { Some(w) => w, None => return Ok(false) };
-            Ok(is_mirror_of(&inner_obj, &outer_obj) && outer_reports(&outer_obj, 4))
+            Ok(is_mirror_of(&inner_obj, &outer_obj)
+                && inner_obj.spec.count == AFTER_REBIND_COUNT
+                && outer_reports(&outer_obj, AFTER_REBIND_COUNT))
         }
     })
     .await?;
@@ -361,8 +408,15 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         .replace("alpha", &PostParams::default(), &edited)
         .await
         .map_err(failed("edit alpha after the rotation"))?;
+    // The rotation makes alpha fail for as long as the binding is being rebuilt,
+    // so alpha may be a few steps into the backoff schedule when the rebuilt
+    // clients are ready. The edit above is the event that brings it back at once
+    // -- and, like the edit in scenario 3, is what makes the check discriminate,
+    // since count 7 can only reach the inner cluster through the new clients --
+    // and BACKED_OFF_RETRY is the bound for the case where that edit landed
+    // during the rebuild and was itself a failure.
     let (o, i, u) = (outer.clone(), inner_a.clone(), alpha_mirror_uid.clone());
-    wait_until("after the rotation alpha reaches Synced=True at its new spec", TIMEOUT, move || {
+    wait_until("after the rotation alpha reaches Synced=True at its new spec", BACKED_OFF_RETRY, move || {
         let (o, i, u) = (o.clone(), i.clone(), u.clone());
         async move {
             let outer_obj = o.get("alpha").await?;
@@ -427,6 +481,8 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         .map_err(failed("delete the tenant namespace in inner-a"))?;
     outer.api.delete("alpha", &DeleteParams::default()).await.map_err(failed("delete outer widget alpha"))?;
     outer.api.delete("beta", &DeleteParams::default()).await.map_err(failed("delete outer widget beta"))?;
+    // Both janitors have been succeeding on these mirrors, so their next run is
+    // a resync away: ONE_RECONCILE, not BACKED_OFF_RETRY.
     let (a, b) = (inner_a.clone(), inner_b.clone());
     wait_until("both mirrors are collected by their janitors", ONE_RECONCILE, move || {
         let (a, b) = (a.clone(), b.clone());

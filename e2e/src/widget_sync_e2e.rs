@@ -59,22 +59,49 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(300);
 
 // Intervals of the controller under test, from src/shim_layer/controller_runtime.rs.
 // reconcile_with requeues a finished reconcile after 60s: that is the sync
-// reconciler's requeue and the janitor's resync (neither watch relists on its own),
-// and error_policy requeues a failed reconcile after 10s. A remote request times
-// out after 10s (src/bin/widget_sync_controller.rs), so one failed attempt costs
-// at most REMOTE_TIMEOUT + ERROR_REQUEUE before the next.
+// reconciler's requeue and the janitor's resync (neither watch relists on its
+// own). A failed reconcile is retried by error_policy on a schedule of its own,
+// per object: RETRY_BASE after the object's first failure, twice the last delay
+// after each further consecutive failure, up to RETRY_CAP -- 10, 20, 40, 80,
+// 160, 300, 300, ... seconds -- and back to RETRY_BASE as soon as a reconcile
+// of that object succeeds. So an object that has just been reconciled
+// successfully is never more than RETRY_BASE from its next attempt, while one
+// that has been failing for a few minutes is up to RETRY_CAP from it. A remote
+// request times out after 10s (src/bin/widget_sync_controller.rs), so one failed
+// attempt costs at most REMOTE_TIMEOUT plus the delay the schedule is at.
 pub(crate) const REQUEUE: Duration = Duration::from_secs(60);
-pub(crate) const ERROR_REQUEUE: Duration = Duration::from_secs(10);
+pub(crate) const RETRY_BASE: Duration = Duration::from_secs(10);
+pub(crate) const RETRY_CAP: Duration = Duration::from_secs(300);
 pub(crate) const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 // Slack for the reconcile itself, the watch latency and the poll period.
 pub(crate) const MARGIN: Duration = Duration::from_secs(30);
-// Within this bound a healthy controller has run at least one full reconcile of an
-// object after any trigger, even if the first attempt failed once: the requeue,
-// one failed attempt, and slack.
+// Within this bound a controller that was healthy when the trigger arrived has
+// run at least one full reconcile of the object, even if its first two attempts
+// failed: the requeue, then two attempts at the head of the backoff schedule
+// (RETRY_BASE and twice RETRY_BASE), and slack. That the object was healthy is
+// what makes the head of the schedule the right part of it: its last reconcile
+// succeeded, so its count was forgotten and its next delay is RETRY_BASE. An
+// object that has been failing for a while is bounded by BACKED_OFF_RETRY.
 pub(crate) const ONE_RECONCILE: Duration = Duration::from_secs(
-    REQUEUE.as_secs() + REMOTE_TIMEOUT.as_secs() + ERROR_REQUEUE.as_secs() + MARGIN.as_secs(),
+    REQUEUE.as_secs()
+        + 2 * REMOTE_TIMEOUT.as_secs()
+        + 3 * RETRY_BASE.as_secs()
+        + MARGIN.as_secs(),
 );
+// The bound for a scenario that repairs a fault an object has been failing on
+// long enough to have reached the cap. Nothing in the object's own cluster
+// changed when the fault was repaired, so in the worst case the repair reaches
+// it only at its next retry: RETRY_CAP, one attempt, and slack. Every scenario
+// that can do better does -- it makes the repair produce an event the sync
+// runner acts on at once, an edit of the outer object or the same-name trigger
+// a re-bound binding's mirror watch emits on its initial list -- and then
+// finishes in seconds; this bound is what is left if such an event is lost, and
+// costs nothing when it is not.
+pub(crate) const BACKED_OFF_RETRY: Duration =
+    Duration::from_secs(RETRY_CAP.as_secs() + REMOTE_TIMEOUT.as_secs() + MARGIN.as_secs());
 // A window in which the janitor has certainly resynced a mirror at least once.
+// The janitor's reconciles of a live mirror succeed, so this is its requeue and
+// not its retry schedule.
 pub(crate) const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
 
 pub(crate) async fn client_for_context(context: &str) -> Result<Client, Error> {
@@ -346,7 +373,9 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
     //    edit bumps the mirror's generation once and the overwrite once more; the
     //    overwrite is a JSON patch that tests the generation, so it lands exactly
     //    once. The inner watch triggers the reconcile at once; the bound is the
-    //    requeue that liveness rests on.
+    //    requeue that liveness rests on. ONE_RECONCILE and not BACKED_OFF_RETRY
+    //    because the reconciler has been succeeding on this object up to the
+    //    edit, so its retry schedule is at its head and not at the cap.
     const EDITED_COUNT: i32 = 99;
     let mirror_before = inner.get("demo").await?;
     still_the_same_mirror(&mirror_before, &mirror_uid)?;
@@ -442,7 +471,10 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
 
     // 7. An out-of-band delete of the mirror is repaired: the sync reconciler,
     //    triggered by the inner watch and at the latest by its requeue, finds
-    //    NotFound and creates the mirror again for the same parent.
+    //    NotFound and creates the mirror again for the same parent. The delete
+    //    is the fault and the repair in one: it is itself the event that
+    //    triggers the reconcile, so there is no interval in which the object
+    //    fails and backs off, and the bound is ONE_RECONCILE.
     inner.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete the mirror out of band"))?;
     let (o, i, old) = (outer.clone(), inner.clone(), mirror_uid.clone());
     let recreated_uid = wait_for("mirror deleted out of band is recreated with the outer spec and parent uid", ONE_RECONCILE, move || {
@@ -476,7 +508,13 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
     //    when it returns and the name is free. Nothing in the inner cluster
     //    changes on the outer delete, so the stale mirror is collected at the
     //    janitor's next resync; the delete event then triggers the sync
-    //    reconciler, which creates the mirror of the new object.
+    //    reconciler, which creates the mirror of the new object. ONE_RECONCILE:
+    //    the janitor has been reconciling this mirror successfully every
+    //    JANITOR_WINDOW (it found a live parent each time), so its next run is
+    //    its resync away, not a backed-off retry. The recreated outer copy
+    //    reports the stale mirror through the success path (StaleMirror is a
+    //    reported outcome, not a failed request), so it does not back off
+    //    either.
     let old_parent_uid = uid(&outer.get("demo").await?)?;
     let stale_mirror_uid = recreated_uid.clone();
     outer.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete outer widget demo"))?;
@@ -531,7 +569,9 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
     })
     .await?;
 
-    // 9. Deleting the outer copies: the mirror is collected, the foreign object survives.
+    // 9. Deleting the outer copies: the mirror is collected, the foreign object
+    //    survives. ONE_RECONCILE for the same reason as step 8: the janitor was
+    //    succeeding on this mirror right up to the outer delete.
     outer.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete outer widget demo"))?;
     outer.api.delete("foreign", &DeleteParams::default()).await.map_err(failed("delete outer widget foreign"))?;
     let i = inner.clone();

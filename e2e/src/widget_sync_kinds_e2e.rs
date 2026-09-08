@@ -64,11 +64,16 @@ const UNBOUND_CLUSTER: &str = "elsewhere";
 const WIDGET_NAME: &str = "kinds-demo";
 const NAMESPACE: &str = "default";
 
-// A window in which the sync reconciler has certainly reconciled an object again
-// after its last attempt: one full requeue plus slack. A failed attempt is
-// retried far more often than that (error_policy requeues after 10s), so a
-// controller that were going to create the mirror of an unbound cluster has had
-// many chances inside it.
+// The window the negative check below runs for: long enough that a controller
+// that were going to create the mirror of an unbound cluster has had several
+// goes at it. An object of an unbound cluster fails every reconcile, so it is
+// not on the requeue but on error_policy's backoff, and the attempts inside a
+// window of this length fall at about RETRY_BASE, three times RETRY_BASE and
+// seven times RETRY_BASE after the first failure -- four attempts counting the
+// first. Waiting for more would mean waiting out the cap, which buys nothing:
+// what the check discriminates is a reconciler that addresses an unbound
+// cluster at all, and such a reconciler would do it on its first attempt.
+// This window is spent in full on every run, so it is kept short on purpose.
 const RETRY_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
 
 fn gadget(name: &str, size: i32) -> Gadget {
@@ -288,7 +293,9 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
     //    no mirror is ever created. The first reconcile ends without a network
     //    round trip, so the status is written as soon as the outer watch has
     //    delivered the create; ONE_RECONCILE bounds it even if the very first
-    //    attempt is lost.
+    //    attempt is lost. The object has no history of failures when it is
+    //    created, so this first report is at the head of the backoff schedule
+    //    however long the object goes on failing afterwards.
     outer
         .api
         .create(&PostParams::default(), &gadget(UNBOUND_CLUSTER, 5))
@@ -306,8 +313,9 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
         }
     })
     .await?;
-    // ... and it stays that way: through a window that contains at least one
-    // full requeue of the object, and many failed attempts, nothing appears.
+    // ... and it stays that way: through a window that contains several of the
+    // object's failed attempts (see RETRY_WINDOW), nothing appears. This wait is
+    // spent in full: it ends on the clock, not on a condition.
     let (o, i) = (outer.clone(), inner.clone());
     let started = std::time::Instant::now();
     wait_until("no mirror is created for an unbound cluster through a requeue window", RETRY_WINDOW + MARGIN, move || {
@@ -367,6 +375,8 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
         .await
         .map_err(failed("delete outer gadget of the unbound cluster"))?;
     widgets.delete(WIDGET_NAME, &DeleteParams::default()).await.map_err(failed("delete outer widget"))?;
+    // The janitors have been reconciling both mirrors successfully all along, so
+    // their next run is a resync away and not a backed-off retry: ONE_RECONCILE.
     let i = inner.clone();
     wait_until("the gadget mirror is collected by the janitor", ONE_RECONCILE, move || {
         let i = i.clone();
