@@ -249,7 +249,17 @@ async fn main() -> Result<()> {
             // errors: a kind that is not there, or whose CRD is the wrong shape,
             // can never be reconciled.
             let gvks: Vec<_> = kinds.iter().map(|k| k.gvk()).collect();
-            let registry = discover_kinds(&primary, &gvks).await?;
+            let registry = match discover_kinds(&primary, &gvks).await {
+                Ok(registry) => registry,
+                Err(e) => {
+                    // A kind that is not served, or is cluster-scoped, is as much
+                    // a usage error as a CRD of the wrong shape; report it the
+                    // same way rather than as a generic startup failure.
+                    error!("{}", e);
+                    eprintln!("{}", e);
+                    process::exit(2);
+                }
+            };
             // (kind, its registry entry, its plural), in configuration order.
             let mut configured = Vec::with_capacity(kinds.len());
             for (i, kind) in kinds.iter().enumerate() {
