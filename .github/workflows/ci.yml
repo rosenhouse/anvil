@@ -273,13 +273,15 @@ jobs:
         run: go install sigs.k8s.io/kind@v$kind_version
       - name: Check widget sync exec hygiene
         run: ./tools/check-widget-exec-hygiene.sh
-      - name: Deploy widget sync controller across two kind clusters
+      - name: Deploy widget sync controller across three kind clusters
         run: |
           . "$HOME/.cargo/env"
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           ./tools/two-cluster-test.sh --build
-      - name: Run widget sync two-cluster e2e tests
+      - name: Run widget sync e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync
+      - name: Run widget sync bindings e2e tests
+        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync-bindings
       - name: Collect controller logs
         if: failure()
         run: |
@@ -287,12 +289,22 @@ jobs:
           kubectl --context kind-widget-sync-outer -n widget-sync logs deployment/widget-sync-controller --tail=400 || true
           kubectl --context kind-widget-sync-outer -n widget-sync describe pod -l app.kubernetes.io/name=widget-sync-controller || true
           echo "::endgroup::"
-          echo "::group::echo controller (inner)"
-          kubectl --context kind-widget-sync-inner -n widget-echo logs deployment/widget-echo-controller --tail=200 || true
+          for cluster in a b; do
+            echo "::group::echo controller (inner-$cluster)"
+            kubectl --context "kind-widget-sync-inner-$cluster" -n widget-echo logs deployment/widget-echo-controller --tail=200 || true
+            echo "::endgroup::"
+          done
+          echo "::group::bindings"
+          kubectl --context kind-widget-sync-outer get secrets -A -o name | grep -- -kubeconfig || true
+          for cluster in a b; do
+            kubectl --context "kind-widget-sync-inner-$cluster" -n kube-system get configmap anvil-sync-claim -o yaml || true
+          done
           echo "::endgroup::"
           echo "::group::widgets"
           kubectl --context kind-widget-sync-outer get widgets -A -o yaml || true
-          kubectl --context kind-widget-sync-inner get widgets -A -o yaml || true
+          for cluster in a b; do
+            kubectl --context "kind-widget-sync-inner-$cluster" get widgets -A -o yaml || true
+          done
           echo "::endgroup::"
 
   # Aggregates every other job into a single status, so branch protection can
