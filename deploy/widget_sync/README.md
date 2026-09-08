@@ -12,22 +12,27 @@ the kinds and the bindings, `doc/widget_sync_fanout_design.md`.
 
 | Cluster | kind name / kubectl context | Runs |
 |---|---|---|
-| outer | `widget-sync-outer` / `kind-widget-sync-outer` | the Widget CRD; users' `Widget`s; the verified sync controller (namespace `widget-sync`, one replica, sync reconciler and janitor in one process) |
-| inner | `widget-sync-inner` / `kind-widget-sync-inner` | the same CRD; the mirrors; the unverified echo controller (namespace `widget-echo`), which writes only status |
+| outer | `widget-sync-outer` / `kind-widget-sync-outer` | the demo CRDs; users' objects; the verified sync controller (namespace `widget-sync`, one replica, the sync reconcilers and every binding's janitors in one process) |
+| inner of binding `default/a` | `widget-sync-inner-a` / `kind-widget-sync-inner-a` | the same CRDs; the mirrors of objects bound to `a`; the unverified echo controller (namespace `widget-echo`), which writes only status |
+| inner of binding `default/b` | `widget-sync-inner-b` / `kind-widget-sync-inner-b` | the same, for the objects bound to `b` |
 
-The controller reaches the inner cluster through a kubeconfig mounted from the
-Secret `widget-sync-remote-kubeconfig`; see "Operating the controller" below.
+Which inner cluster an object goes to is its **binding**, the pair (namespace,
+cluster name), and the controller reaches that cluster through the Secret
+`<clusterName>-kubeconfig` of the namespace: `default/a-kubeconfig` and
+`default/b-kubeconfig` here. See "Bindings and the claim" below.
 
 ## Run
 
 Prerequisites: docker, kind, kubectl, and the toolchain `tools/deploy.sh` uses.
 
 ```sh
-./tools/two-cluster-test.sh --build          # build images, create both clusters, deploy
+./tools/two-cluster-test.sh --build          # build images, create the three clusters, deploy
 kubectl --context kind-widget-sync-outer apply -f deploy/widget_sync/widget.yaml
 kubectl --context kind-widget-sync-outer get widget demo -o yaml
-kubectl --context kind-widget-sync-inner get widget demo -o yaml
-cd e2e && cargo run -- widget-sync           # the end-to-end test against the same clusters
+kubectl --context kind-widget-sync-inner-a get widget demo -o yaml
+cd e2e && cargo run -- widget-sync           # the end-to-end tests against the same clusters
+cd e2e && cargo run -- widget-sync-kinds
+cd e2e && cargo run -- widget-sync-bindings
 ```
 
 Without `--build` the script reuses the images
@@ -88,10 +93,16 @@ ours.
 - Delete the outer copy. The janitor removes the mirror. Delete and recreate
   with the same name: the new copy may briefly report `StaleMirror` until the
   janitor removes the old mirror, then a new one is created.
-- Disconnect `widget-sync-inner-control-plane` from the `kind` docker network,
-  edit the outer spec, reconnect. While the inner cluster is unreachable the
-  outer copy reports `Synced=False/InnerUnreachable` at the new generation;
-  after the heal it reaches `Synced=True`.
+- Disconnect `widget-sync-inner-a-control-plane` from the `kind` docker
+  network, edit the outer spec, reconnect. While the inner cluster is
+  unreachable the outer copy reports `Synced=False/InnerUnreachable` at the new
+  generation; after the heal it reaches `Synced=True`. Deleting the binding's
+  Secret `default/a-kubeconfig` reads the same way, without touching the
+  network; re-creating it binds the cluster again.
+- Copy `default/a-kubeconfig` into another namespace under the same name and
+  create an object there bound to `a`. The claim refuses the second binding:
+  the object reports `Synced=False/Forbidden` with `Stalled=True` and nothing
+  of it ever reaches the inner cluster ("Bindings and the claim" below).
 
 ## Kinds and their shape
 
@@ -185,56 +196,120 @@ puts the rule back; the next restart boots. The same CRD is accepted for a
 the row it removes. `cargo test --bin widget_sync_controller` checks that
 message without a cluster.
 
-**Adding a kind.** Its CRD in both clusters, one `--kind` flag in
-`deploy_local.yaml`, its `<plural>` and `<plural>/status` rules in
+**Adding a kind.** Its CRD in the outer cluster and in every inner one, one
+`--kind` flag in `deploy_local.yaml`, its `<plural>` and `<plural>/status` rules in
 `rbac.yaml`, its `<plural>` rules in `rbac_inner.yaml`, and — for the demo —
 one `--kind` and the matching rules for the echo controller in
 `echo_inner.yaml`, plus a line in that binary's `ECHOES` table if the kind
 should report a payload of its own.
+
+## Bindings and the claim
+
+A **binding** is a pair (namespace, cluster name): the objects of that
+namespace whose cluster selector names that cluster, and the inner cluster
+they are mirrored into. Its credential is the Secret
+`<clusterName>-kubeconfig` of that namespace, key `value`, holding a
+self-contained kubeconfig — the Cluster API convention, so a management
+cluster provides it without any help from us. The controller watches the
+Secrets of every namespace (`rbac.yaml` grants `secrets` get, list and watch)
+and keeps one pair of clients per binding whose Secret exists. Nothing is
+mounted and nothing is configured per binding: adding an inner cluster is
+adding its Secret, removing one is removing its Secret.
+
+```sh
+kubectl --context kind-widget-sync-outer -n default create secret generic c-kubeconfig --from-file=value=./kubeconfig-of-c
+kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-controller | grep '^.*binding default/c'
+```
+
+| The binding's Secret | What its objects report | What the controller does |
+|---|---|---|
+| missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
+| present but not a parseable kubeconfig | `Synced=False/InnerUnreachable` | the same, plus one warn line; it is retried when the Secret changes |
+| present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
+| present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
+| present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it |
+
+A changed Secret (a rotated credential; Cluster API rewrites the Secret)
+rebuilds the binding's clients and restarts its janitors, with no restart of
+the pod.
+
+**The access check.** Before a binding is used, the controller asks its inner
+cluster, with one `SelfSubjectAccessReview` per verb and configured kind in the
+binding's namespace, whether the credential may get, list, watch, create,
+patch and delete the kind, and whether it may `get` and `create` configmaps in
+`kube-system` for the claim. A denial marks that one binding degraded — its
+requests are answered `Forbidden` — and is logged; an error means the cluster
+did not answer, which leaves the binding unbound and retried. Neither ever
+exits the process: one bad inner cluster must not stop the others.
+
+**The claim.** On first contact the controller creates, in the inner cluster,
+the ConfigMap `kube-system/anvil-sync-claim` with
+
+```
+owner:       <outer cluster id>
+namespace:   <binding namespace>
+clusterName: <binding cluster name>
+```
+
+If it is already there, all three fields are compared. A match is the
+binding's own claim (a restart, a re-created Secret); a mismatch means another
+binding owns that cluster — the usual cause is a kubeconfig copied into a
+second namespace or under a second name — and the binding is **refused**: no
+janitor of it is started and the shim answers its every request `Forbidden`,
+so its objects report `Synced=False/Forbidden` with `Stalled=True`. This is
+what makes "one outer binding per inner cluster", an assumption of the proofs,
+true in practice. The refusal is logged once, at warn, with the holder:
+
+```
+WARN binding tenant/a: refused, its inner cluster is claimed by owner="7f3c…" binding=default/a.
+     Its objects report Synced=False/Forbidden with Stalled=True and no janitor runs for it;
+     it is re-checked every 300s.
+```
+
+To **release** a claim — the inner cluster is genuinely being handed to
+another binding — delete the ConfigMap by hand, with a credential of your own
+(the controller may only get and create it):
+
+```sh
+kubectl --context kind-widget-sync-inner-a -n kube-system get configmap anvil-sync-claim -o yaml
+kubectl --context kind-widget-sync-inner-a -n kube-system delete configmap anvil-sync-claim
+```
+
+The next re-check, at most five minutes later or at once if the binding's
+Secret is touched, claims it for the binding that is still there.
+
+**The outer cluster id** is the uid of the outer cluster's `kube-system`
+namespace, read once at boot: the de facto stable identity of a cluster.
+`--outer-cluster-id <id>` (env `OUTER_CLUSTER_ID`) overrides it, for a restore
+that recreated that namespace — the claims of the inner clusters name the old
+uid and every binding would be refused — and for the case the claim cannot
+otherwise tell apart, two management clusters cloned with the same
+`kube-system` uid, where the operator must give one of them an id of its own.
 
 ## Operating the controller
 
 Manifests: `rbac_inner.yaml` (inner cluster), `rbac.yaml` and
 `deploy_local.yaml` (outer cluster).
 
-**The binding.** The reconcilers are parameterized by a kind and a binding
-(`doc/widget_sync_fanout_design.md`, sections 2.1 and 3.4). The kinds come
-from the `--kind` flags ("Kinds and their shape" above); the binding is still
-one, named in `src/bin/widget_sync_controller.rs`: `default/inner`, whose
-credential is the kubeconfig at `$REMOTE_KUBECONFIG` (default
-`/etc/widget-sync/remote-kubeconfig/kubeconfig`). An object whose selector
-names any other cluster has no binding, so every request for it is answered as
-if the inner cluster were unreachable and the outer copy reports
-`Synced=False/InnerUnreachable`. Discovering the bindings from Secrets is the
-follow-up issue.
-
-**Remote credential.** The Secret `widget-sync-remote-kubeconfig` in the outer
-cluster has two keys, mounted into one directory: `kubeconfig`, which names the
-inner API server and its CA, and `token`, the bearer token of the inner
-service account `widget-sync/widget-sync-remote`. The kubeconfig refers to the
-token as `tokenFile: token` (relative to the kubeconfig's directory); kube
-re-reads a token file at least once a minute, whereas an inline `token:` is
-read once. To rotate, write the new token into the `token` key of the Secret;
-the kubelet refreshes the mounted directory and the controller picks it up
-within about two minutes with no restart. The testbed uses the inner cluster's
-long-lived service-account token Secret (`widget-sync-remote-token`); a
-production deployment would rather feed a bound token (`kubectl create token
-widget-sync-remote --duration ...`) into the same key on a schedule. At
-startup the binary asks the inner cluster, with one `SelfSubjectAccessReview`
-per verb and configured kind, whether the credential may get, list, watch,
-create, patch and delete it; a 401, 403 or denied verb is logged and the
-process exits, so a wrong credential shows up as a crash-looping, never-ready
-pod rather than as failing reconciles.
+**The kinds and the bindings.** The reconcilers are parameterized by a kind
+and a binding (`doc/widget_sync_fanout_design.md`, sections 2.1 and 3.4). The
+kinds come from the `--kind` flags ("Kinds and their shape" above) and the
+bindings from Secrets ("Bindings and the claim" above): one sync reconciler
+per kind, started at boot, and one janitor per kind and bound inner cluster,
+started and stopped with its binding.
 
 **Probes.** A startup probe, `test -f /run/widget-sync/ready`, waits for a
-file the binary creates (path from `READY_FILE`, on a small emptyDir) once the
-access check has passed and just before the reconcilers start; it is removed
-at startup so a restarted container does not inherit it. It is a startup
-probe rather than a readiness probe because the file never disappears again:
-after the access check nothing the binary knows about can make the pod
-un-ready, and a credential that goes bad at runtime shows up in the warn logs
-of failed requests, not in the pod's status. There is no liveness probe: the
-binary exposes no health endpoint and nothing else that says whether the
+file the binary creates (path from `READY_FILE`, on a small emptyDir) once
+every configured kind has passed the boot checks and the sync controllers are
+running; it is removed at startup so a restarted container does not inherit
+it. The bindings are deliberately not part of readiness: an inner cluster that
+is down, or one that refuses this controller, is one binding among many, and a
+pod that never became ready for it would take down the bindings that are fine.
+It is a startup probe rather than a readiness probe because the file never
+disappears again: after the boot checks nothing the binary knows about can
+make the pod un-ready, and a binding that goes bad at runtime shows up in the
+warn logs and in its objects' conditions, not in the pod's status. There is no
+liveness probe: the binary exposes no health endpoint and nothing else that says whether the
 reconcilers are still making progress, and a probe that does not measure that
 would only restart healthy pods.
 
@@ -290,8 +365,12 @@ gate's ConfigMap is mounted read-only), and has CPU and memory requests and
 limits sized for the demo.
 
 **RBAC.** In the outer cluster the controller reads `<plural>` and patches
-`<plural>/status` for each configured kind, and gets the CRD of each at boot
-for the shape check. `rbac.yaml` also binds, in namespace `default`, `get` and
+`<plural>/status` for each configured kind, gets the CRD of each at boot for
+the shape check, gets, lists and watches `secrets` in every namespace (the
+bindings) and gets the `kube-system` namespace (the outer cluster id). In an
+inner cluster its credential needs `<plural>` get, list, watch, create, patch
+and delete per kind, and `configmaps` create in `kube-system` with get on
+`anvil-sync-claim` (`rbac_inner.yaml`). `rbac.yaml` also binds, in namespace `default`, `get` and
 `update` on the single ConfigMap `fault-injection-config`, which only the
 crash-testing mode (`controller crash`) touches; `run` mode never uses it. No
 `events` verbs: the controller emits none.

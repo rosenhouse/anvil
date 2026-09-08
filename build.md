@@ -116,10 +116,11 @@ cd e2e
 cargo run -- <controller_name>
 ```
 
-The Widget sync controller and janitor run across two kind clusters instead:
-`./tools/two-cluster-test.sh [--build]` builds the `widget_sync` and
-`widget_echo` images, creates both clusters and deploys them, and
-`cd e2e && cargo run -- widget-sync` runs the test. See
+The Widget sync controller and its janitors run across three kind clusters
+instead, one outer and two inner: `./tools/two-cluster-test.sh [--build]`
+builds the `widget_sync` and `widget_echo` images, creates the clusters and
+deploys them, and `cd e2e && cargo run -- widget-sync`,
+`-- widget-sync-kinds` and `-- widget-sync-bindings` run the tests. See
 `deploy/widget_sync/README.md` and `doc/widget_sync_design.md`.
 
 See `.github/workflows/ci.yml` for the exact CI invocations.
