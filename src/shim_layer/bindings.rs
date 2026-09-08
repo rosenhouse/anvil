@@ -850,16 +850,22 @@ impl BindingManager {
     }
 
     async fn register(&self, binding: &ClusterRef, clients: RemoteClients, status: BindingStatus) {
-        match self.clusters.replace_remote(binding, clients).await {
-            // Already bound: the clients were swapped in place, the status is set
-            // separately so that a rotated credential does not re-admit a refused
-            // binding by itself.
-            Ok(_previous) => {
-                self.clusters.set_status(binding, status).await;
-            }
-            Err(clients) => {
+        // The status goes first. The two writes are separate -- so that a
+        // rotated credential does not re-admit a refused binding by itself --
+        // and the shim answers requests by whatever is registered between them.
+        // Swapping in working clients while the binding still reads Ready would
+        // be a window in which a request reaches the very inner cluster this
+        // call may be refusing.
+        //
+        // set_status answers None for a binding that is not registered at all,
+        // which is the insert below: there the status arrives with the clients.
+        if self.clusters.set_status(binding, status).await.is_some() {
+            if let Err(clients) = self.clusters.replace_remote(binding, clients).await {
+                // Unregistered between the two writes; register it whole.
                 self.clusters.insert_remote(binding.clone(), clients, status).await;
             }
+        } else {
+            self.clusters.insert_remote(binding.clone(), clients, status).await;
         }
     }
 

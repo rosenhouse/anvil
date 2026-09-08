@@ -94,6 +94,12 @@ done
 # soon as it starts.
 kubectl --context "$outer_ctx" apply -f "$manifests/rbac.yaml"
 
+# The kubeconfigs below hold service-account tokens, so they are written under
+# one temporary directory that is removed however this script ends -- an early
+# exit from `set -e`, or an interrupt, must not leave a token in /tmp.
+tmp_root="$(mktemp -d)"
+trap 'rm -rf "$tmp_root"' EXIT INT TERM
+
 # One binding Secret per inner cluster. The kubeconfig is self-contained (the
 # service-account token and the CA inline), which is what a Cluster API
 # `<clusterName>-kubeconfig` Secret holds: a rotation is the Secret changing,
@@ -118,7 +124,8 @@ for i in "${!inner_clusters[@]}"; do
     fi
     ca_data="$(kubectl --context "$ctx" -n widget-sync get secret widget-sync-remote-token -o jsonpath='{.data.ca\.crt}')"
     inner_ip="$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "${cluster}-control-plane")"
-    kubeconfig_dir="$(mktemp -d)"
+    kubeconfig_dir="$tmp_root/$binding"
+    mkdir -p "$kubeconfig_dir"
     cat > "$kubeconfig_dir/value" <<EOF
 apiVersion: v1
 kind: Config

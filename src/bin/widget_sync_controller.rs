@@ -125,12 +125,23 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--outer-cluster-id" => {
                 i += 1;
                 match args.get(i) {
+                    // An empty id would be written as the owner of every claim
+                    // this process creates, and two outer clusters with an empty
+                    // id are indistinguishable -- which is the one thing the
+                    // claim is there to tell apart.
+                    Some(value) if value.trim().is_empty() => {
+                        return Err("--outer-cluster-id must not be empty".to_string())
+                    }
                     Some(value) => flags.outer_cluster_id = Some(value.clone()),
                     None => return Err("--outer-cluster-id needs a value".to_string()),
                 }
             }
             arg if arg.starts_with("--outer-cluster-id=") => {
-                flags.outer_cluster_id = Some(arg["--outer-cluster-id=".len()..].to_string())
+                let value = &arg["--outer-cluster-id=".len()..];
+                if value.trim().is_empty() {
+                    return Err("--outer-cluster-id must not be empty".to_string());
+                }
+                flags.outer_cluster_id = Some(value.to_string())
             }
             arg => return Err(format!("unexpected argument {:?}", arg)),
         }
@@ -241,7 +252,18 @@ async fn main() -> Result<()> {
             // missing flag is a usage error, reported before any client is built.
             let (kinds, cluster_id_override) = match (configured_kinds(&args[2..]), parse_flags(&args[2..])) {
                 (Ok(kinds), Ok(flags)) => {
-                    (kinds, flags.outer_cluster_id.or_else(|| env::var(OUTER_CLUSTER_ID_ENV).ok()))
+                    let given = flags.outer_cluster_id.or_else(|| env::var(OUTER_CLUSTER_ID_ENV).ok());
+                    // As for the flag: an empty override is not an override, and
+                    // taking it as one would make every claim this process
+                    // writes name an owner that identifies nothing.
+                    if given.as_deref().map(|id| id.trim().is_empty()).unwrap_or(false) {
+                        eprintln!(
+                            "{} is set but empty; unset it to use the uid of the outer kube-system namespace\n{}",
+                            OUTER_CLUSTER_ID_ENV, USAGE
+                        );
+                        process::exit(2);
+                    }
+                    (kinds, given)
                 }
                 (Err(message), _) | (_, Err(message)) => {
                     eprintln!("{}\n{}", message, USAGE);
@@ -336,9 +358,23 @@ async fn main() -> Result<()> {
             for (kind, entry, plural) in &configured {
                 let (triggers, trigger_stream) = same_name_triggers();
                 runner_names.push(format!("the sync runner of {}", kind));
+                let reconciler = SyncReconciler { kind: sync_kind(entry, kind) };
+                // The runner's `entry` and `cr_cluster` say which objects it
+                // watches and which model kind the shim stamps them with; the
+                // reconciler carries its own copy of the kind and computes the
+                // same model kind from it. Nothing in the types ties the two
+                // together, and a runner watching one kind while its reconciler
+                // reconciles another would be a controller quietly acting on
+                // the wrong objects, so it is checked where they are paired.
+                debug_assert_eq!(
+                    reconciler.kind.entry.crd_name(),
+                    entry.crd_name(),
+                    "the sync runner of {} was given another kind's registry entry",
+                    kind
+                );
                 runners.push(tokio::spawn(run_dyn_controller_with_triggers::<SyncReconciler, VoidExternalShimLayer>(
                     clusters.clone(),
-                    SyncReconciler { kind: sync_kind(entry, kind) },
+                    reconciler,
                     entry.clone(),
                     ClusterId::Primary,
                     trigger_stream,
@@ -372,6 +408,24 @@ async fn main() -> Result<()> {
                         JanitorReconciler { kind: sync_kind(entry, kind), binding: binding.clone() };
                     let entry = entry.clone();
                     let cluster = ClusterId::Remote(binding.clone());
+                    // As for the sync runner, and with the binding too: this
+                    // janitor deletes mirrors in the cluster `cluster` names,
+                    // by the rule its reconciler holds for the binding
+                    // `reconciler.binding`. The two must be the same binding.
+                    debug_assert_eq!(
+                        reconciler.kind.entry.crd_name(),
+                        entry.crd_name(),
+                        "a janitor of binding {}/{} was given another kind's registry entry",
+                        binding.namespace, binding.name
+                    );
+                    debug_assert_eq!(
+                        &reconciler.binding, binding,
+                        "a janitor was built for one binding and run against another"
+                    );
+                    debug_assert!(
+                        matches!(&cluster, ClusterId::Remote(r) if r == &reconciler.binding),
+                        "a janitor's cluster is not its binding's"
+                    );
                     let pause_file = janitor_pause.clone();
                     let binding = binding.clone();
                     let kind_name = kind.to_string();
@@ -513,6 +567,11 @@ mod tests {
         let without = args(&["--kind", "anvil.dev/v1/Widget:name"]);
         assert_eq!(parse_flags(&without).unwrap().outer_cluster_id, None);
         assert!(parse_flags(&args(&["--outer-cluster-id"])).unwrap_err().contains("needs a value"));
+        // An empty id is not an id: it would be the owner of every claim this
+        // process writes, and would identify no outer cluster.
+        for empty in [args(&["--outer-cluster-id", ""]), args(&["--outer-cluster-id=  "])] {
+            assert!(parse_flags(&empty).unwrap_err().contains("must not be empty"), "{:?}", empty);
+        }
     }
 
     #[test]

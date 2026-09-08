@@ -50,6 +50,10 @@ jobs:
   full-verification:
     needs: setup-toolchain
     runs-on: ubuntu-24.04
+    # A full `cargo verus verify --lib` is about an hour on this runner
+    # (build.md). Ninety minutes leaves room for a slow runner and still fails
+    # in a bounded time instead of holding a runner for the six-hour default.
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: actions/cache@v6
