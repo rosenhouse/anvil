@@ -20,8 +20,11 @@ pub open spec fn managed_by_key() -> StringView { "anvil.dev/managed-by"@ }
 pub open spec fn managed_by_value() -> StringView { "widget-sync"@ }
 pub open spec fn parent_uid_key() -> StringView { "anvil.dev/parent-uid"@ }
 
-// The condition type the sync controller reports on the outer copy.
+// The condition types the sync controller reports on the outer copy. Ready and
+// Stalled are also the types it reads off the inner copy's status.
 pub open spec fn synced_condition_type() -> StringView { "Synced"@ }
+pub open spec fn ready_condition_type() -> StringView { "Ready"@ }
+pub open spec fn stalled_condition_type() -> StringView { "Stalled"@ }
 pub open spec fn condition_true() -> StringView { "True"@ }
 pub open spec fn condition_false() -> StringView { "False"@ }
 
@@ -84,7 +87,8 @@ impl WidgetStatusView {
     }
 
     // The projection the sync controller copies from the inner copy to the outer
-    // copy: everything except the per-copy fields observed_generation and conditions.
+    // copy: the data fields, that is everything except the per-copy fields
+    // observed_generation and conditions. Conditions are combined, not copied.
     pub open spec fn mirrored(self) -> WidgetStatusView {
         WidgetStatusView {
             observed_generation: None,
@@ -93,49 +97,162 @@ impl WidgetStatusView {
         }
     }
 
-    pub open spec fn synced_condition(self) -> Option<WidgetConditionView> {
-        if self.conditions is Some && exists |i: int| 0 <= i < self.conditions->0.len() && (#[trigger] self.conditions->0[i]).type_ == synced_condition_type() {
-            let i = choose |i: int| 0 <= i < self.conditions->0.len() && (#[trigger] self.conditions->0[i]).type_ == synced_condition_type();
-            Some(self.conditions->0[i])
+    // The first condition of type `type_`, if any. First rather than any, so that
+    // the exec code, which scans the list, computes the same condition.
+    pub open spec fn condition(self, type_: StringView) -> Option<WidgetConditionView> {
+        if self.conditions is Some {
+            find_condition_from(self.conditions->0, type_, 0)
         } else {
             None
         }
     }
-}
 
-// Builds the status the sync controller writes on the outer copy for a snapshot at
-// generation `outer_generation`, from the inner copy's status: mirrored fields
-// copied, observed_generation stamped, and a single Synced condition.
-pub open spec fn outer_status_for(outer_generation: Option<int>, inner_status: WidgetStatusView, synced: bool, reason: StringView) -> WidgetStatusView {
-    WidgetStatusView {
-        observed_generation: outer_generation,
-        ready: inner_status.ready,
-        observed_count: inner_status.observed_count,
-        conditions: Some(seq![WidgetConditionView {
-            type_: synced_condition_type(),
-            status: if synced { condition_true() } else { condition_false() },
-            observed_generation: outer_generation,
-            reason: Some(reason),
-            message: None,
-        }]),
+    pub open spec fn synced_condition(self) -> Option<WidgetConditionView> {
+        self.condition(synced_condition_type())
+    }
+
+    pub open spec fn ready_condition(self) -> Option<WidgetConditionView> {
+        self.condition(ready_condition_type())
+    }
+
+    pub open spec fn stalled_condition(self) -> Option<WidgetConditionView> {
+        self.condition(stalled_condition_type())
     }
 }
 
-// The status the sync controller writes when there is no inner status to mirror
-// (the mirror was just created, is foreign, or is terminating).
-pub open spec fn outer_status_without_inner(outer_generation: Option<int>, previous: Option<WidgetStatusView>, reason: StringView) -> WidgetStatusView {
-    let kept = if previous is Some { previous->0 } else { WidgetStatusView::default() };
+// The first condition of type `type_` at index `i` or later.
+pub open spec fn find_condition_from(conditions: Seq<WidgetConditionView>, type_: StringView, i: int) -> Option<WidgetConditionView>
+    decreases conditions.len() - i,
+{
+    if i < 0 || i >= conditions.len() {
+        None
+    } else if conditions[i].type_ == type_ {
+        Some(conditions[i])
+    } else {
+        find_condition_from(conditions, type_, i + 1)
+    }
+}
+
+// `status` if there is one, else the default status: the source of the data
+// fields the outer status keeps when the inner status is not consulted.
+pub open spec fn status_or_default(status: Option<WidgetStatusView>) -> WidgetStatusView {
+    if status is Some { status->0 } else { WidgetStatusView::default() }
+}
+
+// The outcome of one reconcile of the outer copy, as its status reports it.
+pub enum SyncOutcomeView {
+    // The mirror carries the outer spec and the inner status observes it; that
+    // status is consulted.
+    Synced,
+    // The inner status is for an older generation of the mirror.
+    InnerConverging,
+    // The mirror is terminating.
+    InnerTerminating,
+    // The object at the mirror key has no mirror identity; never touched.
+    ForeignObject,
+    // The object at the mirror key is a mirror of another incarnation of the
+    // outer copy; the janitor removes it.
+    StaleMirror,
+    // A request of the reconcile failed; the reconcile is requeued.
+    Failed(FailureReasonView),
+}
+
+impl SyncOutcomeView {
+    pub open spec fn synced(self) -> bool {
+        self is Synced
+    }
+
+    // The reason the Synced condition carries.
+    pub open spec fn reason(self) -> StringView {
+        match self {
+            SyncOutcomeView::Synced => reason_synced(),
+            SyncOutcomeView::InnerConverging => reason_inner_converging(),
+            SyncOutcomeView::InnerTerminating => reason_inner_terminating(),
+            SyncOutcomeView::ForeignObject => reason_foreign_object(),
+            SyncOutcomeView::StaleMirror => reason_stale_mirror(),
+            SyncOutcomeView::Failed(failure) => failure.reason(),
+        }
+    }
+
+    // A case the reconciler cannot get out of by itself: a foreign object it
+    // refuses to adopt, a credential the inner cluster refuses, a request it
+    // rejects. The transient cases (a converging or terminating inner copy, a
+    // stale mirror the janitor removes, an unreachable inner cluster, a missing
+    // namespace, a failed request) are not permanent.
+    pub open spec fn permanent(self) -> bool {
+        match self {
+            SyncOutcomeView::ForeignObject => true,
+            SyncOutcomeView::Failed(failure) => failure is Forbidden || failure is Rejected,
+            _ => false,
+        }
+    }
+}
+
+pub open spec fn make_condition(type_: StringView, status: StringView, observed_generation: Option<int>, reason: Option<StringView>, message: Option<StringView>) -> WidgetConditionView {
+    WidgetConditionView { type_: type_, status: status, observed_generation: observed_generation, reason: reason, message: message }
+}
+
+pub open spec fn condition_status(b: bool) -> StringView {
+    if b { condition_true() } else { condition_false() }
+}
+
+// Synced: True exactly when the outcome is Synced, with the outcome's reason.
+pub open spec fn synced_condition_for(outer_generation: Option<int>, outcome: SyncOutcomeView) -> WidgetConditionView {
+    make_condition(synced_condition_type(), condition_status(outcome.synced()), outer_generation, Some(outcome.reason()), None)
+}
+
+// Ready: True exactly when the outcome is Synced and the inner copy's own Ready
+// condition, if present, is True and its own Stalled condition, if present, is not
+// True (so Ready and Stalled are never both True). Otherwise False: with reason
+// NotSynced when not synced, else with the reason and message of the inner
+// condition that denies it. `source` is consulted only when synced.
+pub open spec fn ready_condition_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetConditionView {
+    let inner_ready = source.ready_condition();
+    let inner_stalled = source.stalled_condition();
+    if !outcome.synced() {
+        make_condition(ready_condition_type(), condition_false(), outer_generation, Some(reason_not_synced()), None)
+    } else if inner_stalled is Some && inner_stalled->0.status == condition_true() {
+        make_condition(ready_condition_type(), condition_false(), outer_generation, inner_stalled->0.reason, inner_stalled->0.message)
+    } else if inner_ready is Some {
+        make_condition(ready_condition_type(), condition_status(inner_ready->0.status == condition_true()), outer_generation, inner_ready->0.reason, inner_ready->0.message)
+    } else {
+        make_condition(ready_condition_type(), condition_true(), outer_generation, Some(reason_synced()), None)
+    }
+}
+
+// Stalled: True when the outcome is permanent, with the outcome's reason; else,
+// when the inner status is consulted (synced) and the inner copy has a Stalled
+// condition of its own, that condition's status, reason and message; else False
+// with the outcome's reason.
+pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetConditionView {
+    let inner_stalled = source.stalled_condition();
+    if outcome.permanent() {
+        make_condition(stalled_condition_type(), condition_true(), outer_generation, Some(outcome.reason()), None)
+    } else if outcome.synced() && inner_stalled is Some {
+        make_condition(stalled_condition_type(), condition_status(inner_stalled->0.status == condition_true()), outer_generation, inner_stalled->0.reason, inner_stalled->0.message)
+    } else {
+        make_condition(stalled_condition_type(), condition_false(), outer_generation, Some(outcome.reason()), None)
+    }
+}
+
+// The status the sync controller writes on the outer copy for a snapshot at
+// generation `outer_generation`, as a function of that generation, of a source
+// status and of the outcome of the reconcile. When the outcome is Synced the
+// source is the inner copy's status: its data fields are mirrored and its Ready
+// and Stalled conditions are merged into the outer copy's. Otherwise the source
+// is the outer copy's previous status (status_or_default), whose data fields are
+// kept as previously reported and whose conditions are not read. observed_generation
+// and every condition carry `outer_generation`.
+pub open spec fn outer_status_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetStatusView {
     WidgetStatusView {
         observed_generation: outer_generation,
-        ready: kept.ready,
-        observed_count: kept.observed_count,
-        conditions: Some(seq![WidgetConditionView {
-            type_: synced_condition_type(),
-            status: condition_false(),
-            observed_generation: outer_generation,
-            reason: Some(reason),
-            message: None,
-        }]),
+        ready: source.ready,
+        observed_count: source.observed_count,
+        conditions: Some(seq![
+            synced_condition_for(outer_generation, outcome),
+            ready_condition_for(outer_generation, source, outcome),
+            stalled_condition_for(outer_generation, source, outcome),
+        ]),
     }
 }
 
@@ -147,6 +264,8 @@ pub open spec fn reason_foreign_object() -> StringView { "ForeignObject"@ }
 pub open spec fn reason_stale_mirror() -> StringView { "StaleMirror"@ }
 pub open spec fn reason_inner_terminating() -> StringView { "InnerTerminating"@ }
 pub open spec fn reason_synced() -> StringView { "Synced"@ }
+// The reason of a False Ready condition when the outer copy is not synced.
+pub open spec fn reason_not_synced() -> StringView { "NotSynced"@ }
 
 // Why a request of the reconcile failed, as reported in the Synced condition
 // before the reconcile ends in Error.

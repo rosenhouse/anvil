@@ -168,7 +168,8 @@ pub open spec fn widget_janitor_rely(other_id: int) -> StatePred<ClusterState> {
 
 // The status patch the sync reconciler sends for the outer copy at `outer_key`:
 // it tests the copy's uid and generation, and (G-gen) the status it writes carries
-// observedGeneration equal to the tested generation, as does its Synced condition.
+// observedGeneration equal to the tested generation, as do its Synced, Ready and
+// Stalled conditions.
 pub open spec fn sync_status_patch_req(req: PatchStatusRequest, outer_key: ObjectRef) -> bool {
     let status = OuterWidgetView::unmarshal_status(req.status);
     &&& req.kind == OuterWidgetView::kind()
@@ -181,6 +182,10 @@ pub open spec fn sync_status_patch_req(req: PatchStatusRequest, outer_key: Objec
     &&& status->Ok_0->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.synced_condition() is Some
     &&& status->Ok_0->0.synced_condition()->0.observed_generation == req.tests.generation
+    &&& status->Ok_0->0.ready_condition() is Some
+    &&& status->Ok_0->0.ready_condition()->0.observed_generation == req.tests.generation
+    &&& status->Ok_0->0.stalled_condition() is Some
+    &&& status->Ok_0->0.stalled_condition()->0.observed_generation == req.tests.generation
 }
 
 // Every request the sync reconciler sends while reconciling the outer copy at

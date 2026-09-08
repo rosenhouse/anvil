@@ -27,7 +27,7 @@ fi
 ## controller must be added there deliberately, so its location is pinned here.
 root=src/controllers/widget_sync_controller
 expected="$root/model/install.rs:3
-$root/trusted/exec_types.rs:12"
+$root/trusted/exec_types.rs:11"
 actual=$(grep -rc 'external_body' "$root" | grep -v ':0$' | sort)
 if [ "$actual" != "$expected" ]; then
     echo "external_body items under $root changed; update doc/widget_sync_design.md section 3 and this script" >&2

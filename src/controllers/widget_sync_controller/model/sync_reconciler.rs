@@ -90,11 +90,15 @@ pub open spec fn write_outer_status_or_done(outer: OuterWidgetView, status: Widg
     }
 }
 
-// The status that reports the failure of a request answered with `err`: the
-// mirrored fields as previously reported, Synced=False with the reason of the
-// error, stamped with the snapshot's generation.
+// The status that reports `outcome` without consulting the inner status: the
+// mirrored fields as previously reported, stamped with the snapshot's generation.
+pub open spec fn reported_status(outer: OuterWidgetView, outcome: SyncOutcomeView) -> WidgetStatusView {
+    outer_status_for(outer.metadata.generation, status_or_default(outer.status), outcome)
+}
+
+// The status that reports the failure of a request answered with `err`.
 pub open spec fn failure_status(outer: OuterWidgetView, err: APIError, answering_create: bool) -> WidgetStatusView {
-    outer_status_without_inner(outer.metadata.generation, outer.status, error_reason(err, answering_create).reason())
+    reported_status(outer, SyncOutcomeView::Failed(error_reason(err, answering_create)))
 }
 
 // Report a failed request in the outer status, then end in Error: write `status`
@@ -141,13 +145,13 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                         let inner = unmarshalled->Ok_0;
                         if inner.metadata.deletion_timestamp is Some {
                             // Absent-in-progress: wait for the inner side to release it.
-                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_inner_terminating()))
+                            write_outer_status_or_done(outer, reported_status(outer, SyncOutcomeView::InnerTerminating))
                         } else if !is_mirror_of(inner, outer) {
                             // Not ours: never touch it, report the conflict. A mirror of another
                             // incarnation of the outer copy (label and annotation present, other
                             // parent uid) is stale and the janitor removes it; anything else is foreign.
-                            let reason = if has_mirror_identity(inner) { reason_stale_mirror() } else { reason_foreign_object() };
-                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason))
+                            let outcome = if has_mirror_identity(inner) { SyncOutcomeView::StaleMirror } else { SyncOutcomeView::ForeignObject };
+                            write_outer_status_or_done(outer, reported_status(outer, outcome))
                         } else if inner.spec != outer.spec {
                             // Propagate the spec, pinned to the mirror's generation.
                             let req = APIRequest::PatchRequest(inner_spec_patch(inner, outer));
@@ -155,11 +159,11 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                         } else if inner_caught_up(inner) {
                             // The inner status observes the mirror's current generation:
                             // copy it back, stamped with the outer generation.
-                            write_outer_status_or_done(outer, outer_status_for(outer.metadata.generation, inner.status->0, true, reason_synced()))
+                            write_outer_status_or_done(outer, outer_status_for(outer.metadata.generation, inner.status->0, SyncOutcomeView::Synced))
                         } else {
                             // The inner status is for an older generation of the mirror: keep
                             // the previously reported fields and report InnerConverging.
-                            write_outer_status_or_done(outer, outer_status_without_inner(outer.metadata.generation, outer.status, reason_inner_converging()))
+                            write_outer_status_or_done(outer, reported_status(outer, SyncOutcomeView::InnerConverging))
                         }
                     }
                 }

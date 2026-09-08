@@ -170,20 +170,43 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
 }
 
 // ---------------------------------------------------------------------------
-// The status the sync reconciler writes has exactly one condition, Synced.
+// The status the sync reconciler writes has exactly three conditions: Synced,
+// Ready and Stalled, in that order.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_synced_condition_of_written_status(status: WidgetStatusView)
-    requires
-        status.conditions is Some,
-        status.conditions->0.len() == 1,
-        status.conditions->0[0].type_ == synced_condition_type(),
-    ensures status.synced_condition() == Some(status.conditions->0[0]),
+pub open spec fn written_conditions_shape(status: WidgetStatusView) -> bool {
+    &&& status.conditions is Some
+    &&& status.conditions->0.len() == 3
+    &&& status.conditions->0[0].type_ == synced_condition_type()
+    &&& status.conditions->0[1].type_ == ready_condition_type()
+    &&& status.conditions->0[2].type_ == stalled_condition_type()
+}
+
+pub proof fn lemma_conditions_of_written_status(status: WidgetStatusView)
+    requires written_conditions_shape(status),
+    ensures
+        status.synced_condition() == Some(status.conditions->0[0]),
+        status.ready_condition() == Some(status.conditions->0[1]),
+        status.stalled_condition() == Some(status.conditions->0[2]),
 {
-    let conditions = status.conditions->0;
-    assert(0 <= 0 < conditions.len() && (#[trigger] conditions[0]).type_ == synced_condition_type());
-    let i = choose |i: int| 0 <= i < conditions.len() && (#[trigger] conditions[i]).type_ == synced_condition_type();
-    assert(i == 0);
+    reveal_strlit("Synced");
+    reveal_strlit("Ready");
+    reveal_strlit("Stalled");
+    reveal_with_fuel(find_condition_from, 4);
+    assert("Synced"@.len() != "Ready"@.len());
+    assert("Synced"@.len() != "Stalled"@.len());
+    assert("Ready"@.len() != "Stalled"@.len());
+}
+
+// Ready and Stalled are never both True in a status the sync reconciler writes.
+pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView)
+    ensures
+        !(ready_condition_for(generation, source, outcome).status == condition_true()
+            && stalled_condition_for(generation, source, outcome).status == condition_true()),
+{
+    reveal_strlit("True");
+    reveal_strlit("False");
+    assert("True"@.len() != "False"@.len());
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +351,10 @@ proof fn lemma_sync_new_request_is_guaranteed(
     let cr_key = input.2->0;
     let reconcile = s.ongoing_reconciles(controller_id)[cr_key];
     let outer = OuterWidgetView::unmarshal(reconcile.triggering_cr)->Ok_0;
+    assert forall |source: WidgetStatusView, outcome: SyncOutcomeView|
+        written_status_shape(#[trigger] outer_status_for(outer.metadata.generation, source, outcome), outer.metadata.generation) by {
+        lemma_outer_status_for_has_written_shape(outer.metadata.generation, source, outcome);
+    }
     assert(outer_snapshot_is_bound(reconcile.triggering_cr, cr_key)(s));
     assert(outer.object_ref() == cr_key);
     assert(outer.metadata == reconcile.triggering_cr.metadata);
@@ -407,25 +434,21 @@ proof fn lemma_outer_status_patch_is_guaranteed(outer: OuterWidgetView, req: Pat
     let status = choose |status: WidgetStatusView| req == outer_status_patch(outer, status) && written_status_shape(status, outer.metadata.generation);
     assert(req.status == OuterWidgetView::marshal_status(Some(status)));
     assert(OuterWidgetView::unmarshal_status(req.status) == Ok::<Option<WidgetStatusView>, UnmarshalError>(Some(status)));
-    lemma_synced_condition_of_written_status(status);
+    lemma_conditions_of_written_status(status);
 }
 
-// The shape of every status the sync reconciler writes for a snapshot at `generation`.
+// The shape of every status the sync reconciler writes for a snapshot at
+// `generation`: the three conditions, each stamped with the generation.
 pub open spec fn written_status_shape(status: WidgetStatusView, generation: Option<int>) -> bool {
     &&& status.observed_generation == generation
-    &&& status.conditions is Some
-    &&& status.conditions->0.len() == 1
-    &&& status.conditions->0[0].type_ == synced_condition_type()
+    &&& written_conditions_shape(status)
     &&& status.conditions->0[0].observed_generation == generation
+    &&& status.conditions->0[1].observed_generation == generation
+    &&& status.conditions->0[2].observed_generation == generation
 }
 
-pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, inner_status: WidgetStatusView, synced: bool, reason: StringView)
-    ensures written_status_shape(outer_status_for(generation, inner_status, synced, reason), generation),
-{
-}
-
-pub proof fn lemma_outer_status_without_inner_has_written_shape(generation: Option<int>, previous: Option<WidgetStatusView>, reason: StringView)
-    ensures written_status_shape(outer_status_without_inner(generation, previous, reason), generation),
+pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView)
+    ensures written_status_shape(outer_status_for(generation, source, outcome), generation),
 {
 }
 

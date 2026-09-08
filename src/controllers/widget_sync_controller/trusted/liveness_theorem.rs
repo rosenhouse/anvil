@@ -114,45 +114,45 @@ pub open spec fn spec_synced(outer: OuterWidgetView) -> StatePred<ClusterState> 
 
 // R2, backward eventually stable reconciliation: once the outer copy's spec stops
 // changing and the inner implementation has settled on a status for it, the outer
-// copy eventually and stably carries the mirrored fields of that status, stamped
-// with its own generation and a true Synced condition at that generation.
+// copy eventually and stably carries the status the sync controller derives from
+// it, outer_status_for(g, settled, Synced): the mirrored fields of the inner
+// status, its Ready and Stalled conditions merged with a true Synced condition,
+// all stamped with the outer copy's own generation g.
 //
-// The premise fixes the inner status instead of assuming that the inner
-// implementation is live, so R2 does not depend on which implementation runs in
-// the inner cluster.
+// The premise fixes the inner status (its mirrored fields and its conditions;
+// its observed_generation is fixed by inner_caught_up) instead of assuming that
+// the inner implementation is live, so R2 does not depend on which implementation
+// runs in the inner cluster.
 pub open spec fn widget_status_eventually_mirrored() -> TempPred<ClusterState> {
     tla_forall(|i: (OuterWidgetView, WidgetStatusView)| widget_status_eventually_mirrored_per_cr(i.0, i.1))
 }
 
-pub open spec fn widget_status_eventually_mirrored_per_cr(outer: OuterWidgetView, mirrored: WidgetStatusView) -> TempPred<ClusterState> {
-    always(lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, mirrored))))
-        .leads_to(always(lift_state(status_synced(outer, mirrored))))
+pub open spec fn widget_status_eventually_mirrored_per_cr(outer: OuterWidgetView, settled: WidgetStatusView) -> TempPred<ClusterState> {
+    always(lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, settled))))
+        .leads_to(always(lift_state(status_synced(outer, settled))))
 }
 
 // The inner implementation has processed the mirror's current spec and reports
-// `mirrored` (a status with only the mirrored fields set) for it.
-pub open spec fn inner_settled(outer: OuterWidgetView, mirrored: WidgetStatusView) -> StatePred<ClusterState> {
+// the mirrored fields and the conditions of `settled` for it.
+pub open spec fn inner_settled(outer: OuterWidgetView, settled: WidgetStatusView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let inner = InnerWidgetView::unmarshal(s.resources()[inner_key(outer)])->Ok_0;
         &&& spec_synced(outer)(s)
         &&& inner_caught_up(inner)
-        &&& inner.status->0.mirrored() == mirrored
+        &&& inner.status->0.mirrored() == settled.mirrored()
+        &&& inner.status->0.conditions == settled.conditions
     }
 }
 
-pub open spec fn status_synced(outer: OuterWidgetView, mirrored: WidgetStatusView) -> StatePred<ClusterState> {
+// The outer copy's status is exactly the one the sync controller derives from
+// `settled` for a synced mirror at the copy's current generation.
+pub open spec fn status_synced(outer: OuterWidgetView, settled: WidgetStatusView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let obj = s.resources()[outer.object_ref()];
         let stored = OuterWidgetView::unmarshal(obj)->Ok_0;
-        let status = stored.status->0;
         &&& s.resources().contains_key(outer.object_ref())
         &&& OuterWidgetView::unmarshal(obj) is Ok
-        &&& stored.status is Some
-        &&& status.mirrored() == mirrored
-        &&& status.observed_generation == stored.metadata.generation
-        &&& status.synced_condition() is Some
-        &&& status.synced_condition()->0.status == condition_true()
-        &&& status.synced_condition()->0.observed_generation == stored.metadata.generation
+        &&& stored.status == Some(outer_status_for(stored.metadata.generation, settled, SyncOutcomeView::Synced))
     }
 }
 

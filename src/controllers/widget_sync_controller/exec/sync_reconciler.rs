@@ -122,26 +122,12 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                 return (at_step(WidgetSyncStep::Error), None);
             }
             let inner = unmarshalled.unwrap();
-            let generation = outer.metadata().generation();
-            proof {
-                assert(opt_i64_view(generation) == outer@.metadata.generation);
-            }
             if inner.metadata().has_deletion_timestamp() {
-                let previous = outer.status();
-                proof {
-                    assert(previous.deep_view() == outer@.status);
-                }
-                let status = WidgetStatus::outer_status_without_inner(generation, &previous, "InnerTerminating".to_string());
-                return write_outer_status_or_done(outer, status);
+                return write_outer_status_or_done(outer, reported_status(outer, SyncOutcome::InnerTerminating));
             }
             if !is_mirror_of(&inner, outer) {
-                let previous = outer.status();
-                proof {
-                    assert(previous.deep_view() == outer@.status);
-                }
-                let reason = if has_mirror_identity(&inner) { "StaleMirror".to_string() } else { "ForeignObject".to_string() };
-                let status = WidgetStatus::outer_status_without_inner(generation, &previous, reason);
-                return write_outer_status_or_done(outer, status);
+                let outcome = if has_mirror_identity(&inner) { SyncOutcome::StaleMirror } else { SyncOutcome::ForeignObject };
+                return write_outer_status_or_done(outer, reported_status(outer, outcome));
             }
             if !inner.spec().eq(&outer.spec()) {
                 let req = KubeAPIRequest::PatchRequest(inner_spec_patch(&inner, outer));
@@ -155,15 +141,14 @@ pub fn reconcile_core(outer: &OuterWidget, resp_o: Option<Response<VoidEResp>>, 
                         WidgetStatus::default()
                     },
                 };
-                let status = WidgetStatus::outer_status_for(generation, &inner_status, true, "Synced".to_string());
+                let generation = outer.metadata().generation();
+                proof {
+                    assert(opt_i64_view(generation) == outer@.metadata.generation);
+                }
+                let status = WidgetStatus::outer_status_for(generation, &inner_status, &SyncOutcome::Synced);
                 return write_outer_status_or_done(outer, status);
             }
-            let previous = outer.status();
-            proof {
-                assert(previous.deep_view() == outer@.status);
-            }
-            let status = WidgetStatus::outer_status_without_inner(generation, &previous, "InnerConverging".to_string());
-            return write_outer_status_or_done(outer, status);
+            return write_outer_status_or_done(outer, reported_status(outer, SyncOutcome::InnerConverging));
         },
         WidgetSyncStep::AfterCreateInner => {
             if !is_some_k_create_resp!(resp_o) {
@@ -323,20 +308,32 @@ pub fn error_reason(err: &APIError, answering_create: bool) -> (reason: FailureR
     }
 }
 
-// The status that reports a failed request. See model::failure_status.
-pub fn failure_status(outer: &OuterWidget, err: &APIError, answering_create: bool) -> (status: WidgetStatus)
+// The status that reports `outcome` without consulting the inner status. See
+// model::reported_status.
+pub fn reported_status(outer: &OuterWidget, outcome: SyncOutcome) -> (status: WidgetStatus)
     requires outer@.well_formed(),
-    ensures status@ == model::failure_status(outer@, *err, answering_create),
+    ensures status@ == model::reported_status(outer@, outcome@),
 {
     let generation = outer.metadata().generation();
     proof {
         assert(opt_i64_view(generation) == outer@.metadata.generation);
     }
-    let previous = outer.status();
+    let source = match outer.status() {
+        Some(previous) => previous,
+        None => WidgetStatus::default(),
+    };
     proof {
-        assert(previous.deep_view() == outer@.status);
+        assert(source@ == status_or_default(outer@.status));
     }
-    WidgetStatus::outer_status_without_inner(generation, &previous, error_reason(err, answering_create).reason())
+    WidgetStatus::outer_status_for(generation, &source, &outcome)
+}
+
+// The status that reports a failed request. See model::failure_status.
+pub fn failure_status(outer: &OuterWidget, err: &APIError, answering_create: bool) -> (status: WidgetStatus)
+    requires outer@.well_formed(),
+    ensures status@ == model::failure_status(outer@, *err, answering_create),
+{
+    reported_status(outer, SyncOutcome::Failed(error_reason(err, answering_create)))
 }
 
 // Report a failed request in the outer status, then end in Error. See model::report_error.

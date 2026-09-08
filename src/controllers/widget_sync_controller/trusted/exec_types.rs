@@ -174,6 +174,66 @@ impl FailureReason {
     }
 }
 
+// The exec twin of spec_types::SyncOutcomeView.
+pub enum SyncOutcome {
+    Synced,
+    InnerConverging,
+    InnerTerminating,
+    ForeignObject,
+    StaleMirror,
+    Failed(FailureReason),
+}
+
+impl View for SyncOutcome {
+    type V = spec_types::SyncOutcomeView;
+
+    open spec fn view(&self) -> spec_types::SyncOutcomeView {
+        match self {
+            SyncOutcome::Synced => spec_types::SyncOutcomeView::Synced,
+            SyncOutcome::InnerConverging => spec_types::SyncOutcomeView::InnerConverging,
+            SyncOutcome::InnerTerminating => spec_types::SyncOutcomeView::InnerTerminating,
+            SyncOutcome::ForeignObject => spec_types::SyncOutcomeView::ForeignObject,
+            SyncOutcome::StaleMirror => spec_types::SyncOutcomeView::StaleMirror,
+            SyncOutcome::Failed(failure) => spec_types::SyncOutcomeView::Failed(failure@),
+        }
+    }
+}
+
+impl SyncOutcome {
+    pub fn synced(&self) -> (b: bool)
+        ensures b == self@.synced(),
+    {
+        match self {
+            SyncOutcome::Synced => true,
+            _ => false,
+        }
+    }
+
+    pub fn reason(&self) -> (reason: String)
+        ensures reason@ == self@.reason(),
+    {
+        match self {
+            SyncOutcome::Synced => "Synced".to_string(),
+            SyncOutcome::InnerConverging => "InnerConverging".to_string(),
+            SyncOutcome::InnerTerminating => "InnerTerminating".to_string(),
+            SyncOutcome::ForeignObject => "ForeignObject".to_string(),
+            SyncOutcome::StaleMirror => "StaleMirror".to_string(),
+            SyncOutcome::Failed(failure) => failure.reason(),
+        }
+    }
+
+    pub fn permanent(&self) -> (b: bool)
+        ensures b == self@.permanent(),
+    {
+        match self {
+            SyncOutcome::ForeignObject => true,
+            SyncOutcome::Failed(FailureReason::Forbidden) => true,
+            SyncOutcome::Failed(FailureReason::Rejected) => true,
+            _ => false,
+        }
+    }
+}
+
 impl WidgetStatus {
     #[verifier(external_body)]
     pub fn observed_generation(&self) -> (observed_generation: Option<i64>)
@@ -200,53 +260,56 @@ impl WidgetStatus {
         self.inner.observed_count
     }
 
-    // The status the sync controller writes on the outer copy when it has an inner
-    // status to mirror. See spec_types::outer_status_for.
+    // The status the sync controller writes on the outer copy, built by hand to
+    // match spec_types::outer_status_for: the first inner condition of each type is
+    // the one the spec's condition() names.
     #[verifier(external_body)]
-    pub fn outer_status_for(outer_generation: Option<i64>, inner_status: &WidgetStatus, synced: bool, reason: String) -> (status: WidgetStatus)
+    pub fn outer_status_for(outer_generation: Option<i64>, source: &WidgetStatus, outcome: &SyncOutcome) -> (status: WidgetStatus)
         ensures status@ == spec_types::outer_status_for(
             opt_i64_view(outer_generation),
-            inner_status@, synced, reason@,
+            source@, outcome@,
         ),
     {
-        WidgetStatus { inner: crate::crds::WidgetStatus {
+        let synced = outcome.synced();
+        let reason = outcome.reason();
+        let permanent = outcome.permanent();
+        let find = |type_: &str| -> Option<crate::crds::WidgetCondition> {
+            source.inner.conditions.as_ref().and_then(|conditions| conditions.iter().find(|c| c.type_ == type_).cloned())
+        };
+        let inner_ready = find("Ready");
+        let inner_stalled = find("Stalled");
+        let condition_status = |b: bool| if b { "True".to_string() } else { "False".to_string() };
+        let make = |type_: &str, status: String, reason: Option<String>, message: Option<String>| crate::crds::WidgetCondition {
+            type_: type_.to_string(),
+            status: status,
             observed_generation: outer_generation,
-            ready: inner_status.inner.ready,
-            observed_count: inner_status.inner.observed_count,
-            conditions: Some(vec![crate::crds::WidgetCondition {
-                type_: "Synced".to_string(),
-                status: if synced { "True".to_string() } else { "False".to_string() },
-                observed_generation: outer_generation,
-                reason: Some(reason),
-                message: None,
-            }]),
-        } }
-    }
-
-    // The status the sync controller writes on the outer copy when there is no inner
-    // status to mirror. See spec_types::outer_status_without_inner.
-    #[verifier(external_body)]
-    pub fn outer_status_without_inner(outer_generation: Option<i64>, previous: &Option<WidgetStatus>, reason: String) -> (status: WidgetStatus)
-        ensures status@ == spec_types::outer_status_without_inner(
-            opt_i64_view(outer_generation),
-            previous.deep_view(), reason@,
-        ),
-    {
-        let (ready, observed_count) = match previous {
-            Some(p) => (p.inner.ready, p.inner.observed_count),
-            None => (None, None),
+            reason: reason,
+            message: message,
+        };
+        let synced_condition = make("Synced", condition_status(synced), Some(reason.clone()), None);
+        let ready_condition = if !synced {
+            make("Ready", "False".to_string(), Some("NotSynced".to_string()), None)
+        } else if inner_stalled.as_ref().map_or(false, |c| c.status == "True") {
+            let c = inner_stalled.as_ref().unwrap();
+            make("Ready", "False".to_string(), c.reason.clone(), c.message.clone())
+        } else if let Some(c) = inner_ready.as_ref() {
+            make("Ready", condition_status(c.status == "True"), c.reason.clone(), c.message.clone())
+        } else {
+            make("Ready", "True".to_string(), Some("Synced".to_string()), None)
+        };
+        let stalled_condition = if permanent {
+            make("Stalled", "True".to_string(), Some(reason.clone()), None)
+        } else if synced && inner_stalled.is_some() {
+            let c = inner_stalled.as_ref().unwrap();
+            make("Stalled", condition_status(c.status == "True"), c.reason.clone(), c.message.clone())
+        } else {
+            make("Stalled", "False".to_string(), Some(reason.clone()), None)
         };
         WidgetStatus { inner: crate::crds::WidgetStatus {
             observed_generation: outer_generation,
-            ready: ready,
-            observed_count: observed_count,
-            conditions: Some(vec![crate::crds::WidgetCondition {
-                type_: "Synced".to_string(),
-                status: "False".to_string(),
-                observed_generation: outer_generation,
-                reason: Some(reason),
-                message: None,
-            }]),
+            ready: source.inner.ready,
+            observed_count: source.inner.observed_count,
+            conditions: Some(vec![synced_condition, ready_condition, stalled_condition]),
         } }
     }
 }
