@@ -22,12 +22,12 @@ jobs:
       verus-sha: ${{ steps.verus-sha.outputs.sha }}
     steps:
       - uses: actions/checkout@v7
-      - name: Get latest Verus main commit SHA
+      - name: Read the pinned Verus commit SHA
         id: verus-sha
         run: |
-          SHA="$(git ls-remote https://github.com/verus-lang/verus main | cut -f1)"
+          SHA="$(cat verus.sha)"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-          echo "Building Verus main@$SHA"
+          echo "Building Verus $SHA (pinned in verus.sha)"
       - name: Cache toolchain + Verus build
         id: cache-toolchain
         uses: actions/cache@v6
