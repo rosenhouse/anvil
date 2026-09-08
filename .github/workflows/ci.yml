@@ -295,3 +295,27 @@ jobs:
           kubectl --context kind-widget-sync-inner get widgets -A -o yaml || true
           echo "::endgroup::"
 
+  # Aggregates every other job into a single status, so branch protection can
+  # require one check instead of being updated whenever a job is added, renamed
+  # or removed. `if: always()` makes it report even when a dependency fails, is
+  # cancelled or is skipped; the step below turns any of those into a failure.
+  all-checks-pass:
+    needs:
+      - setup-toolchain
+      - full-verification
+      - vreplicaset-admission-e2e-test
+      - vdeployment-admission-e2e-test
+      - vreplicaset-e2e-test
+      - vdeployment-e2e-test
+      - vstatefulset-e2e-test
+      - rabbitmq-e2e-test
+      - widget-sync-e2e-test
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Fail if any job did not succeed
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || contains(needs.*.result, 'skipped')
+        run: |
+          echo "At least one job did not succeed:"
+          echo '${{ toJSON(needs) }}'
+          exit 1
