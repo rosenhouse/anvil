@@ -1,0 +1,86 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: gadgets.anvil.dev
+spec:
+  group: anvil.dev
+  names:
+    categories: []
+    kind: Gadget
+    plural: gadgets
+    shortNames: []
+    singular: gadget
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns: []
+    name: v1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for GadgetSpec via `CustomResource`
+        properties:
+          spec:
+            properties:
+              labels:
+                items:
+                  type: string
+                nullable: true
+                type: array
+              size:
+                format: int32
+                type: integer
+            required:
+            - size
+            type: object
+          status:
+            description: The status of a Gadget; written like a Widget's, by the inner implementation on an inner copy and by the sync controller on an outer copy.
+            nullable: true
+            properties:
+              conditions:
+                description: The conditions of a Widget's status, with the same meaning.
+                items:
+                  description: A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted because the verified controller does not read clocks.
+                  properties:
+                    message:
+                      description: Free text; on an outer copy, copied from the inner condition when the reason is.
+                      nullable: true
+                      type: string
+                    observedGeneration:
+                      description: The generation of the object the condition was computed for.
+                      format: int64
+                      nullable: true
+                      type: integer
+                    reason:
+                      description: A CamelCase word saying why the condition has its status.
+                      nullable: true
+                      type: string
+                    status:
+                      description: True or False.
+                      type: string
+                    type:
+                      description: Synced, Ready or Stalled on an outer copy; whatever the inner implementation reports on an inner copy (the sync controller reads Ready and Stalled).
+                      type: string
+                  required:
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              observedGeneration:
+                description: The generation of this object that the writer of this status last processed.
+                format: int64
+                nullable: true
+                type: integer
+              observedSize:
+                description: Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
+                format: int32
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: Gadget
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

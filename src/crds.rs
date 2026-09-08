@@ -262,6 +262,67 @@ impl Default for Widget {
     }
 }
 
+// Gadget is the second kind of the demo, there to show the sync controller is
+// generic over kinds (doc/widget_sync_fanout_design.md, section 4). Its spec has
+// nothing in common with Widget's and no cluster field: its selector is `name`,
+// so the object's name is the binding whose cluster receives the mirror. The
+// status has the shape of section 2.2 (observedGeneration and conditions) plus
+// its own payload, observedSize.
+#[derive(
+    kube::CustomResource,
+    Default,
+    Debug,
+    Clone,
+    serde::Deserialize,
+    serde::Serialize,
+    schemars::JsonSchema,
+    PartialEq,
+)]
+#[kube(group = "anvil.dev", version = "v1", kind = "Gadget")]
+#[kube(namespaced)]
+#[kube(status = "GadgetStatus")]
+pub struct GadgetSpec {
+    pub size: i32,
+    pub labels: Option<Vec<String>>,
+}
+
+/// The status of a Gadget; written like a Widget's, by the inner implementation
+/// on an inner copy and by the sync controller on an outer copy.
+#[derive(
+    Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
+)]
+pub struct GadgetStatus {
+    /// The generation of this object that the writer of this status last processed.
+    #[serde(rename = "observedGeneration")]
+    pub observed_generation: Option<i64>,
+    /// The conditions of a Widget's status, with the same meaning.
+    pub conditions: Option<Vec<WidgetCondition>>,
+    /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
+    #[serde(rename = "observedSize")]
+    pub observed_size: Option<i32>,
+}
+
+impl Default for Gadget {
+    fn default() -> Self {
+        Self {
+            metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta::default(),
+            spec: GadgetSpec::default(),
+            status: None,
+        }
+    }
+}
+
+/// The CRDs of the demo kinds of the sync controller, in the order they are
+/// installed. The manifests under deploy/widget_sync are these plus the CEL
+/// rules the derive cannot express (see crd_manifest_tests).
+pub fn demo_crds(
+) -> Vec<k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition> {
+    vec![
+        <Widget as kube::CustomResourceExt>::crd(),
+        <Gadget as kube::CustomResourceExt>::crd(),
+    ]
+}
+
 #[derive(
     kube::CustomResource,
     Default,
@@ -391,6 +452,21 @@ mod crd_manifest_tests {
             include_str!("../deploy/widget_sync/crd.yaml"),
             &super::Widget::crd(),
         );
+    }
+
+    #[test]
+    fn gadget_crd_yaml_matches_the_derive() {
+        assert_manifest_matches_export(
+            "deploy/widget_sync/crd_gadget.yaml",
+            include_str!("../deploy/widget_sync/crd_gadget.yaml"),
+            &super::Gadget::crd(),
+        );
+    }
+
+    #[test]
+    fn demo_crds_are_widget_then_gadget() {
+        let names: Vec<String> = super::demo_crds().into_iter().map(|c| c.metadata.name.unwrap()).collect();
+        assert_eq!(names, vec!["widgets.anvil.dev", "gadgets.anvil.dev"]);
     }
 
     // The rule the design requires on the selector field (section 1.1) is in

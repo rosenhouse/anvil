@@ -580,6 +580,16 @@ mod tests {
             serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd.yaml")).unwrap();
         assert_eq!(check_shape(&widget, &by_field()), Ok(()));
         assert_eq!(check_shape(&widget, &by_name()), Ok(()));
+
+        let gadget: CustomResourceDefinition =
+            serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd_gadget.yaml")).unwrap();
+        let gadget_by_name: KindConfig = "anvil.dev/v1/Gadget:name".parse().unwrap();
+        assert_eq!(check_shape(&gadget, &gadget_by_name), Ok(()));
+        // Gadget has no cluster field, so a field selector is refused on the spec row alone.
+        let gadget_by_field: KindConfig = "anvil.dev/v1/Gadget:field:spec.clusterName".parse().unwrap();
+        let errors = check_shape(&gadget, &gadget_by_field).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(matches!(errors[0], ShapeError::SelectorField { .. }), "{:?}", errors);
     }
 
     #[test]
