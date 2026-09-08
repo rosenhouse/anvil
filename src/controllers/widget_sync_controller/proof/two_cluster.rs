@@ -267,6 +267,7 @@ pub proof fn lemma_sync_core_commutes(cluster: Cluster, r: Relabeling, outer: Ou
                             let inner1 = relabel_inner(tc, r, inner);
                             assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, obj))->Ok_0 == inner1);
                             lemma_is_mirror_of_relabel(cluster, r, inner, outer);
+                            lemma_has_mirror_identity_relabel(cluster, r, inner);
                             if inner.metadata.deletion_timestamp is None && is_mirror_of(inner, outer) && inner.spec != outer.spec {
                                 let p = sync_reconciler::inner_spec_patch(inner, outer);
                                 let p1 = sync_reconciler::inner_spec_patch(inner1, outer1);
