@@ -763,7 +763,7 @@ pub proof fn sync_mirrors_stably_collected(k: SyncKind, b: Binding, spec_ok: spe
         spec.entails(sync_next_with_wf(cluster, controller_id)),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)))),
-        spec.entails(inner_releases_terminating_objects(k)),
+        spec.entails(inner_releases_terminating_objects(k, b)),
         spec.entails(widget_janitor_esr(k, b, janitor_id)),
     ensures spec.entails(widget_mirrors_stably_collected(k, b)),
 {
@@ -775,7 +775,7 @@ pub proof fn sync_mirrors_stably_collected(k: SyncKind, b: Binding, spec_ok: spe
         spec,
         sync_next_with_wf(cluster, controller_id),
         always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id))),
-        inner_releases_terminating_objects(k),
+        inner_releases_terminating_objects(k, b),
         widget_mirrors_eventually_collected(k, b),
         sync_invariants(k, b, spec_ok, cluster, controller_id, janitor_id)
     );

@@ -88,7 +88,7 @@ pub open spec fn widget_sync_controller_spec(k: SyncKind, spec_ok: spec_fn(Value
         liveness_dependency: janitors_esr(k, ids),
         safety_guarantee: always(lift_state(widget_sync_guarantee(k, id))),
         // D3: the inner side releases terminating mirrors.
-        environment_rely: inner_releases_terminating_objects(k),
+        environment_rely: inner_releases_terminating_objects_all(k),
         safety_partial_rely: widget_sync_partial_rely(k, ids),
         fairness: |cluster: Cluster| sync_next_with_wf(cluster, id),
         membership: |cluster: Cluster, c_id: int| sync_membership_all(k, spec_ok, cluster, c_id, ids),
@@ -195,7 +195,7 @@ pub proof fn widget_sync_singleton_core_holds(k: SyncKind, spec_ok: spec_fn(Valu
             }
             tla_forall_apply(env_fn, id);
             entails_trans(spec_rde, tla_forall(env_fn), env_fn(id));
-            assert(env_fn(id) == inner_releases_terminating_objects(k));
+            assert(env_fn(id) == inner_releases_terminating_objects_all(k));
             assert(s.liveness_dependency == janitors_esr(k, ids));
             entails_trans(spec_rde, spec, lift_state(inner.init()));
             entails_trans(spec_rde, spec, sync_next_with_wf(inner, id));
@@ -208,8 +208,19 @@ pub proof fn widget_sync_singleton_core_holds(k: SyncKind, spec_ok: spec_fn(Valu
                 true_pred::<ClusterState>()
             };
             let dep_fn = |b: Binding| if k.bindings.contains(b) { widget_janitor_esr(k, b, ids[b]) } else { true_pred::<ClusterState>() };
+            // D3 is assumed per binding; the sync controller, which serves them
+            // all, takes the conjunction and reads off the binding at hand.
+            let d3_fn = |b: Binding| if k.bindings.contains(b) {
+                inner_releases_terminating_objects(k, b)
+            } else {
+                true_pred::<ClusterState>()
+            };
+            assert(inner_releases_terminating_objects_all(k) == tla_forall(d3_fn));
             assert forall |b: Binding| spec_rde.entails(#[trigger] per_binding(b)) by {
                 if k.bindings.contains(b) {
+                    tla_forall_apply(d3_fn, b);
+                    entails_trans(spec_rde, tla_forall(d3_fn), d3_fn(b));
+                    assert(d3_fn(b) == inner_releases_terminating_objects(k, b));
                     tla_forall_apply(dep_fn, b);
                     entails_trans(spec_rde, s.liveness_dependency, dep_fn(b));
                     assert(dep_fn(b) == widget_janitor_esr(k, b, ids[b]));

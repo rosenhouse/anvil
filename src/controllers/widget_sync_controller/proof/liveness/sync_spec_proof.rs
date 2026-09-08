@@ -102,13 +102,13 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(k: SyncKind, b: Binding, spe
     let gone_m = lift_state(object_is_gone(ikey, m));
 
     // A terminating object is released by the inner side (D3).
-    entails_implies_leads_to(spec, lift_state(terminating), lift_state(inner_terminating_object(k, ikey, m)));
+    entails_implies_leads_to(spec, lift_state(terminating), lift_state(inner_terminating_object(k, b, ikey, m)));
     spec_entails_tla_forall_apply(
         spec,
-        |i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))),
+        |i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, b, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))),
         (ikey, m)
     );
-    leads_to_trans(spec, lift_state(terminating), lift_state(inner_terminating_object(k, ikey, m)), gone_m);
+    leads_to_trans(spec, lift_state(terminating), lift_state(inner_terminating_object(k, b, ikey, m)), gone_m);
 
     // A stale mirror (another parent) is collected by the janitor (R3).
     let stale_p = |p: Uid| lift_state(|s: ClusterState| {
@@ -1638,7 +1638,7 @@ pub proof fn sync_eventually_synced(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
         spec.entails(sync_next_with_wf(cluster, controller_id)),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)))),
-        spec.entails(inner_releases_terminating_objects(k)),
+        spec.entails(inner_releases_terminating_objects(k, b)),
         spec.entails(widget_janitor_esr(k, b, janitor_id)),
     ensures spec.entails(widget_spec_eventually_synced(k, b)),
 {
@@ -1650,7 +1650,7 @@ pub proof fn sync_eventually_synced(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
         spec,
         sync_next_with_wf(cluster, controller_id),
         always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id))),
-        inner_releases_terminating_objects(k),
+        inner_releases_terminating_objects(k, b),
         widget_mirrors_eventually_collected(k, b),
         sync_invariants(k, b, spec_ok, cluster, controller_id, janitor_id)
     );

@@ -152,8 +152,8 @@ pub open spec fn st_delete_req_msg_in_flight(k: SyncKind, b: Binding, controller
     }
 }
 
-pub open spec fn st_terminating(k: SyncKind, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
-    inner_terminating_object(k, key, uid)
+pub open spec fn st_terminating(k: SyncKind, b: Binding, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
+    inner_terminating_object(k, b, key, uid)
 }
 
 // ---------------------------------------------------------------------------
@@ -1025,10 +1025,10 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         spec.entails(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))),
     ensures
         spec.entails(lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid))
-            .leads_to(lift_state(st_terminating(k, key, uid)).or(lift_state(gone(key, uid))))),
+            .leads_to(lift_state(st_terminating(k, b, key, uid)).or(lift_state(gone(key, uid))))),
 {
     let g = gone(key, uid);
-    let post = |s: ClusterState| st_terminating(k, key, uid)(s) || g(s);
+    let post = |s: ClusterState| st_terminating(k, b, key, uid)(s) || g(s);
     let pre_of = |msg: Message| lift_state(st_delete_req_msg_in_flight(k, b, controller_id, key, parent_uid, uid, msg));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
@@ -1068,7 +1068,7 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
                     assert(s_prime.resources().contains_key(key));
                     assert(s_prime.resources()[key].metadata.uid == Some(uid));
                     assert(s_prime.resources()[key].metadata.deletion_timestamp is Some);
-                    assert(st_terminating(k, key, uid)(s_prime));
+                    assert(st_terminating(k, b, key, uid)(s_prime));
                 } else {
                     assert(!s_prime.resources().contains_key(key));
                     assert(uid < s_prime.api_server.uid_counter);
@@ -1121,7 +1121,7 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         }
         temp_pred_equality(tla_exists(pre_of), lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid)));
     });
-    temp_pred_equality(lift_state(post), lift_state(st_terminating(k, key, uid)).or(lift_state(g)));
+    temp_pred_equality(lift_state(post), lift_state(st_terminating(k, b, key, uid)).or(lift_state(g)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1254,7 +1254,7 @@ pub proof fn lemma_true_leads_to_gone_under_phases(k: SyncKind, b: Binding, spec
     let list_req = lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid));
     let list_resp = lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid));
     let delete_req = lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid));
-    let terminating = lift_state(st_terminating(k, key, uid));
+    let terminating = lift_state(st_terminating(k, b, key, uid));
     let g = lift_state(gone(key, uid));
     let target = lift_state(object_is_gone(key, uid));
 
@@ -1267,7 +1267,7 @@ pub proof fn lemma_true_leads_to_gone_under_phases(k: SyncKind, b: Binding, spec
     // D3 for this object.
     spec_entails_tla_forall_apply(
         spec,
-        |i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))),
+        |i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, b, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))),
         (key, uid)
     );
 
@@ -1386,7 +1386,7 @@ pub proof fn janitor_eventually_collects_mirrors(k: SyncKind, b: Binding, spec_o
         cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
         cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(always(lifted_janitor_rely_condition(k, cluster, controller_id))),
-        spec.entails(inner_releases_terminating_objects(k)),
+        spec.entails(inner_releases_terminating_objects(k, b)),
     ensures spec.entails(widget_mirrors_eventually_collected(k, b)),
 {
     assert(janitor_next_with_wf(cluster, controller_id).entails(always(lift_action(cluster.next()))));
@@ -1396,7 +1396,7 @@ pub proof fn janitor_eventually_collects_mirrors(k: SyncKind, b: Binding, spec_o
         spec,
         janitor_next_with_wf(cluster, controller_id),
         always(lifted_janitor_rely_condition(k, cluster, controller_id)),
-        inner_releases_terminating_objects(k),
+        inner_releases_terminating_objects(k, b),
         janitor_invariants(k, b, spec_ok, cluster, controller_id)
     );
     let per_object = |i: (ObjectRef, Uid, Uid)| widget_mirror_eventually_collected_per_object(k, b, i.0, i.1, i.2);
@@ -1416,7 +1416,7 @@ pub proof fn janitor_satisfies_its_spec(k: SyncKind, b: Binding, spec_ok: spec_f
         cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
         cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(always(lifted_janitor_rely_condition(k, cluster, controller_id))),
-        spec.entails(inner_releases_terminating_objects(k)),
+        spec.entails(inner_releases_terminating_objects(k, b)),
     ensures spec.entails(widget_janitor_esr(k, b, controller_id)),
 {
     janitor_eventually_collects_mirrors(k, b, spec_ok, spec, cluster, controller_id);

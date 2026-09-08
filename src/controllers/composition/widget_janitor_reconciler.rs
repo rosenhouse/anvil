@@ -20,7 +20,7 @@ pub open spec fn widget_janitor_controller_spec(k: SyncKind, b: Binding, spec_ok
         liveness_dependency: true_pred(),
         safety_guarantee: always(lift_state(widget_janitor_guarantee(k, b, id))),
         // D3: the inner side releases terminating mirrors.
-        environment_rely: inner_releases_terminating_objects(k),
+        environment_rely: inner_releases_terminating_objects(k, b),
         safety_partial_rely: |other_id: int| always(lift_state(widget_janitor_rely(k, other_id))),
         fairness: |cluster: Cluster| janitor_next_with_wf(cluster, id),
         membership: |cluster: Cluster, c_id: int| {
@@ -109,7 +109,7 @@ pub proof fn widget_janitor_singleton_core_holds(k: SyncKind, b: Binding, spec_o
             janitor_rely_facts_imply_lifted_condition(k, spec_re, inner, id);
             tla_forall_apply(env_fn, id);
             entails_trans(spec_re, tla_forall(env_fn), env_fn(id));
-            assert(env_fn(id) == inner_releases_terminating_objects(k));
+            assert(env_fn(id) == inner_releases_terminating_objects(k, b));
             entails_trans(spec_re, spec, lift_state(inner.init()));
             entails_trans(spec_re, spec, janitor_next_with_wf(inner, id));
             janitor_satisfies_its_spec(k, b, spec_ok, spec_re, inner, id);

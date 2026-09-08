@@ -241,27 +241,37 @@ pub open spec fn bound_parent_absent(k: SyncKind, b: Binding, key: ObjectRef, pa
     }
 }
 
-// D3, the liveness dependency on the inner side: a terminating mirror object of
-// any binding of `k` is eventually removed, that is, the inner side removes every
-// finalizer it owns from an object with a deletion timestamp (and nothing adds
-// finalizers to such an object; the API server rejects that anyway), after which
-// the API server removes the object. An axiom in this version; an inner
-// implementation verified in Anvil would discharge it in its own guarantee.
-pub open spec fn is_bound_inner_kind(k: SyncKind, kind: Kind) -> bool {
-    exists |b: Binding| k.bindings.contains(b) && kind == #[trigger] inner_kind(k, b)
-}
-
-pub open spec fn inner_terminating_object(k: SyncKind, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
+// D3, the liveness dependency on the inner side of one binding: a terminating
+// mirror object of `b` is eventually removed, that is, the inner side of `b`
+// removes every finalizer it owns from an object with a deletion timestamp (and
+// nothing adds finalizers to such an object; the API server rejects that anyway),
+// after which the API server removes the object. An axiom in this version; an
+// inner implementation verified in Anvil would discharge it in its own guarantee.
+//
+// It is indexed by the binding because that is the granularity at which it is
+// assumed: the janitor of `(k, b)` touches no mirror but `b`'s, so its
+// environment rely is this one binding's. The sync controller of `k`, which
+// serves every binding of `k.bindings`, takes the conjunction below.
+pub open spec fn inner_terminating_object(k: SyncKind, b: Binding, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& is_bound_inner_kind(k, key.kind)
+        &&& key.kind == inner_kind(k, b)
         &&& s.resources().contains_key(key)
         &&& s.resources()[key].metadata.uid == Some(uid)
         &&& s.resources()[key].metadata.deletion_timestamp is Some
     }
 }
 
-pub open spec fn inner_releases_terminating_objects(k: SyncKind) -> TempPred<ClusterState> {
-    tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
+pub open spec fn inner_releases_terminating_objects(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, b, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
+}
+
+// D3 for every binding the kind serves.
+pub open spec fn inner_releases_terminating_objects_all(k: SyncKind) -> TempPred<ClusterState> {
+    tla_forall(|b: Binding| if k.bindings.contains(b) {
+        inner_releases_terminating_objects(k, b)
+    } else {
+        true_pred::<ClusterState>()
+    })
 }
 
 // The janitor's Deletes are sound: a Delete the janitor of `(k, b)` has in flight
