@@ -354,18 +354,44 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, bs: Set<Binding>
     );
 }
 
-// The parameterized statement is larger than the fixed pair's, so the default
-// resource limit is not enough for this one.
-#[verifier(rlimit(50))]
-pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
+// The framework's own invariants, which the pair's proofs use but do not prove:
+// the message and reconcile bookkeeping of kubernetes_cluster, read at this
+// cluster's two controller ids and this kind's two model kinds. Split out of
+// sync_invariants_hold so that neither half needs a raised resource limit: this
+// half discharges thirty-odd lemma preconditions, the other half assembles the
+// conjunction.
+// The framework's own invariants, which the pair's proofs use but do not prove:
+// the message and reconcile bookkeeping of kubernetes_cluster, read at this
+// cluster's two controller ids and this kind's two model kinds. They come in
+// three parts, _a to _c, each resting on the ones before it, and
+// sync_invariants_hold assembles the conjunction of everything from them and the
+// pair's own invariants. The split is what keeps every one of the four inside the
+// default resource limit: with the kind and the binding as parameters,
+// discharging thirty-odd lemma preconditions and building a forty-conjunct
+// temporal predicate in one body does not fit it.
+pub proof fn sync_framework_invariants_hold_a(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
     requires
         bs.contains(b),
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
         sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, bs, spec_ok, cluster, controller_id, janitor_id)))),
-        spec.entails(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))),
-    ensures spec.entails(sync_invariants(k, b, bs, spec_ok, cluster, controller_id, janitor_id)),
+    ensures
+        spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_unique_id()))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_lower_id_than_allocator()))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_req_msg_has_different_id_from_pending_req_msg_of_every_ongoing_reconcile(controller_id)))),
+        spec.entails(always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()))),
+        spec.entails(always(lift_state(cluster.each_builtin_object_in_etcd_is_well_formed()))),
+        spec.entails(always(lift_state(Cluster::each_object_in_etcd_has_at_most_one_controller_owner()))),
+        spec.entails(always(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))))),
+        spec.entails(always(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(k.outer_kind)))),
+        spec.entails(always(lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)))),
+        spec.entails(always(lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_no_replicas_and_has_unique_id()))),
+        spec.entails(always(lift_state(Cluster::each_scheduled_object_has_consistent_key_and_valid_metadata(controller_id)))),
+        spec.entails(always(lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)))),
+        spec.entails(always(lift_state(Cluster::every_ongoing_reconcile_has_lower_id_than_allocator(controller_id)))),
+        spec.entails(always(lift_state(Cluster::objects_in_reconcile_have_kind(k.outer_kind, controller_id)))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key))))),
 {
     cluster.lemma_always_every_in_flight_msg_has_unique_id(spec);
     cluster.lemma_always_every_in_flight_msg_has_lower_id_than_allocator(spec);
@@ -386,6 +412,31 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spe
         cluster.lemma_always_pending_req_of_key_is_unique_with_unique_id(spec, controller_id, key);
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)));
+}
+
+pub proof fn sync_framework_invariants_hold_b(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
+    requires
+        bs.contains(b),
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+    ensures
+        spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
+        spec.entails(always(lift_state(Cluster::there_is_the_controller_state(janitor_id)))),
+        spec.entails(always(lift_state(Cluster::there_is_no_request_msg_to_external_from_controller(controller_id)))),
+        spec.entails(always(lift_state(Cluster::synced_states_are_unmarshallable::<WidgetSyncReconcileState>(k.outer_kind, controller_id)))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))))),
+{
+    // The second half rests on the first: the reconcile-state lemmas below need
+    // the bookkeeping invariants sync_framework_invariants_hold_a establishes,
+    // and the per-key form of one of them, which its tla_forall does not give back.
+    sync_framework_invariants_hold_a(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)))) by {
+        cluster.lemma_always_pending_req_of_key_is_unique_with_unique_id(spec, controller_id, key);
+    }
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, janitor_id);
     cluster.lemma_always_there_is_no_request_msg_to_external_from_controller(spec, controller_id);
@@ -407,6 +458,33 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spe
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner));
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))));
+}
+
+pub proof fn sync_framework_invariants_hold_c(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
+    requires
+        bs.contains(b),
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+    ensures
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))))),
+        spec.entails(always(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)))),
+        spec.entails(always(lift_state(Cluster::no_pending_request_to_api_server_from_api_server_or_external()))),
+        spec.entails(always(lift_state(Cluster::all_requests_from_pod_monkey_are_api_pod_requests()))),
+        spec.entails(always(lift_state(Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()))),
+{
+    // Each part rests on the ones before it: the reconcile-state lemmas need the
+    // bookkeeping invariants of _a, and the per-key form of one of them, which its
+    // tla_forall does not give back.
+    WidgetSyncReconcileState::marshal_preserves_integrity();
+    sync_framework_invariants_hold_b(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
+    sync_framework_invariants_hold_a(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)))) by {
+        cluster.lemma_always_pending_req_of_key_is_unique_with_unique_id(spec, controller_id, key);
+    }
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus));
     }
@@ -427,6 +505,22 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spe
     cluster.lemma_always_no_pending_request_to_api_server_from_api_server_or_external(spec);
     cluster.lemma_always_all_requests_from_pod_monkey_are_api_pod_requests(spec);
     cluster.lemma_always_all_requests_from_builtin_controllers_are_api_delete_requests(spec);
+}
+
+// The invariants the pair proves of itself, and the conjunction of all of them.
+pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
+    requires
+        bs.contains(b),
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, bs, spec_ok, cluster, controller_id, janitor_id)))),
+        spec.entails(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))),
+    ensures spec.entails(sync_invariants(k, b, bs, spec_ok, cluster, controller_id, janitor_id)),
+{
+    sync_framework_invariants_hold_a(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
+    sync_framework_invariants_hold_b(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
+    sync_framework_invariants_hold_c(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_widget_sync_guarantee(spec, cluster, k, spec_ok, controller_id);
     lemma_sync_rely_implies_mirror_write_facts(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_every_mirror_is_bound(spec, cluster, k, b, spec_ok);

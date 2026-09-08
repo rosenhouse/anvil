@@ -502,8 +502,7 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, bs: Set
 }
 
 // Init ~> the Get of the mirror is in flight.
-#[verifier(rlimit(50))]
-pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool,
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView
 )
     requires
@@ -522,7 +521,7 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
     lemma_unfold_sync_spec_with_phase_ii(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_stable_spec_facts(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_sync_step_next(k, b, bs, spec_ok, spec, cluster, controller_id, janitor_id, outer);
-    
+
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
     let pre = st_sync_init(k, b, bs, spec_ok, controller_id, key);
