@@ -14,6 +14,7 @@ pub mod objects_in_store;
 pub mod req_resp;
 pub mod retentive_cluster;
 pub mod stability;
+pub mod synced_objects;
 pub mod temporal_rules;
 pub mod transition_validation;
 pub mod wf1_helpers;
