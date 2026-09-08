@@ -640,14 +640,28 @@ write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many as the
 bindings, and `Set` is finite. `all_inner_kinds_installed` is now that finite
 conjunction, `widget_cluster_with_others` and `widget_pair_cluster` take `bnd ∈
 bs` (rather than pinning `bs` to `{bnd}`) with `k.bindings == bs` carried by
-`sync_membership`, and the closed statements are back:
-`lemma_widget_instance_is_pair_cluster` and `widget_instance_two_cluster_theorem`
-for the cluster of `composition/widget_sync_reconciler.rs`, and
-`lemma_widget_disturbed_instance_is_cluster_with_others` and
-`widget_disturbed_two_cluster_theorem` for the one with the disturber. Those
-concrete clusters install exactly `k.outer_kind` and `inner_kind(k, b)` for the
-one binding they serve, and they are the satisfiability witness for every
+`sync_membership`, and the closed statements are back -- and they are closed for
+*any* configuration, not only the demo's. `lemma_widget_is_pair_cluster` and
+`widget_instance_two_cluster_theorem` take `k`, `bnd ∈ k.bindings`, two ids and
+the schema, under `sync_kind_ok(k)`, `binding_ok(bnd)` and a field selector, and
+read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
+janitor_id)`: the model kinds of the whole configuration installed, the sync
+controller, and the janitor of `bnd`.
+`lemma_widget_disturbed_is_cluster_with_others` and
+`widget_disturbed_two_cluster_theorem` do the same for the cluster with the
+disturber. `widget_demo_two_cluster_theorem` and
+`widget_demo_disturbed_two_cluster_theorem` are the demo's one-line
+applications. Those clusters install exactly `k.outer_kind` and `inner_kind(k,
+b)` for `b ∈ k.bindings`, and they are the satisfiability witness for every
 hypothesis of the general theorem.
+
+Only the janitor of `bnd` runs there. A configuration whose other bindings'
+janitors also run needs `widget_other_controller_ok` of each of them, which
+nothing proves yet: they are the same reconciler, so their commutation lemma is
+already the one the refinement asks for, but their guarantee has not been carried
+into the one-store model as an invariant the way `lemma_relies_hold_of_from_welder`
+does for the disturber. That is what "the janitors of the other bindings enter as
+other controllers" above still costs.
 
 The three alternatives this rules out, recorded because they were the other ways
 to close it: an `InstalledTypes` with an infinite domain (vstd's `IMap`), which

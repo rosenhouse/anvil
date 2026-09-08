@@ -33,8 +33,8 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   R3s and the janitor's delete soundness (less the clause that no uid the
   primary counter may still issue names the parent) are then stated on
   two-store executions (`widget_two_cluster_theorem`, for any cluster meeting
-  the refinement's hypotheses, and closed for the concrete clusters of the pair
-  and of the pair with the disturber: `widget_instance_two_cluster_theorem`,
+  the refinement's hypotheses, and closed for the cluster of any configuration,
+  with and without the disturber: `widget_instance_two_cluster_theorem`,
   `widget_disturbed_two_cluster_theorem`).
 
 ## 1. Design
@@ -317,9 +317,11 @@ and that the pair's spec provides every fairness the Welder registry declares.
 No fairness of the other controllers is assumed. `widget_pair_cluster` names the
 case with no other controller and `lemma_disturber_is_other_controller_ok`
 admits the disturber (section 2.4) as one. `widget_instance_two_cluster_theorem`
-and `widget_disturbed_two_cluster_theorem` close the statement for the concrete
-clusters of `composition/widget_sync_reconciler.rs` and
-`composition/widget_disturber_reconciler.rs`. Those instances are also what
+and `widget_disturbed_two_cluster_theorem` close the statement for the clusters
+`composition/widget_sync_reconciler.rs` and
+`composition/widget_disturber_reconciler.rs` build from a configuration, for any
+configuration meeting `sync_kind_ok`, `binding_ok` and a field selector; the demo
+applies them in one line. Those instances are also what
 makes the hypotheses satisfiable: between the fan-out port and this change the
 folded store had to install the mirror kind of *every* binding, of which there
 are infinitely many, so `all_inner_kinds_installed` was unsatisfiable against a
@@ -417,8 +419,9 @@ rebuilt inner cluster looks like from the pair's side. Its guarantee
 (`proof/disturber.rs`: every request it has in flight is such a Patch or Delete
 of its own key) implies both reconcilers' relies, and
 `composition/widget_disturber_reconciler.rs` composes it with the pair through
-Welder: `widget_disturbed_core_holds` is the closed statement for a cluster
-running the janitor, the sync reconciler and the disturber.
+Welder: `widget_disturbed_core_holds_for` is the closed statement for a cluster
+running the janitor, the sync reconciler and the disturber, for any one-binding
+configuration, and `widget_disturbed_core_holds` is the demo's instance of it.
 `lemma_disturber_is_other_controller_ok` (`proof/two_cluster.rs`) admits it into
 the two-store statement, acting in the remote store: its
 model reads only the namespace, name and spec of its object and tests nothing,
@@ -607,24 +610,33 @@ Both reconcilers are Welder controller specs
 the safety fact `□janitor_deletes_are_sound`; its environment rely is D3. The sync
 reconciler's ESR is R1, R2 and R3s; its liveness dependency is the janitor's
 ESR; its partial rely names the janitor; its environment rely is D3.
-`compose_dep` composes the pair, and `widget_core_holds` proves `core` for a
-concrete cluster with the two controllers.
+`compose_dep` composes the pair, and `widget_core_holds` proves `core` for the
+cluster of any configuration -- the sync controller of a kind `k` and one janitor
+per binding of `k` -- of which `widget_demo_core_holds` is the demo instance
+(doc/widget_sync_fanout_design.md, section 5.1).
 
 Welder proves nothing new here. It gives the closed statement about the
 cluster running both controllers, with the janitor's ESR consumed rather than
 assumed, and a mechanical check that each guarantee implies the other's rely.
 
 The whole-repository composition (`src/controllers/composition/compose_all.rs`)
-adds the pair to the cluster running the VReplicaSet, VDeployment,
-VStatefulSet and RabbitMQ controllers: `core_holds` proves `core` for the
-six-controller cluster. The pair is composed first (`widget_pair_core_holds`),
-so its liveness dependency is discharged internally and the outer step is a
-plain `compose`. The cross compatibilities are kind disjointness: the pair
-only sends requests to the two Widget kinds (for the sync reconciler this
-follows from `mirror_create_req`, whose Create is `make_inner(outer).marshal()`),
-and the other four controllers only send requests to Pods, PVCs,
-VReplicaSets and the RabbitMQ-managed kinds. The one fact Verus does not find
-on its own is that the custom kind names differ (`kind_strings_distinct`).
+adds a Widget configuration to the cluster running the VReplicaSet,
+VDeployment, VStatefulSet and RabbitMQ controllers: `core_holds_for` proves
+`core` for the four controllers beside the sync controller and janitors of *any*
+configured kind whose outer kind is none of the four framework kinds, and
+`core_holds` is the demo's six-controller instance of it. The Widget
+controllers are composed first (`widget_fanout_core_holds`), so their liveness
+dependency is discharged internally and the outer step is a plain `compose`. The
+cross compatibilities are kind disjointness: the Widget controllers only send
+requests to the model kinds of their own configuration (for the sync reconciler
+this follows from `mirror_create_req`, whose Create is
+`make_inner(outer).marshal()`), and the other four controllers only send requests
+to Pods, PVCs, VReplicaSets and the RabbitMQ-managed kinds. The facts Verus does
+not find on its own are that the four framework kind names differ and carry no
+`@` (`framework_kind_names_ok`), from which no mirror kind of any configuration
+is a framework kind (`widget_kinds_distinct_from_framework`); that the
+configured outer kind is none of the four is a hypothesis, discharged for the
+demo from its literals.
 
 The concrete instances exercise neither R2's premise nor D3: nothing in them
 writes inner status or finalizers. That is by decision: the inner controller is
@@ -773,6 +785,7 @@ two-cluster instantiation included, carry none.
 | Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
 | The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
+| Two configured kinds beside each other | `composition/widget_two_kinds.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
 | Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
 | R1 to R3s on two clusters, for the pair beside admitted other controllers; the instances of the pair and of the pair with the disturber | `widget_sync_controller/proof/two_cluster.rs` |
