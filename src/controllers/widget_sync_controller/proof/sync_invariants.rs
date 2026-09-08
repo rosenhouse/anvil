@@ -47,8 +47,6 @@ pub open spec fn builtin_deletes_never_target_mirrors() -> StatePred<ClusterStat
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_builtin_deletes_never_target_mirrors(spec: TempPred<ClusterState>, cluster: Cluster)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -165,8 +163,6 @@ pub open spec fn sync_pending_requests_match_snapshots(controller_id: int) -> St
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),

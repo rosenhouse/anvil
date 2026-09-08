@@ -251,8 +251,6 @@ pub proof fn lemma_mirror_leads_to_always_present_or_gone(
 // Scheduling copies the stored object; while the mirror is there, that is the
 // mirror. The schedule action is always enabled while the object exists, so no
 // termination argument is needed.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -387,8 +385,6 @@ pub proof fn lemma_list_answered_while_parent_absent(s: ClusterState, req: ListR
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_list_responses_are_fresh_preserved(
     cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, s: ClusterState, s_prime: ClusterState
 )
@@ -636,8 +632,6 @@ pub proof fn lemma_idle_leads_to_scheduled_or_gone(
 }
 
 // scheduled ~> Init \/ gone: running the scheduled reconcile copies the snapshot.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_scheduled_leads_to_init_or_gone(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -711,8 +705,6 @@ pub proof fn lemma_scheduled_leads_to_init_or_gone(
 }
 
 // Init ~> the List is in flight.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_init_leads_to_list_req_in_flight(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -780,8 +772,6 @@ pub proof fn lemma_init_leads_to_list_req_in_flight(
 }
 
 // The List in flight ~> an Ok List response in flight.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_list_req_leads_to_list_resp(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -877,8 +867,6 @@ pub proof fn lemma_list_req_leads_to_list_resp(
 
 // An Ok List response in flight ~> the Delete is in flight. The response was
 // answered while the parent was absent (phase II), so the janitor deletes.
-#[verifier(rlimit(300))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -1008,8 +996,6 @@ pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(
 }
 
 // The Delete in flight ~> the object is terminating or gone.
-#[verifier(rlimit(300))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_delete_req_leads_to_terminating_or_gone(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -1165,8 +1151,6 @@ pub open spec fn janitor_spec_with_phases(cluster: Cluster, controller_id: int, 
 }
 
 // Under the stable spec, the premise and phase I: phase II eventually holds forever.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_phase_ii(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -1219,8 +1203,6 @@ pub proof fn lemma_true_leads_to_always_phase_ii(
 }
 
 // Under the stable spec, the premise and both phases: the object is eventually gone.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_gone_under_phases(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
@@ -1328,8 +1310,6 @@ pub proof fn lemma_object_leads_to_gone(
 }
 
 // R3 for one object under the stable spec.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_mirror_eventually_collected_per_object(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )

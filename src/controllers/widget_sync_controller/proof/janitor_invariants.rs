@@ -141,8 +141,6 @@ pub proof fn lemma_snapshot_soundness_preserved_by_api_server_step(
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_janitor_crs_are_sound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -333,8 +331,6 @@ proof fn lemma_list_response_decides_parent(cluster: Cluster, s: ClusterState, c
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_janitor_decisions_are_sound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -463,8 +459,6 @@ pub proof fn lemma_always_janitor_decisions_are_sound(spec: TempPred<ClusterStat
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 proof fn lemma_janitor_decision_soundness_preserved_by_api_server_step(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef
 )
@@ -517,8 +511,6 @@ proof fn lemma_janitor_decision_soundness_preserved_by_api_server_step(
     }
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 proof fn lemma_janitor_decision_soundness_preserved_by_controller_step(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), key: ObjectRef
@@ -645,8 +637,6 @@ proof fn lemma_janitor_decision_soundness_preserved_by_controller_step(
 // trusted/liveness_theorem.rs, part of the janitor's ESR).
 // ---------------------------------------------------------------------------
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_janitor_deletes_are_sound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -726,8 +716,6 @@ pub proof fn lemma_always_janitor_deletes_are_sound(spec: TempPred<ClusterState>
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 proof fn lemma_janitor_delete_soundness_preserved_by_api_server_step(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState, handled: Message, msg: Message
 )
@@ -778,8 +766,6 @@ proof fn lemma_janitor_delete_soundness_preserved_by_api_server_step(
 
 // A Delete the janitor just sent: it comes from AfterListOuter, after a List that
 // answered without the parent.
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 proof fn lemma_new_janitor_delete_is_sound(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message

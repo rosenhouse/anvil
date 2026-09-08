@@ -176,8 +176,6 @@ pub proof fn lemma_always_cleanup_snapshot_next(spec: TempPred<ClusterState>, cl
     );
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_scheduled_avoids(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
     requires
         key.kind == InnerWidgetView::kind(),
@@ -243,8 +241,6 @@ pub proof fn lemma_true_leads_to_always_scheduled_avoids(spec: TempPred<ClusterS
     leads_to_stable(spec, lift_action(next), true_pred(), lift_state(sched_ok));
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_snapshots_avoid(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
     requires
         key.kind == InnerWidgetView::kind(),
@@ -353,8 +349,6 @@ pub proof fn lemma_true_leads_to_always_key_msgs_ok(spec: TempPred<ClusterState>
 
 // The store facts one step keeps: a collected key stays collected, and an object
 // with uid `m` at the key either stays (with its identity) or the key is collected.
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_mirror_collected_after_step(
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, key: ObjectRef, a: Uid, m: Uid
 )
@@ -529,8 +523,6 @@ pub open spec fn cleanup_step_next(cluster: Cluster, controller_id: int, janitor
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_cleanup_step_next(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
     requires spec.entails(cleanup_spec_l3(cluster, controller_id, janitor_id, key, a)),
     ensures spec.entails(always(lift_action(cleanup_step_next(cluster, controller_id, janitor_id, key, a)))),
@@ -572,8 +564,6 @@ pub proof fn lemma_always_cleanup_step_next(spec: TempPred<ClusterState>, cluste
     );
 }
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_mirror_collected(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
     requires
         key.kind == InnerWidgetView::kind(),

@@ -136,8 +136,6 @@ pub proof fn lemma_well_formed_inner_unmarshals(cluster: Cluster, s: ClusterStat
     assert(unmarshallable_object(obj, cluster.installed_types));
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cluster: Cluster)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -239,8 +237,6 @@ pub proof fn lemma_string_bound_preserved(parent: StringView, outer_key: ObjectR
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_mirror_is_bound_preserved_by_create(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
     requires
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
@@ -295,8 +291,6 @@ proof fn lemma_mirror_is_bound_preserved_by_create(cluster: Cluster, s: ClusterS
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_mirror_is_bound_preserved_by_update(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
     requires
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
@@ -335,8 +329,6 @@ proof fn lemma_mirror_is_bound_preserved_by_update(cluster: Cluster, s: ClusterS
     lemma_string_bound_preserved(parent_uid_annotation(old_inner), outer_key_of(key), s, s_prime);
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_mirror_is_bound_preserved_by_get_then_update(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
     requires
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
@@ -419,8 +411,6 @@ proof fn lemma_get_then_update_only_changes_owned_object(installed_types: Instal
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_mirror_is_bound_preserved_by_other_requests(cluster: Cluster, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
     requires
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),

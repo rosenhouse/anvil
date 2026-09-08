@@ -99,8 +99,6 @@ pub open spec fn sync_membership(cluster: Cluster, controller_id: int, janitor_i
 
 // What the rely, together with the sync reconciler's own guarantee and the
 // cluster's structural invariants, says about writes of mirrors by anyone.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_sync_rely_implies_mirror_write_facts(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
     requires
         sync_membership(cluster, controller_id, janitor_id),
@@ -338,8 +336,6 @@ pub proof fn sync_invariants_is_stable(cluster: Cluster, controller_id: int, jan
     );
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn sync_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -506,8 +502,6 @@ pub proof fn sync_stable_spec_is_stable(cluster: Cluster, controller_id: int, ja
 // The facts of the stable spec, spelled out.
 // ---------------------------------------------------------------------------
 
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_sync_stable_spec_facts(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int)
     requires spec.entails(sync_stable_spec(cluster, controller_id, janitor_id)),
     ensures
@@ -896,7 +890,6 @@ pub proof fn janitor_invariants_is_stable(cluster: Cluster, controller_id: int)
     );
 }
 
-#[verifier(rlimit(100))]
 pub proof fn janitor_invariants_hold(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -1030,8 +1023,6 @@ pub proof fn janitor_stable_spec_is_stable(cluster: Cluster, controller_id: int)
 }
 
 // The facts of the stable spec that the step lemmas use, spelled out.
-#[verifier(rlimit(400))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_janitor_stable_spec_facts(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires spec.entails(janitor_stable_spec(cluster, controller_id)),
     ensures
@@ -1358,8 +1349,6 @@ pub proof fn lemma_sync_terminates(spec: TempPred<ClusterState>, cluster: Cluste
     tla_forall_p_tla_forall_q_equality(idle_of, idle_of_alt);
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_true_leads_to_always_sync_phase_ii(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView)
     requires
         sync_membership(cluster, controller_id, janitor_id),
@@ -1481,8 +1470,6 @@ pub open spec fn sync_step_next(cluster: Cluster, controller_id: int, janitor_id
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_sync_step_next(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView)
     requires
         sync_membership(cluster, controller_id, janitor_id),
@@ -1562,8 +1549,6 @@ pub proof fn lemma_always_sync_step_next(spec: TempPred<ClusterState>, cluster: 
 
 // The snapshot of the current reconcile of the outer copy, and what its pending
 // request is, at each step.
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_current_reconcile_of_outer(cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, outer: OuterWidgetView)
     requires
         sync_membership(cluster, controller_id, janitor_id),

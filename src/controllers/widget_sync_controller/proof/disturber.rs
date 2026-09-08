@@ -44,8 +44,6 @@ pub open spec fn widget_disturber_guarantee(controller_id: int) -> StatePred<Clu
     }
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 pub proof fn lemma_always_widget_disturber_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
@@ -101,8 +99,6 @@ pub proof fn lemma_always_widget_disturber_guarantee(spec: TempPred<ClusterState
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
-#[verifier(rlimit(200))]
-#[verifier(spinoff_prover)]
 proof fn lemma_disturber_new_request_is_guaranteed(
     cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message
