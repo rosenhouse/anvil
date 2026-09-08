@@ -331,14 +331,16 @@ holds only under the janitor's rely and is therefore part of the janitor's ESR
 ### 3.3 Properties
 
 ```
-outer_stable(outer)(s) :=
+outer_spec_stable(outer)(s) :=
     desired_state_is(outer)(s)
- && s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
  && mirror_spec_undisturbed(outer)(s)
         // every in-flight Update / GetThenUpdate / Patch of the mirror writes outer.spec
  && mirror_undeleted(outer)(s)
         // while a mirror of outer is at the mirror key, every in-flight Delete of that key
         // names, by uid precondition, an object other than that mirror
+outer_stable(outer)(s) :=
+    outer_spec_stable(outer)(s)
+ && s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
 
 spec_synced(outer)(s)            := the mirror exists, is not terminating, is a mirror of outer, has spec outer.spec
 inner_settled(outer, mirrored)(s) := spec_synced(outer)(s) && inner_caught_up(inner) && π(inner.status) == mirrored
@@ -354,15 +356,17 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 
 | | Statement | Proved in |
 |---|---|---|
-| R1 | `∀outer. □outer_stable(outer) ~> □spec_synced(outer)` | `proof/liveness/sync_proof.rs` |
+| R1 | `∀outer. □outer_spec_stable(outer) ~> □spec_synced(outer)` | `proof/liveness/sync_spec_proof.rs` |
 | R2 | `∀outer, mirrored. □(outer_stable(outer) ∧ inner_settled(outer, mirrored)) ~> □status_synced(outer, mirrored)` | `proof/liveness/sync_status_proof.rs` |
 | R3 | `∀k, a, u. □parent_absent(k, a) ∧ mirror_object_is(k, a, u) ~> object_is_gone(k, u)` | `proof/liveness/janitor_proof.rs` |
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
 | D3 | `∀k, u. inner_terminating_object(k, u) ~> object_is_gone(k, u)` | assumed |
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
-(spec and generation constant, not being deleted, same uid), and whoever was
-editing the mirror's spec or deleting the mirror out of band has stopped.
+(spec constant, not being deleted, same uid), and whoever was editing the
+mirror's spec or deleting the mirror out of band has stopped. R2 also fixes the
+outer copy's generation, which the status it promises is stamped with; R1 says
+nothing about status and does not need it.
 Convergence is promised for the time after the disturbances stop; during them
 the guarantees still hold. The delete clause is stated so that it costs
 nothing in the undisturbed case: a Delete the janitor sends satisfies it
@@ -376,9 +380,9 @@ is per object; R3s is the stable form and is the sync reconciler's promise
 given R3. Neither R3 nor R3s needs a premise about deletes: the janitor's rely
 already admits any Delete, and an extra delete of a mirror only helps them.
 
-On two stores (`two_cluster_outer_stable`) the premise reads the outer copy and
-the in-flight writes on the primary side and the delete clause on the remote
-side, where the mirror lives.
+On two stores (`two_cluster_outer_spec_stable`, `two_cluster_outer_stable`) the
+premises read the outer copy and the in-flight writes on the primary side and
+the delete clause on the remote side, where the mirror lives.
 
 ### 3.4 Composition
 

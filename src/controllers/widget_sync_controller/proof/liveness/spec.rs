@@ -1214,15 +1214,15 @@ pub proof fn lemma_true_leads_to_always_phase_i(spec: TempPred<ClusterState>, cl
 // ---------------------------------------------------------------------------
 
 pub open spec fn sync_spec_with_desired(cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView) -> TempPred<ClusterState> {
-    sync_stable_spec(cluster, controller_id, janitor_id).and(always(lift_state(outer_stable(outer))))
+    sync_stable_spec(cluster, controller_id, janitor_id).and(always(lift_state(outer_spec_stable(outer))))
 }
 
 pub proof fn sync_spec_with_desired_is_stable(cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView)
     ensures valid(stable(sync_spec_with_desired(cluster, controller_id, janitor_id, outer))),
 {
     sync_stable_spec_is_stable(cluster, controller_id, janitor_id);
-    always_p_is_stable(lift_state(outer_stable(outer)));
-    stable_and_n!(sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
+    always_p_is_stable(lift_state(outer_spec_stable(outer)));
+    stable_and_n!(sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
 }
 
 pub open spec fn sync_spec_with_phase_i(cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView) -> TempPred<ClusterState> {
@@ -1270,7 +1270,7 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(spec: TempPred<ClusterState>, 
     requires spec.entails(sync_spec_with_phase_ii(cluster, controller_id, janitor_id, outer)),
     ensures
         spec.entails(sync_stable_spec(cluster, controller_id, janitor_id)),
-        spec.entails(always(lift_state(outer_stable(outer)))),
+        spec.entails(always(lift_state(outer_spec_stable(outer)))),
         spec.entails(always(lift_state(Cluster::desired_state_is(outer)))),
         spec.entails(always(lift_state(mirror_spec_undisturbed(outer)))),
         spec.entails(always(lift_state(mirror_undeleted(outer)))),
@@ -1286,10 +1286,10 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(spec: TempPred<ClusterState>, 
 {
     entails_and_split(spec, sync_spec_with_phase_i(cluster, controller_id, janitor_id, outer), always(lift_state(sync_phase_ii(controller_id, outer))));
     entails_and_split(spec, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
-    entails_and_split(spec, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
-    always_weaken(spec, lift_state(outer_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
-    always_weaken(spec, lift_state(outer_stable(outer)), lift_state(mirror_spec_undisturbed(outer)));
-    always_weaken(spec, lift_state(outer_stable(outer)), lift_state(mirror_undeleted(outer)));
+    entails_and_split(spec, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
+    always_weaken(spec, lift_state(outer_spec_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
+    always_weaken(spec, lift_state(outer_spec_stable(outer)), lift_state(mirror_spec_undisturbed(outer)));
+    always_weaken(spec, lift_state(outer_spec_stable(outer)), lift_state(mirror_undeleted(outer)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
@@ -1365,8 +1365,8 @@ pub proof fn lemma_true_leads_to_always_sync_phase_ii(spec: TempPred<ClusterStat
     // Under spec_i: the scheduled snapshot eventually always carries the outer spec and uid.
     assert(spec_i.entails(spec_i));
     entails_and_split(spec_i, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
-    entails_and_split(spec_i, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
-    always_weaken(spec_i, lift_state(outer_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
+    entails_and_split(spec_i, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
+    always_weaken(spec_i, lift_state(outer_spec_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
     lemma_sync_stable_spec_facts(spec_i, cluster, controller_id, janitor_id);
     always_weaken(spec_i, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec_i, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
@@ -1378,8 +1378,8 @@ pub proof fn lemma_true_leads_to_always_sync_phase_ii(spec: TempPred<ClusterStat
     assert(spec_a.entails(spec_a));
     entails_and_split(spec_a, spec_i, always(e1a));
     entails_and_split(spec_a, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
-    entails_and_split(spec_a, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
-    always_weaken(spec_a, lift_state(outer_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
+    entails_and_split(spec_a, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
+    always_weaken(spec_a, lift_state(outer_spec_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
     lemma_sync_stable_spec_facts(spec_a, cluster, controller_id, janitor_id);
     always_weaken(spec_a, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec_a, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
@@ -1397,8 +1397,8 @@ pub proof fn lemma_true_leads_to_always_sync_phase_ii(spec: TempPred<ClusterStat
     entails_and_split(spec_b, spec_a, always(xor));
     entails_and_split(spec_b, spec_i, always(e1a));
     entails_and_split(spec_b, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
-    entails_and_split(spec_b, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
-    always_weaken(spec_b, lift_state(outer_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
+    entails_and_split(spec_b, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
+    always_weaken(spec_b, lift_state(outer_spec_stable(outer)), lift_state(Cluster::desired_state_is(outer)));
     lemma_sync_stable_spec_facts(spec_b, cluster, controller_id, janitor_id);
     always_weaken(spec_b, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec_b, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
