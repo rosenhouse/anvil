@@ -14,6 +14,7 @@ use crate::kubernetes_cluster::spec::{
     controller::types::*, message::*, two_cluster::*,
 };
 use crate::reconciler::spec::{io::*, reconciler::*};
+use crate::state_machine::action::*;
 use crate::vstd_ext::string_view::*;
 use crate::composition::{widget_disturber_reconciler::*, widget_janitor_reconciler::*, widget_sync_reconciler::*};
 use crate::widget_sync_controller::{
@@ -22,7 +23,7 @@ use crate::widget_sync_controller::{
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
 use verus_temporal_logic::{defs::*, rules::*};
-use vstd::{map_lib::*, prelude::*, seq_lib::*, set_lib::*, string::*};
+use vstd::{map_lib::*, multiset::*, prelude::*, seq_lib::*, set_lib::*, string::*};
 
 verus! {
 
@@ -1872,18 +1873,523 @@ pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_
 
 
 // ---------------------------------------------------------------------------
+// The uids the janitor deletes by, on two stores. A janitor Delete carries the
+// uid of the stored mirror it was scheduled for, which the remote store issued.
+// This is an invariant of the two-store model itself, proved by induction over
+// its steps, not a pull-back: a uid a store's counter never reaches relabels to
+// a negative value, about which the one-store facts say nothing.
+// ---------------------------------------------------------------------------
+
+// Every stored object carries a uid the store's counter has issued.
+pub open spec fn store_uids_issued(st: APIServerState) -> bool {
+    forall |k: ObjectRef| #[trigger] st.resources.contains_key(k)
+        ==> st.resources[k].metadata.uid is Some && st.resources[k].metadata.uid->0 < st.uid_counter
+}
+
+// A janitor Delete names, by uid precondition, a mirror the remote store has issued.
+pub open spec fn janitor_delete_uid_issued(msg: Message, s: TwoClusterState) -> bool {
+    let req = msg.content.get_delete_request();
+    &&& req.key.kind == InnerWidgetView::kind()
+    &&& req.preconditions is Some
+    &&& req.preconditions->0.uid is Some
+    &&& req.preconditions->0.uid->0 < s.remote.uid_counter
+}
+
+// Both stores hold issued uids, and every object the janitor is scheduled for
+// or reconciling, and every Delete it has in flight, carries a uid the remote
+// store, where its kind lives, has issued.
+pub open spec fn janitor_uids_issued(janitor_id: int) -> StatePred<TwoClusterState> {
+    |s: TwoClusterState| {
+        let c = s.controller_and_externals[janitor_id].controller;
+        &&& store_uids_issued(s.primary)
+        &&& store_uids_issued(s.remote)
+        &&& forall |key: ObjectRef| #[trigger] c.scheduled_reconciles.contains_key(key)
+            ==> c.scheduled_reconciles[key].metadata.uid is Some
+                && c.scheduled_reconciles[key].metadata.uid->0 < s.remote.uid_counter
+        &&& forall |key: ObjectRef| #[trigger] c.ongoing_reconciles.contains_key(key)
+            ==> c.ongoing_reconciles[key].triggering_cr.metadata.uid is Some
+                && c.ongoing_reconciles[key].triggering_cr.metadata.uid->0 < s.remote.uid_counter
+        &&& forall |msg: Message| {
+            &&& #[trigger] s.in_flight().contains(msg)
+            &&& msg.src.is_controller_id(janitor_id)
+            &&& msg.content is APIRequest
+            &&& msg.content.is_delete_request()
+        } ==> janitor_delete_uid_issued(msg, s)
+    }
+}
+
+proof fn lemma_projection_roundtrip(s: TwoClusterState, side: Side, c: ClusterState)
+    ensures
+        s.with_projection(side, c).project(side) == c,
+        s.with_projection(side, c).store(side.other()) == s.store(side.other()),
+{
+    match side {
+        Side::Primary => {},
+        Side::Remote => {},
+    }
+}
+
+// The projection a step of the two-store model is taken on.
+pub open spec fn step_side(side: Side, step: Step) -> Side {
+    match step {
+        Step::APIServerStep(_) => side,
+        Step::BuiltinControllersStep(_) => side,
+        Step::ScheduleControllerReconcileStep(_) => side,
+        _ => Side::Primary,
+    }
+}
+
+// Every step of the two-store model is a step of the one-store model on the
+// projection it is taken on, and leaves the other store alone.
+proof fn lemma_step_projects(tc: TwoCluster, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
+    requires tc.next_step(s, s_prime, side, step),
+    ensures
+        tc.cluster.next_step(s.project(step_side(side, step)), s_prime.project(step_side(side, step)), step),
+        s_prime.store(step_side(side, step).other()) == s.store(step_side(side, step).other()),
+{
+    let cluster = tc.cluster;
+    let x = step_side(side, step);
+    let p = s.project(x);
+    match step {
+        Step::APIServerStep(input) => {
+            let c = (cluster.api_server_next().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::BuiltinControllersStep(input) => {
+            let c = (cluster.builtin_controllers_next().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::ControllerStep(input) => {
+            let c = (cluster.controller_next().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::ScheduleControllerReconcileStep(input) => {
+            let c = (cluster.schedule_controller_reconcile().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::RestartControllerStep(input) => {
+            let c = (cluster.restart_controller().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::DisableCrashStep(input) => {
+            let c = (cluster.disable_crash().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::DropReqStep(input) => {
+            let c = (cluster.drop_req().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::DisableReqDropStep => {
+            let c = (cluster.disable_req_drop().transition)((), p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::PodMonkeyStep(input) => {
+            let c = (cluster.pod_monkey_next().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::DisablePodMonkeyStep => {
+            let c = (cluster.disable_pod_monkey().transition)((), p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::ExternalStep(input) => {
+            let c = (cluster.external_next().transition)(input, p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+        Step::StutterStep => {
+            let c = (cluster.stutter().transition)((), p).0;
+            assert(s_prime == s.with_projection(x, c));
+            lemma_projection_roundtrip(s, x, c);
+        },
+    }
+}
+
+// One request handled by a store keeps its uids issued, never lowers its uid
+// counter, and is answered by a response.
+proof fn lemma_etcd_step_keeps_uids(it: InstalledTypes, msg: Message, st: APIServerState)
+    requires
+        msg.content is APIRequest,
+        store_uids_issued(st),
+    ensures
+        store_uids_issued(transition_by_etcd(it, msg, st).0),
+        transition_by_etcd(it, msg, st).0.uid_counter >= st.uid_counter,
+        transition_by_etcd(it, msg, st).1.content is APIResponse,
+{
+    match msg.content->APIRequest_0 {
+        APIRequest::GetRequest(_) => {},
+        APIRequest::ListRequest(_) => {},
+        APIRequest::CreateRequest(_) => {},
+        APIRequest::DeleteRequest(_) => {},
+        APIRequest::UpdateRequest(_) => {},
+        APIRequest::UpdateStatusRequest(_) => {},
+        APIRequest::GetThenDeleteRequest(_) => {},
+        APIRequest::GetThenUpdateRequest(_) => {},
+        APIRequest::GetThenUpdateStatusRequest(_) => {},
+        APIRequest::PatchRequest(_) => {},
+        APIRequest::PatchStatusRequest(_) => {},
+    }
+}
+
+proof fn lemma_janitor_uids_issued_init(tc: TwoCluster, janitor_id: int, s: TwoClusterState)
+    requires
+        tc.cluster.controller_models.contains_key(janitor_id),
+        tc.init()(s),
+    ensures janitor_uids_issued(janitor_id)(s),
+{
+    broadcast use group_multiset_axioms;
+    let p = s.project(Side::Primary);
+    assert(tc.cluster.init()(p));
+    let c = s.controller_and_externals[janitor_id].controller;
+    assert((controller(tc.cluster.controller_models[janitor_id].reconcile_model, janitor_id).init)(c));
+    assert(c.scheduled_reconciles == Map::<ObjectRef, DynamicObjectView>::empty());
+    assert(c.ongoing_reconciles == Map::<ObjectRef, OngoingReconcile>::empty());
+    assert(s.network.in_flight == Multiset::<Message>::empty());
+    assert(s.primary.resources == Map::<ObjectRef, DynamicObjectView>::empty());
+    assert(s.remote.resources == Map::<ObjectRef, DynamicObjectView>::empty());
+}
+
+// The API server of `side` handles a request: that store keeps its uids issued
+// and its counter does not go down; the answer is a response.
+proof fn lemma_janitor_uids_issued_api_server_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: Option<Message>)
+    requires
+        janitor_uids_issued(janitor_id)(s),
+        widget_two_cluster(cluster).api_server_next(side).forward(input)(s, s_prime),
+    ensures janitor_uids_issued(janitor_id)(s_prime),
+{
+    broadcast use group_multiset_axioms;
+    let tc = widget_two_cluster(cluster);
+    lemma_step_projects(tc, s, s_prime, side, Step::APIServerStep(input));
+    let p = s.project(side);
+    let p_prime = s_prime.project(side);
+    let msg = input->0;
+    let it = cluster.installed_types;
+    let (st1, resp) = transition_by_etcd(it, msg, p.api_server);
+    assert(msg.content is APIRequest);
+    assert(p_prime.api_server == st1);
+    assert(p_prime.network.in_flight == p.network.in_flight.remove(msg).insert(resp));
+    assert(p_prime.controller_and_externals == p.controller_and_externals);
+    lemma_etcd_step_keeps_uids(it, msg, p.api_server);
+    match side {
+        Side::Primary => {
+            assert(s_prime.primary == st1);
+            assert(s_prime.remote == s.remote);
+        },
+        Side::Remote => {
+            assert(s_prime.remote == st1);
+            assert(s_prime.primary == s.primary);
+        },
+    }
+    assert(s_prime.remote.uid_counter >= s.remote.uid_counter);
+    assert forall |m: Message| {
+        &&& #[trigger] s_prime.in_flight().contains(m)
+        &&& m.src.is_controller_id(janitor_id)
+        &&& m.content is APIRequest
+        &&& m.content.is_delete_request()
+    } implies janitor_delete_uid_issued(m, s_prime) by {
+        assert(m != resp);
+        assert(s.in_flight().contains(m));
+    }
+}
+
+// A Delete the janitor sends while reconciling `key` names the uid of its
+// triggering object, which the remote store has issued.
+proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: TwoClusterState, key: ObjectRef, msg_o: Option<Message>, m: Message)
+    requires
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
+        inv(widget_two_cluster(cluster), s),
+        janitor_uids_issued(janitor_id)(s),
+        ({
+            let act = continue_reconcile(cluster.controller_models[janitor_id].reconcile_model, janitor_id);
+            let c = s.controller_and_externals[janitor_id].controller;
+            let in2 = ControllerActionInput { recv: msg_o, scheduled_cr_key: Some(key), rpc_id_allocator: s.rpc_id_allocator };
+            &&& (act.precondition)(in2, c)
+            &&& (act.transition)(in2, c).1.send.contains(m)
+        }),
+        m.content is APIRequest,
+        m.content.is_delete_request(),
+    ensures janitor_delete_uid_issued(m, s),
+{
+    broadcast use group_multiset_axioms;
+    let tc = widget_two_cluster(cluster);
+    let model = cluster.controller_models[janitor_id].reconcile_model;
+    let act = continue_reconcile(model, janitor_id);
+    let c = s.controller_and_externals[janitor_id].controller;
+    let in2 = ControllerActionInput { recv: msg_o, scheduled_cr_key: Some(key), rpc_id_allocator: s.rpc_id_allocator };
+    let rs = c.ongoing_reconciles[key];
+    assert(c.ongoing_reconciles.contains_key(key));
+    assert(key.kind == model.kind);
+    assert(model.kind == InnerWidgetView::kind());
+    assert(tc.cluster.controller_models.contains_key(janitor_id));
+    assert(controller_crs_ok(tc, c));
+    assert(rs.triggering_cr.kind == key.kind && stored_object_ok(tc, rs.triggering_cr));
+    lemma_inner_unmarshals(cluster, rs.triggering_cr);
+    let inner = InnerWidgetView::unmarshal(rs.triggering_cr)->Ok_0;
+    assert(inner.metadata == rs.triggering_cr.metadata);
+    let resp_c = if msg_o is Some {
+        if msg_o->0.content is APIResponse {
+            Some(ResponseContent::KubernetesResponse(msg_o->0.content->APIResponse_0))
+        } else {
+            Some(ResponseContent::ExternalResponse(msg_o->0.content->ExternalResponse_0))
+        }
+    } else {
+        None
+    };
+    let (ls_prime, req_c) = (model.transition)(rs.triggering_cr, resp_c, rs.local_state);
+    assert(req_c is Some);
+    assert(req_c->0 is KubernetesRequest);
+    let req = req_c->0->KubernetesRequest_0;
+    assert(m == controller_req_msg(janitor_id, key, s.rpc_id_allocator.allocate().1, req));
+    assert(m.content->APIRequest_0 == req);
+    let resp_um = match resp_c {
+        None => None,
+        Some(x) => Some(match x {
+            ResponseContent::KubernetesResponse(api_resp) => ResponseView::<VoidERespView>::KResponse(api_resp),
+            ResponseContent::ExternalResponse(ext_resp) => ResponseView::<VoidERespView>::ExternalResponse(VoidERespView::unmarshal(ext_resp)->Ok_0),
+        }),
+    };
+    let state = janitor_reconciler::WidgetJanitorReconcileState::unmarshal(rs.local_state)->Ok_0;
+    let (state_prime, req_um) = janitor_reconciler::reconcile_core(inner, resp_um, state);
+    assert(req_um is Some && req_um->0 is KRequest && req_um->0->KRequest_0 == req);
+    match state.reconcile_step {
+        WidgetJanitorStepView::AfterListOuter => {
+            assert(req == APIRequest::DeleteRequest(DeleteRequest {
+                key: inner.object_ref(),
+                preconditions: Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)),
+            }));
+        },
+        _ => { assert(false); },
+    }
+}
+
+// One controller step: the janitor's own state keeps issued uids, and the one
+// request it may send, if a Delete, names one.
+proof fn lemma_janitor_uids_issued_controller_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, input: (int, Option<Message>, Option<ObjectRef>))
+    requires
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
+        inv(widget_two_cluster(cluster), s),
+        janitor_uids_issued(janitor_id)(s),
+        widget_two_cluster(cluster).controller_next().forward(input)(s, s_prime),
+    ensures janitor_uids_issued(janitor_id)(s_prime),
+{
+    broadcast use group_multiset_axioms;
+    let tc = widget_two_cluster(cluster);
+    lemma_step_projects(tc, s, s_prime, Side::Primary, Step::ControllerStep(input));
+    let p = s.project(Side::Primary);
+    let p_prime = s_prime.project(Side::Primary);
+    let (id, msg_o, key_o) = input;
+    let key = key_o->0;
+    assert(key_o is Some);
+    assert(p_prime.api_server == p.api_server);
+    assert(s_prime.primary == s.primary);
+    assert(s_prime.remote == s.remote);
+    let model = cluster.controller_models[id].reconcile_model;
+    let sm = cluster.controller(id);
+    let c = s.controller_and_externals[id].controller;
+    let in2 = ControllerActionInput { recv: msg_o, scheduled_cr_key: key_o, rpc_id_allocator: s.rpc_id_allocator };
+    let st = choose |step: ControllerStep| (#[trigger] (sm.step_to_action)(step).precondition)((sm.action_input)(step, in2), c);
+    let host = sm.next_result(in2, c);
+    assert(host == ActionResult::Enabled(((sm.step_to_action)(st).transition)(in2, c).0, ((sm.step_to_action)(st).transition)(in2, c).1));
+    let sent = host->Enabled_1.send;
+    assert(s_prime.controller_and_externals == s.controller_and_externals.insert(id, ControllerAndExternalState { controller: host->Enabled_0, ..s.controller_and_externals[id] }));
+    assert(s_prime.network.in_flight == (if msg_o is Some { s.network.in_flight.remove(msg_o->0) } else { s.network.in_flight }).add(sent));
+    // Whatever is sent comes from this controller, at its key, out of ContinueReconcile.
+    assert forall |m: Message| #[trigger] sent.contains(m) implies m.src == HostId::Controller(id, key) && st is ContinueReconcile by {
+        match st {
+            ControllerStep::RunScheduledReconcile => {},
+            ControllerStep::ContinueReconcile => {},
+            ControllerStep::EndReconcile => {},
+        }
+    }
+    let cj = s.controller_and_externals[janitor_id].controller;
+    let cj_prime = s_prime.controller_and_externals[janitor_id].controller;
+    if id == janitor_id {
+        assert(cj_prime == host->Enabled_0);
+        match st {
+            ControllerStep::RunScheduledReconcile => {
+                assert(cj_prime.scheduled_reconciles == cj.scheduled_reconciles.remove(key));
+                assert(cj_prime.ongoing_reconciles[key].triggering_cr == cj.scheduled_reconciles[key]);
+                assert forall |k: ObjectRef| #[trigger] cj_prime.ongoing_reconciles.contains_key(k)
+                    implies cj_prime.ongoing_reconciles[k].triggering_cr.metadata.uid is Some
+                        && cj_prime.ongoing_reconciles[k].triggering_cr.metadata.uid->0 < s_prime.remote.uid_counter by {
+                    if k != key { assert(cj_prime.ongoing_reconciles[k] == cj.ongoing_reconciles[k]); }
+                }
+            },
+            ControllerStep::ContinueReconcile => {
+                let rs = cj.ongoing_reconciles[key];
+                assert(cj_prime.scheduled_reconciles == cj.scheduled_reconciles);
+                assert forall |k: ObjectRef| #[trigger] cj_prime.ongoing_reconciles.contains_key(k)
+                    implies cj_prime.ongoing_reconciles[k].triggering_cr.metadata.uid is Some
+                        && cj_prime.ongoing_reconciles[k].triggering_cr.metadata.uid->0 < s_prime.remote.uid_counter by {
+                    if k == key {
+                        assert(cj_prime.ongoing_reconciles[k].triggering_cr == rs.triggering_cr);
+                    } else {
+                        assert(cj_prime.ongoing_reconciles[k] == cj.ongoing_reconciles[k]);
+                    }
+                }
+            },
+            ControllerStep::EndReconcile => {
+                assert(cj_prime.scheduled_reconciles == cj.scheduled_reconciles);
+                assert(cj_prime.ongoing_reconciles == cj.ongoing_reconciles.remove(key));
+            },
+        }
+    } else {
+        assert(s_prime.controller_and_externals[janitor_id] == s.controller_and_externals[janitor_id]);
+    }
+    assert forall |m: Message| {
+        &&& #[trigger] s_prime.in_flight().contains(m)
+        &&& m.src.is_controller_id(janitor_id)
+        &&& m.content is APIRequest
+        &&& m.content.is_delete_request()
+    } implies janitor_delete_uid_issued(m, s_prime) by {
+        if s.in_flight().contains(m) {
+            assert(janitor_delete_uid_issued(m, s));
+        } else {
+            assert(sent.contains(m));
+            assert(id == janitor_id);
+            assert(st is ContinueReconcile);
+            assert((sm.step_to_action)(st) == continue_reconcile(model, janitor_id));
+            lemma_janitor_sends_issued_uid(cluster, janitor_id, s, key, msg_o, m);
+        }
+    }
+}
+
+// janitor_uids_issued is kept by every step of the two-store model.
+proof fn lemma_janitor_uids_issued_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
+    requires
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
+        models_ok(widget_two_cluster(cluster)),
+        inv(widget_two_cluster(cluster), s),
+        janitor_uids_issued(janitor_id)(s),
+        widget_two_cluster(cluster).next_step(s, s_prime, side, step),
+    ensures janitor_uids_issued(janitor_id)(s_prime),
+{
+    broadcast use group_multiset_axioms;
+    let tc = widget_two_cluster(cluster);
+    lemma_widget_sides(cluster);
+    let x = step_side(side, step);
+    lemma_step_projects(tc, s, s_prime, side, step);
+    let p = s.project(x);
+    let p_prime = s_prime.project(x);
+    let c = s.controller_and_externals[janitor_id].controller;
+    match step {
+        Step::APIServerStep(input) => {
+            lemma_janitor_uids_issued_api_server_step(cluster, janitor_id, s, s_prime, side, input);
+        },
+        Step::ControllerStep(input) => {
+            lemma_janitor_uids_issued_controller_step(cluster, janitor_id, s, s_prime, input);
+        },
+        Step::ScheduleControllerReconcileStep(input) => {
+            let (id, key) = input;
+            assert(p_prime.api_server == p.api_server);
+            assert(p_prime.network == p.network);
+            assert(s_prime.primary == s.primary);
+            assert(s_prime.remote == s.remote);
+            if id == janitor_id {
+                assert(key.kind == InnerWidgetView::kind());
+                assert(x == Side::Remote);
+                let c_prime = s_prime.controller_and_externals[janitor_id].controller;
+                assert(c_prime.scheduled_reconciles == c.scheduled_reconciles.insert(key, s.remote.resources[key]));
+                assert(c_prime.ongoing_reconciles == c.ongoing_reconciles);
+                assert(s.remote.resources.contains_key(key));
+            } else {
+                assert(s_prime.controller_and_externals[janitor_id] == s.controller_and_externals[janitor_id]);
+            }
+        },
+        Step::RestartControllerStep(input) => {
+            assert(p_prime.api_server == p.api_server);
+            assert(p_prime.network == p.network);
+            if input == janitor_id {
+                let c_prime = s_prime.controller_and_externals[janitor_id].controller;
+                assert(c_prime.scheduled_reconciles == Map::<ObjectRef, DynamicObjectView>::empty());
+                assert(c_prime.ongoing_reconciles == Map::<ObjectRef, OngoingReconcile>::empty());
+            } else {
+                assert(s_prime.controller_and_externals[janitor_id] == s.controller_and_externals[janitor_id]);
+            }
+        },
+        Step::ExternalStep(input) => {
+            assert(cluster.controller_models.contains_key(input.0));
+            assert(false);
+        },
+        _ => {
+            // The garbage collector, the pod monkey, a dropped request and the
+            // environment switches: no store and no controller state changes,
+            // and what enters the network is a response or carries no
+            // controller source.
+            assert(p_prime.api_server == p.api_server);
+            assert(s_prime.controller_and_externals[janitor_id].controller == c);
+            assert forall |m: Message| {
+                &&& #[trigger] s_prime.in_flight().contains(m)
+                &&& m.src.is_controller_id(janitor_id)
+                &&& m.content is APIRequest
+                &&& m.content.is_delete_request()
+            } implies janitor_delete_uid_issued(m, s_prime) by {
+                assert(s.in_flight().contains(m));
+            }
+        },
+    }
+}
+
+// janitor_uids_issued holds along every simulated execution from an initial state.
+proof fn lemma_janitor_uids_issued_at(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, janitor_id: int, i: nat)
+    requires
+        widget_sim(cluster, r, ex),
+        widget_two_cluster(cluster).init()(state_at(ex, 0)),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
+    ensures janitor_uids_issued(janitor_id)(state_at(ex, i)),
+    decreases i,
+{
+    let tc = widget_two_cluster(cluster);
+    if i == 0 {
+        lemma_janitor_uids_issued_init(tc, janitor_id, state_at(ex, 0));
+    } else {
+        let j = (i - 1) as nat;
+        lemma_janitor_uids_issued_at(cluster, r, ex, janitor_id, j);
+        lemma_widget_sim_inv(cluster, r, ex, j);
+        let s = state_at(ex, j);
+        let s_prime = state_at(ex, j + 1);
+        assert(tc.next()(s, s_prime));
+        let (side, step) = choose |side: Side, step: Step| tc.next_step(s, s_prime, side, step);
+        lemma_janitor_uids_issued_step(cluster, janitor_id, s, s_prime, side, step);
+        assert(j + 1 == i);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The janitor's delete soundness, read on two clusters.
 // ---------------------------------------------------------------------------
 
-// A Delete the janitor has in flight names a uid, and if the object it would
-// remove, in the store of its kind, is a mirror with that uid, no outer copy in
-// the primary store carries the mirror's parent uid.
+// A Delete the janitor has in flight names a uid the store of its kind has
+// issued (below that store's uid counter), and if the object it would remove,
+// in that store, is a mirror with that uid, no outer copy in the primary store
+// carries the mirror's parent uid. Of the one-store fact, the object clause is
+// pulled back through the relabeling and the counter clause is
+// janitor_uids_issued, an invariant of the two-store model. The remaining
+// clause of parent_absent_forever, that no uid at or above the primary counter
+// names the parent, is not stated: a primary uid the primary counter never
+// reaches relabels to a negative value, which no one-store fact rules out of an
+// annotation.
 pub open spec fn two_cluster_janitor_delete_is_sound(tc: TwoCluster, msg: Message, s: TwoClusterState) -> bool {
     let req = msg.content.get_delete_request();
-    let store = s.store(tc.side_of_kind(req.key.kind)).resources;
+    let side = tc.side_of_kind(req.key.kind);
+    let store = s.store(side).resources;
     let obj = store[req.key];
     &&& req.preconditions is Some
     &&& req.preconditions->0.uid is Some
+    &&& req.preconditions->0.uid->0 < s.store(side).uid_counter
     &&& (store.contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
         ==> forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && s.primary.resources[k].metadata.uid is Some
             ==> int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(obj)
@@ -1900,10 +2406,13 @@ pub open spec fn two_cluster_janitor_deletes_are_sound(tc: TwoCluster, controlle
     }
 }
 
+// The object clause comes from the abstract state, where janitor_delete_is_sound
+// holds; the counter clause from janitor_uids_issued.
 proof fn lemma_janitor_sound_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, controller_id: int, uid_next: Uid, rv_next: ResourceVersion)
     requires
         widget_relabeling(cluster, r),
         inv(widget_two_cluster(cluster), s),
+        janitor_uids_issued(controller_id)(s),
         janitor_deletes_are_sound(controller_id)(abs(widget_two_cluster(cluster), r, s, uid_next, rv_next)),
     ensures two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id)(s),
 {
@@ -1923,6 +2432,9 @@ proof fn lemma_janitor_sound_pull_back(cluster: Cluster, r: Relabeling, s: TwoCl
         let req = msg.content.get_delete_request();
         let side = tc.side_of_kind(req.key.kind);
         let store = s.store(side).resources;
+        assert(janitor_delete_uid_issued(msg, s));
+        assert(side == Side::Remote);
+        assert(req.preconditions->0.uid->0 < s.store(side).uid_counter);
         lemma_abs_object(cluster, r, s, req.key, uid_next, rv_next);
         if store.contains_key(req.key) && store[req.key].metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(store[req.key]) {
             let obj = store[req.key];
@@ -1952,6 +2464,9 @@ proof fn lemma_janitor_sound_pull_back(cluster: Cluster, r: Relabeling, s: TwoCl
 pub proof fn lemma_janitor_sound_transfer(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, controller_id: int)
     requires
         widget_sim(cluster, r, ex),
+        widget_two_cluster(cluster).init()(state_at(ex, 0)),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
         always(lift_state(janitor_deletes_are_sound(controller_id))).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
     ensures always(lift_state(two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id))).satisfied_by(ex),
 {
@@ -1962,6 +2477,7 @@ pub proof fn lemma_janitor_sound_transfer(cluster: Cluster, r: Relabeling, ex: E
         assert(ex1.suffix(i).head() == abs_at(tc, r, ex, i));
         assert(ex.suffix(i).head() == state_at(ex, i));
         lemma_widget_sim_inv(cluster, r, ex, i);
+        lemma_janitor_uids_issued_at(cluster, r, ex, controller_id, i);
         let s = state_at(ex, i);
         lemma_janitor_sound_pull_back(cluster, r, s, controller_id, uid_sum(s), rv_sum(s));
     }
