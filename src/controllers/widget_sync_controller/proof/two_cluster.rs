@@ -13,10 +13,10 @@ use crate::kubernetes_cluster::spec::{
 };
 use crate::reconciler::spec::{io::*, reconciler::*};
 use crate::vstd_ext::string_view::*;
-use crate::composition::{widget_janitor_reconciler::*, widget_sync_reconciler::*};
+use crate::composition::{widget_disturber_reconciler::*, widget_janitor_reconciler::*, widget_sync_reconciler::*};
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler, sync_reconciler},
-    proof::{guarantee::*, liveness::{janitor_proof::*, spec::*, sync_spec_proof::*, sync_status_proof::*, cleanup_proof::*}, predicate::*},
+    model::{disturber_reconciler, install::*, janitor_reconciler, sync_reconciler},
+    proof::{disturber::*, guarantee::*, liveness::{janitor_proof::*, spec::*, sync_spec_proof::*, sync_status_proof::*, cleanup_proof::*}, predicate::*},
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
 use verus_temporal_logic::{defs::*, rules::*};
@@ -441,6 +441,61 @@ pub proof fn lemma_janitor_model_commutes(cluster: Cluster, r: Relabeling, cr: D
     assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, cr))->Ok_0 == relabel_inner(tc, r, inner));
     lemma_janitor_core_commutes(cluster, r, inner, resp_um, state);
 }
+
+// The disturber (model/disturber_reconciler.rs) reads only the namespace, name
+// and spec of its object and tests nothing, so it commutes by computation.
+pub proof fn lemma_disturber_core_commutes(cluster: Cluster, r: Relabeling, inner: InnerWidgetView, resp: Option<ResponseView<VoidERespView>>, state: disturber_reconciler::WidgetDisturberReconcileState)
+    ensures ({
+        let tc = widget_two_cluster(cluster);
+        let (state1, req1) = disturber_reconciler::reconcile_core(inner, resp, state);
+        disturber_reconciler::reconcile_core(relabel_inner(tc, r, inner), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
+    }),
+{
+    let tc = widget_two_cluster(cluster);
+    lemma_widget_sides(cluster);
+    let inner1 = relabel_inner(tc, r, inner);
+    match state.reconcile_step {
+        disturber_reconciler::WidgetDisturberStepView::Init => {
+            let p = disturber_reconciler::disturbing_patch(inner);
+            let p1 = disturber_reconciler::disturbing_patch(inner1);
+            assert(p1 == PatchRequest { tests: relabel_tests(r, Side::Remote, p.tests), ..p });
+        },
+        disturber_reconciler::WidgetDisturberStepView::AfterPatchInner => {
+            let d = disturber_reconciler::disturbing_delete(inner);
+            let d1 = disturber_reconciler::disturbing_delete(inner1);
+            assert(d1 == DeleteRequest { preconditions: relabel_preconditions(r, Side::Remote, d.preconditions), ..d });
+        },
+        _ => {},
+    }
+}
+
+pub proof fn lemma_disturber_model_commutes(cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
+    requires
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cr.kind == InnerWidgetView::kind(),
+        unmarshallable_object(cr, cluster.installed_types),
+    ensures ({
+        let tc = widget_two_cluster(cluster);
+        let t = widget_disturber_controller_model().reconcile_model.transition;
+        t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls) == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
+    }),
+{
+    let tc = widget_two_cluster(cluster);
+    lemma_inner_unmarshals(cluster, cr);
+    lemma_unmarshal_inner_relabel(tc, r, cr);
+    let inner = InnerWidgetView::unmarshal(cr)->Ok_0;
+    let resp_um = match resp {
+        None => None,
+        Some(x) => Some(match x {
+            ResponseContent::KubernetesResponse(api_resp) => ResponseView::<VoidERespView>::KResponse(api_resp),
+            ResponseContent::ExternalResponse(ext_resp) => ResponseView::<VoidERespView>::ExternalResponse(VoidERespView::unmarshal(ext_resp)->Ok_0),
+        }),
+    };
+    let state = disturber_reconciler::WidgetDisturberReconcileState::unmarshal(ls)->Ok_0;
+    assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, cr))->Ok_0 == relabel_inner(tc, r, inner));
+    lemma_disturber_core_commutes(cluster, r, inner, resp_um, state);
+}
+
 
 // ---------------------------------------------------------------------------
 // The hypotheses of the refinement, for the Widget pair and whoever runs
@@ -1917,6 +1972,90 @@ pub proof fn widget_instance_two_cluster_theorem()
     lemma_widget_instance_is_pair_cluster();
     lemma_pair_cluster_is_cluster_with_others(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
     widget_two_cluster_theorem(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
+}
+
+// ---------------------------------------------------------------------------
+// The pair with the disturber, on two stores.
+// ---------------------------------------------------------------------------
+
+// The disturber is admitted beside the pair: its model sends only Patches and
+// Deletes (request_ok holds of both), commutes with the relabeling, and the
+// pair's relies hold of it by its guarantee (proof/disturber.rs).
+pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, id: int)
+    requires
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.controller_models.contains_pair(id, widget_disturber_controller_model()),
+    ensures widget_other_controller_ok(cluster, id),
+{
+    let tc = widget_two_cluster(cluster);
+    let m = cluster.controller_models[id];
+    assert(m == widget_disturber_controller_model());
+    assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
+        let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
+        req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+    } by {
+        let req_o = (m.reconcile_model.transition)(cr, resp, ls).1;
+        if req_o is Some && req_o->0 is KubernetesRequest {
+            let state = disturber_reconciler::WidgetDisturberReconcileState::unmarshal(ls)->Ok_0;
+            match state.reconcile_step {
+                disturber_reconciler::WidgetDisturberStepView::Init => {},
+                disturber_reconciler::WidgetDisturberStepView::AfterPatchInner => {},
+                _ => {},
+            }
+        }
+    }
+    assert forall |r: Relabeling| widget_relabeling(cluster, r) implies #[trigger] other_model_commutes(tc, r, m) by {
+        let rm = m.reconcile_model;
+        let t = rm.transition;
+        assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
+            cr.kind == rm.kind && stored_object_ok(tc, cr)
+            implies #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
+                == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1)) by {
+            lemma_disturber_model_commutes(cluster, r, cr, resp, ls);
+        }
+    }
+    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
+    assert(base.entails(lift_state(cluster.init())));
+    assert(base.entails(always(lift_action(cluster.next()))));
+    lemma_always_widget_disturber_guarantee(base, cluster, id);
+    disturber_guarantee_implies_relies(id);
+    entails_preserved_by_always(lift_state(widget_disturber_guarantee(id)), lift_state(widget_sync_rely(id)));
+    entails_preserved_by_always(lift_state(widget_disturber_guarantee(id)), lift_state(widget_janitor_rely(id)));
+    entails_trans(base, always(lift_state(widget_disturber_guarantee(id))), always(lift_state(widget_sync_rely(id))));
+    entails_trans(base, always(lift_state(widget_disturber_guarantee(id))), always(lift_state(widget_janitor_rely(id))));
+}
+
+// The concrete three-controller cluster of composition/widget_disturber_reconciler.rs.
+pub proof fn lemma_widget_disturbed_instance_is_cluster_with_others()
+    ensures widget_cluster_with_others(widget_disturbed_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+{
+    let cluster = widget_disturbed_cluster_instance();
+    lemma_widget_instance_types(cluster);
+    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != widget_sync_id() && id != widget_janitor_id()
+        implies widget_other_controller_ok(cluster, id) by {
+        assert(id == widget_disturber_id());
+        lemma_disturber_is_other_controller_ok(cluster, id);
+    }
+}
+
+// The M2 counterpart of widget_disturbed_core_holds: R1, R2, R3s, R3 and the
+// janitor's delete soundness on two stores, with the disturber editing and
+// deleting mirrors in the remote store. Only the pair's fairness is assumed.
+pub proof fn widget_disturbed_two_cluster_theorem()
+    ensures ({
+        let cluster = widget_disturbed_cluster_instance();
+        let tc = widget_two_cluster(cluster);
+        widget_two_cluster_spec(cluster, widget_sync_id(), widget_janitor_id()).entails(
+            two_cluster_spec_eventually_synced()
+            .and(two_cluster_status_eventually_mirrored())
+            .and(two_cluster_mirrors_stably_collected(tc))
+            .and(two_cluster_mirrors_eventually_collected(tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, widget_janitor_id()))))
+        )
+    }),
+{
+    lemma_widget_disturbed_instance_is_cluster_with_others();
+    widget_two_cluster_theorem(widget_disturbed_cluster_instance(), widget_sync_id(), widget_janitor_id());
 }
 
 }
