@@ -2,3 +2,4 @@
 // SPDX-License-Identifier: MIT
 pub mod controller_runtime;
 pub mod fault_injection;
+pub mod kind_config;
