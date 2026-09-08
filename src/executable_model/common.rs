@@ -198,6 +198,11 @@ impl DynamicObjectView {
 }
 
 impl DynamicObject {
+    // For the executable model only. Its objects carry the model kind in their
+    // type metadata, so the postcondition holds there. A real custom resource
+    // carries the API server's kind (`Widget`), not the model kind (`widget`,
+    // `widget@inner`), and a list item may carry none; controller exec code
+    // tests kinds through its wrappers' has_kind instead (issue #19).
     #[verifier(external_body)]
     pub fn kind(&self) -> (kind: KindExec)
         ensures kind@ == self@.kind,
