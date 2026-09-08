@@ -177,6 +177,38 @@ fn sync_kind(entry: &RegistryEntry, config: &KindConfig) -> SyncKindExec {
     SyncKindExec { entry: entry.clone(), selector }
 }
 
+// The signals that mean stop. SIGTERM is the one that matters in a cluster: it
+// is what the kubelet sends first when a pod is deleted, a Deployment rolls or
+// a node drains, and only after `terminationGracePeriodSeconds` does SIGKILL
+// follow. This process is PID 1 in its container, and PID 1 has no default
+// action for SIGTERM, so a binary that waits on ctrl_c alone ignores it and
+// every restart costs the whole grace period. SIGINT is kept for a run from a
+// terminal.
+#[cfg(unix)]
+async fn termination_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => terminate,
+        Err(e) => {
+            // Nothing can be done about it, but say so: the pod would take the
+            // full grace period to restart and the reason would be invisible.
+            warn!("cannot listen for SIGTERM ({}); only SIGINT will shut this process down", e);
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+        _ = terminate.recv() => info!("SIGTERM received"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn termination_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    info!("interrupt received");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt::init();
@@ -277,14 +309,13 @@ async fn main() -> Result<()> {
 
             let clusters = ClusterClients::new(primary);
 
-            // One shutdown signal for the whole process: on SIGINT the sync
-            // runners and the binding manager stop taking new work and drain,
-            // and the manager stops every binding's runners.
+            // One shutdown signal for the whole process: on SIGTERM (or SIGINT)
+            // the sync runners and the binding manager stop taking new work and
+            // drain, and the manager stops every binding's runners.
             let (tx, shutdown_rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    info!("shutting down");
-                }
+                termination_signal().await;
+                info!("shutting down");
                 let _ = tx.send(true);
             });
             let signalled = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
