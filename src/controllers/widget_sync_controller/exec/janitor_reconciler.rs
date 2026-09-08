@@ -1,6 +1,5 @@
 // Exec implementation of the janitor reconciler; every function is proved to
 // conform to its counterpart in model::janitor_reconciler.
-use crate::kubernetes_api_objects::exec::common::KindExec;
 use crate::kubernetes_api_objects::exec::prelude::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::reconciler::exec::{io::*, reconciler::*};
@@ -188,10 +187,10 @@ pub fn parent_listed(objs: &Vec<DynamicObject>, parent_uid: &String) -> (b: bool
                 && int_to_string_view(objs.deep_view()[j].metadata.uid->0) == parent_uid@,
         decreases objs.len() - i,
     {
-        let is_outer = match objs[i].kind() {
-            KindExec::CustomResourceKind(k) => k.eq(&"widget".to_string()),
-            _ => false,
-        };
+        // The wrapper's kind test, not DynamicObject::kind(): the latter reports
+        // the API server's kind string, which for a custom resource is not the
+        // model kind (see OuterWidget::has_kind).
+        let is_outer = OuterWidget::has_kind(&objs[i]);
         let uid = objs[i].metadata().uid();
         proof {
             assert(objs.deep_view()[i as int] == objs[i as int]@);

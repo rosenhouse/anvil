@@ -249,7 +249,10 @@ one restriction of the two-store model:
 What remains trusted is the usual Anvil boundary, per store: that each real API
 server behaves as the model's API server, with its uids and resource versions
 read as that store's counter values; that the shim routes each model kind to
-the cluster the model assigns it (section 5.3), which the model cannot check;
+the cluster the model assigns it (section 5.3), which the model cannot check,
+and that the wrappers' `unmarshal` and `has_kind` postconditions read the
+model kind off the cluster tag and the kube kind (`DynamicObject::kind()`,
+which reports the API server's kind string, is not used by the pair);
 and the injectivity of `int_to_string_view` (an `external_body` fact over all
 integers), which the hook's injectivity rests on. A controller that reads counter values
 into data (VDeployment uses a resource version as a hash; RabbitMQ stores one
@@ -516,8 +519,10 @@ no-op patch.
 `ApiResource` and `DynamicObject` carry a `ClusterId`; a wrapper type is bound
 to one cluster (`ClusterBound`) and its view kind is the tagged kind. The shim
 holds one client per cluster, routes each request by the tag of its
-`ApiResource`, tags the objects it returns, and derives a controller's primary
-watch cluster from its wrapper type. Two controllers can run in one process.
+`ApiResource`, tags the objects it returns (and stamps list items, which carry
+no type metadata of their own, with the listed resource's), and derives a
+controller's primary watch cluster from its wrapper type. Two controllers can
+run in one process.
 
 ### 5.4 Footprint
 
