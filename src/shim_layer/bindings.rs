@@ -87,6 +87,14 @@ pub const BACKOFF_MAX: Duration = Duration::from_secs(60);
 // How often the manager looks for work that has come due (a retry, a re-check).
 const TICK: Duration = Duration::from_secs(1);
 
+// The bound on one attempt end to end: building the clients, the access check
+// and the claim. Each request is bounded on its own by the manager's request
+// timeout, but a connection that is neither refused nor answered can outlast
+// that, so the attempt as a whole is bounded too. It is generous, since an
+// attempt is a handful of round trips to a cluster that may be far away; what
+// it rules out is an attempt that never ends.
+const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(45);
+
 // How many same-name triggers may be in flight per kind before the manager drops
 // them. Dropping one costs at most one requeue interval of latency, which is
 // what the trigger saves; the bound keeps a busy inner cluster from growing the
@@ -384,6 +392,32 @@ enum RecordState {
     Refused,
 }
 
+// What one attempt found. The attempt runs in its own task and touches no
+// manager state; the loop applies the outcome to the record.
+enum AttemptOutcome {
+    // The binding is usable: these are its clients.
+    Usable(RemoteClients),
+    // The clients work but the binding may not be used: a claim held elsewhere,
+    // or a denied verb. The clients stay registered so the claim can be
+    // re-checked, and the shim answers the binding's requests with Forbidden.
+    Refused(RemoteClients, String),
+    // The inner cluster did not answer (or did not answer in time): retried with
+    // backoff.
+    Unreachable(String),
+    // The kubeconfig itself is unusable -- it does not parse, or it is not one
+    // we will build a client from. Nothing but a change of the Secret can
+    // change that, so it is not retried on a timer.
+    Unusable(String),
+}
+
+// An outcome as it comes back to the loop. `epoch` says which incarnation of
+// the binding's record asked for it.
+struct AttemptResult {
+    binding: ClusterRef,
+    epoch: u64,
+    outcome: AttemptOutcome,
+}
+
 // What the manager remembers about one binding between events.
 struct BindingRecord {
     // The kubeconfig the Secret currently holds; the clients are rebuilt from it.
@@ -396,14 +430,23 @@ struct BindingRecord {
     stop: Option<watch::Sender<bool>>,
     backoff: Backoff,
     // When the next attempt is due; None for a binding that only a change of its
-    // Secret can move (an unparseable kubeconfig).
+    // Secret can move (an unparseable kubeconfig), and None while an attempt is
+    // in flight, which is what the outcome sets again.
     due_at: Option<Instant>,
     // A refusal is logged once at warn, not at every re-check.
     refusal_logged: bool,
+    // Whether an attempt for this binding is running. At most one is, so a
+    // blackholed inner cluster occupies one task and nothing else.
+    in_flight: bool,
+    // Which incarnation of this record the attempts belong to. A Secret that
+    // changes replaces the record with one of a new epoch, so the outcome of
+    // the attempt that was running for the old credential is discarded rather
+    // than applied to the new one.
+    epoch: u64,
 }
 
 impl BindingRecord {
-    fn new(kubeconfig: String) -> BindingRecord {
+    fn new(kubeconfig: String, epoch: u64) -> BindingRecord {
         BindingRecord {
             kubeconfig,
             state: RecordState::Unbound,
@@ -412,7 +455,32 @@ impl BindingRecord {
             backoff: Backoff::new(),
             due_at: Some(Instant::now()),
             refusal_logged: false,
+            in_flight: false,
+            epoch,
         }
+    }
+
+    // The overlap guard: `Some(epoch)` starts an attempt, `None` says one is
+    // already running. The due time is cleared while it runs, so the ticker
+    // does not queue a second one; the outcome sets the next due time.
+    fn begin_attempt(&mut self) -> Option<u64> {
+        if self.in_flight {
+            return None;
+        }
+        self.in_flight = true;
+        self.due_at = None;
+        Some(self.epoch)
+    }
+
+    // Whether an outcome of `epoch` is this record's. An outcome of another
+    // epoch is one of a credential that has since been replaced: it is dropped,
+    // and the record it was for no longer exists.
+    fn finish_attempt(&mut self, epoch: u64) -> bool {
+        if self.epoch != epoch {
+            return false;
+        }
+        self.in_flight = false;
+        true
     }
 }
 
@@ -425,6 +493,10 @@ pub struct BindingManager {
     request_timeout: Duration,
     start_runners: StartRunners,
     bindings: HashMap<ClusterRef, BindingRecord>,
+    // Where the spawned attempts report back; set for the life of `run`.
+    outcomes: Option<tokio::sync::mpsc::UnboundedSender<AttemptResult>>,
+    // The epoch of the next record made.
+    next_epoch: u64,
 }
 
 impl BindingManager {
@@ -448,6 +520,8 @@ impl BindingManager {
             request_timeout,
             start_runners,
             bindings: HashMap::new(),
+            outcomes: None,
+            next_epoch: 0,
         }
     }
 
@@ -455,6 +529,13 @@ impl BindingManager {
     /// the bindings of the process in step with them. Never returns an error for
     /// a single bad binding; the error is the watch itself ending.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<()> {
+        // Where the spawned attempts report back. The loop itself does no
+        // request of an inner cluster: an attempt (the access check, the claim,
+        // building the clients) is a round trip to a cluster that may be slow or
+        // blackholed, and doing it inline would stall every other binding and
+        // the Secret watch behind it.
+        let (outcomes, mut outcomes_rx) = tokio::sync::mpsc::unbounded_channel();
+        self.outcomes = Some(outcomes);
         let secrets = Api::<Secret>::all(self.clusters.primary.clone());
         // Only the Secrets of the Cluster API convention: the watch asks the
         // API server for the ones carrying the cluster-name label, so an
@@ -476,6 +557,7 @@ impl BindingManager {
                     break;
                 }
                 _ = ticker.tick() => self.tick().await,
+                Some(result) = outcomes_rx.recv() => self.apply(result).await,
                 event = stream.next() => match event {
                     Some(Ok(event)) => self.on_event(event).await,
                     // The watcher recovers on its own; the next poll re-lists.
@@ -547,8 +629,10 @@ impl BindingManager {
         // so they are stopped and started again around the rebind.
         self.stop_runners(&binding);
         info!("binding {}: its kubeconfig Secret appeared or changed", label(&binding));
-        self.bindings.insert(binding.clone(), BindingRecord::new(kubeconfig));
-        self.attempt(&binding).await;
+        let epoch = self.next_epoch;
+        self.next_epoch += 1;
+        self.bindings.insert(binding.clone(), BindingRecord::new(kubeconfig, epoch));
+        self.start_attempt(&binding).await;
     }
 
     // Everything that has come due: a retry after an unreachable cluster, or the
@@ -562,80 +646,92 @@ impl BindingManager {
             .map(|(b, _)| b.clone())
             .collect();
         for binding in due {
-            self.attempt(&binding).await;
+            self.start_attempt(&binding).await;
         }
     }
 
-    // One attempt at making `binding` usable: build the clients if they are
-    // stale, run the access check, settle the claim, register and start the
-    // runners. Every outcome sets the record's next due time.
-    async fn attempt(&mut self, binding: &ClusterRef) {
-        let (kubeconfig, needs_clients) = match self.bindings.get(binding) {
-            Some(record) => (record.kubeconfig.clone(), record.needs_clients),
-            None => return,
-        };
-        let registered = self.clusters.remote_of(binding).await;
-        let clients = match (needs_clients, registered) {
-            (false, Some(clients)) => clients,
-            _ => {
-                // The kubeconfig is held to the Cluster API shape before a
-                // client is built from it (validate_kubeconfig): a document that
-                // would run a command in this pod, read a file of it, or send
-                // the credential somewhere else is refused here, before kube
-                // ever acts on it.
-                if let Err(reason) = checked_kubeconfig(&kubeconfig) {
-                    warn!(
-                        "binding {}: its kubeconfig is refused, {}; the binding is left unbound until the Secret changes",
-                        label(binding), reason
-                    );
-                    self.deregister(binding).await;
-                    if let Some(record) = self.bindings.get_mut(binding) {
-                        record.due_at = None;
-                    }
+    // Start one attempt at making `binding` usable, in a task of its own. The
+    // loop does not wait for it: an attempt talks to an inner cluster, which may
+    // be slow or answer nothing at all, and every other binding and the Secret
+    // watch would be behind it. At most one attempt per binding runs at a time
+    // (BindingRecord::begin_attempt), so a cluster that never answers costs one
+    // task, not one per tick.
+    async fn start_attempt(&mut self, binding: &ClusterRef) {
+        let (kubeconfig, needs_clients, epoch) = match self.bindings.get_mut(binding) {
+            Some(record) => match record.begin_attempt() {
+                Some(epoch) => (record.kubeconfig.clone(), record.needs_clients, epoch),
+                None => {
+                    debug!("binding {}: an attempt is already running; not starting another", label(binding));
                     return;
                 }
-                match remote_clients_from_kubeconfig_yaml(&kubeconfig, self.request_timeout).await {
-                    Ok(clients) => clients,
-                    Err(e) => {
-                        warn!(
-                            "binding {}: its kubeconfig does not parse ({}); the binding is left unbound until the Secret changes",
-                            label(binding), e
-                        );
-                        self.deregister(binding).await;
-                        if let Some(record) = self.bindings.get_mut(binding) {
-                            record.due_at = None;
-                        }
-                        return;
-                    }
+            },
+            None => return,
+        };
+        // The registered clients are reused unless the credential changed, so a
+        // re-check does not rebuild them (and does not restart the runners).
+        let registered = if needs_clients { None } else { self.clusters.remote_of(binding).await };
+        let outcomes = match &self.outcomes {
+            Some(outcomes) => outcomes.clone(),
+            None => return,
+        };
+        let (kinds, verbs) = (self.kinds.clone(), self.verbs.clone());
+        let owner = self.outer_cluster_id.clone();
+        let request_timeout = self.request_timeout;
+        let binding = binding.clone();
+        tokio::spawn(async move {
+            // A bound on the whole attempt, not only on each request of it: a
+            // TCP connection to an address that blackholes packets is neither an
+            // answer nor an error, and the record must not stay in flight
+            // forever. A timeout reads as an unreachable cluster, which is
+            // retried with backoff.
+            let outcome = match tokio::time::timeout(
+                ATTEMPT_TIMEOUT,
+                attempt(&binding, &kubeconfig, registered, &kinds, &verbs, &owner, request_timeout),
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(_) => AttemptOutcome::Unreachable(format!(
+                    "its inner cluster did not finish answering within {:?}",
+                    ATTEMPT_TIMEOUT
+                )),
+            };
+            // The receiver lives as long as the manager loop; a send that fails
+            // is a manager that is shutting down, and the outcome is moot.
+            let _ = outcomes.send(AttemptResult { binding, epoch, outcome });
+        });
+    }
+
+    // Apply what an attempt found. Everything that changes a binding's state
+    // happens here, in the loop, so the state machine is still one thread of
+    // control (the tests below are of its pieces).
+    async fn apply(&mut self, result: AttemptResult) {
+        let AttemptResult { binding, epoch, outcome } = result;
+        let ours = match self.bindings.get_mut(&binding) {
+            Some(record) => record.finish_attempt(epoch),
+            None => false,
+        };
+        // The Secret changed, or went away, while the attempt ran: this outcome
+        // is about a credential that is no longer the binding's.
+        if !ours {
+            debug!("binding {}: an outcome of a superseded credential is dropped", label(&binding));
+            return;
+        }
+        match outcome {
+            AttemptOutcome::Usable(clients) => self.bind(&binding, clients).await,
+            AttemptOutcome::Refused(clients, why) => self.refuse(&binding, clients, why).await,
+            AttemptOutcome::Unreachable(why) => self.retry(&binding, why).await,
+            AttemptOutcome::Unusable(why) => {
+                warn!(
+                    "binding {}: {}; the binding is left unbound until the Secret changes",
+                    label(&binding), why
+                );
+                self.deregister(&binding).await;
+                if let Some(record) = self.bindings.get_mut(&binding) {
+                    record.due_at = None;
                 }
             }
-        };
-
-        match check_binding_access(&clients.requests, binding, &self.kinds, &self.verbs).await {
-            Err(e) => {
-                self.retry(binding, format!("its inner cluster did not answer the access check: {}", e)).await;
-                return;
-            }
-            Ok(denied) if !denied.is_empty() => {
-                self.refuse(binding, clients, format!("its credential is denied {}", denied.join(", "))).await;
-                return;
-            }
-            Ok(_) => {}
         }
-
-        match check_claim(&clients.requests, binding, &self.outer_cluster_id).await {
-            Err(e) => {
-                self.retry(binding, format!("its claim could not be settled: {}", e)).await;
-                return;
-            }
-            Ok(Some(holder)) => {
-                self.refuse(binding, clients, format!("its inner cluster is claimed by {}", holder.holder())).await;
-                return;
-            }
-            Ok(None) => {}
-        }
-
-        self.bind(binding, clients).await;
     }
 
     // The binding is usable: register its clients, start its runners if they are
@@ -805,36 +901,125 @@ fn spawn_same_name_watch(binding: &ClusterRef, kind: &BindingKind, clients: &Rem
     });
 }
 
+// One attempt at making a binding usable, as it runs in its own task: build the
+// clients if the credential changed, ask the inner cluster what this credential
+// may do, and settle the claim. It has no access to the manager's state and
+// changes nothing; what it found comes back as an AttemptOutcome.
+async fn attempt(
+    binding: &ClusterRef,
+    kubeconfig: &str,
+    registered: Option<RemoteClients>,
+    kinds: &[BindingKind],
+    verbs: &[String],
+    owner: &str,
+    request_timeout: Duration,
+) -> AttemptOutcome {
+    let clients = match registered {
+        Some(clients) => clients,
+        None => {
+            // The kubeconfig is held to the Cluster API shape before a client is
+            // built from it (validate_kubeconfig): a document that would run a
+            // command in this pod, read a file of it, or send the credential
+            // somewhere else is refused here, before kube ever acts on it.
+            if let Err(reason) = checked_kubeconfig(kubeconfig) {
+                return AttemptOutcome::Unusable(format!("its kubeconfig is refused, {}", reason));
+            }
+            match remote_clients_from_kubeconfig_yaml(kubeconfig, request_timeout).await {
+                Ok(clients) => clients,
+                Err(e) => return AttemptOutcome::Unusable(format!("its kubeconfig does not parse ({})", e)),
+            }
+        }
+    };
+    match check_binding_access(&clients.requests, binding, kinds, verbs).await {
+        Err(e) => {
+            return AttemptOutcome::Unreachable(format!("its inner cluster did not answer the access check: {}", e))
+        }
+        Ok(denied) if !denied.is_empty() => {
+            return AttemptOutcome::Refused(clients, format!("its credential is denied {}", denied.join(", ")))
+        }
+        Ok(_) => {}
+    }
+    match check_claim(&clients.requests, binding, owner).await {
+        Err(e) => AttemptOutcome::Unreachable(format!("its claim could not be settled: {}", e)),
+        Ok(Some(holder)) => {
+            AttemptOutcome::Refused(clients, format!("its inner cluster is claimed by {}", holder.holder()))
+        }
+        Ok(None) => AttemptOutcome::Usable(clients),
+    }
+}
+
 /// check_binding_access asks the binding's inner cluster, with one
 /// SelfSubjectAccessReview per verb and kind, whether the credential may do in
 /// the binding's namespace what the reconcilers need, and whether it may settle
 /// the claim in kube-system. It answers with the denials, which make the binding
 /// refused; a request that fails is an unreachable cluster and is the Err
 /// (doc/widget_sync_fanout_design.md, section 1.4).
+/// The reviews are issued together, not one after another: there is one per verb
+/// and kind and they are independent, so a sequence of them made the time to
+/// bind a binding the sum of its round trips.
 pub async fn check_binding_access(
     client: &Client,
     binding: &ClusterRef,
     kinds: &[BindingKind],
     verbs: &[String],
 ) -> std::result::Result<Vec<String>, kube::Error> {
-    let mut denied = Vec::new();
+    let mut checks = Vec::with_capacity(kinds.len() * verbs.len() + 2);
     for kind in kinds {
         for verb in verbs {
-            if !allowed(client, &binding.namespace, &kind.group, &kind.plural, verb, None).await? {
-                denied.push(format!("{} on {}", verb, kind.resource()));
-            }
+            checks.push(denial(
+                client,
+                &binding.namespace,
+                &kind.group,
+                &kind.plural,
+                verb,
+                None,
+                format!("{} on {}", verb, kind.resource()),
+            ));
         }
     }
     // The claim: `get` is asked for the claim by name, since rbac_inner.yaml
     // grants it through resourceNames and a nameless review would be denied;
     // `create` cannot be limited by name and is asked without one.
-    if !allowed(client, CLAIM_NAMESPACE, "", "configmaps", "create", None).await? {
-        denied.push(format!("create on configmaps in {}", CLAIM_NAMESPACE));
+    checks.push(denial(
+        client,
+        CLAIM_NAMESPACE,
+        "",
+        "configmaps",
+        "create",
+        None,
+        format!("create on configmaps in {}", CLAIM_NAMESPACE),
+    ));
+    checks.push(denial(
+        client,
+        CLAIM_NAMESPACE,
+        "",
+        "configmaps",
+        "get",
+        Some(CLAIM_NAME),
+        format!("get on configmaps/{} in {}", CLAIM_NAME, CLAIM_NAMESPACE),
+    ));
+    // Any review that fails at all is an inner cluster that did not answer, and
+    // the first such error ends the check: the binding is unreachable, not
+    // denied.
+    let answers = futures::future::try_join_all(checks).await?;
+    Ok(answers.into_iter().flatten().collect())
+}
+
+// One review: `described` when it comes back denied, nothing when allowed.
+async fn denial(
+    client: &Client,
+    namespace: &str,
+    group: &str,
+    resource: &str,
+    verb: &str,
+    name: Option<&str>,
+    described: String,
+) -> std::result::Result<Option<String>, kube::Error> {
+    if allowed(client, namespace, group, resource, verb, name).await? {
+        Ok(None)
+    } else {
+        Ok(Some(described))
     }
-    if !allowed(client, CLAIM_NAMESPACE, "", "configmaps", "get", Some(CLAIM_NAME)).await? {
-        denied.push(format!("get on configmaps/{} in {}", CLAIM_NAME, CLAIM_NAMESPACE));
-    }
-    Ok(denied)
 }
 
 async fn allowed(client: &Client, namespace: &str, group: &str, resource: &str, verb: &str, name: Option<&str>) -> std::result::Result<bool, kube::Error> {
@@ -1162,6 +1347,28 @@ current-context: a
     fn a_value_that_is_not_a_kubeconfig_is_refused() {
         assert!(rejection("not: a kubeconfig").contains("exactly one is required"));
         assert!(rejection(": : :").contains("does not parse"));
+    }
+
+    // At most one attempt per binding is in flight, and an outcome is applied
+    // only to the credential that asked for it.
+    #[test]
+    fn one_attempt_per_binding_at_a_time() {
+        let mut record = BindingRecord::new("kubeconfig".to_string(), 7);
+        assert!(record.due_at.is_some(), "a new record is due at once");
+        assert_eq!(record.begin_attempt(), Some(7));
+        // While it runs the record is not due again, so the ticker does not
+        // queue a second attempt behind a cluster that is not answering.
+        assert_eq!(record.due_at, None);
+        assert_eq!(record.begin_attempt(), None);
+        assert_eq!(record.begin_attempt(), None);
+        // The outcome of that attempt is this record's; another epoch's is a
+        // credential that has since been replaced.
+        assert!(!record.finish_attempt(6));
+        assert!(record.in_flight, "a stale outcome does not end the attempt in flight");
+        assert!(record.finish_attempt(7));
+        assert!(!record.in_flight);
+        // And then the next attempt may start.
+        assert_eq!(record.begin_attempt(), Some(7));
     }
 
     #[test]
