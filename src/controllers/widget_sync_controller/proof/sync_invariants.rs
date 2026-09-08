@@ -231,8 +231,10 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                             WidgetSyncStepView::Init => {
                                 if state_prime.reconcile_step is AfterGetInner {
                                 } else {
-                                    // The object names no inner cluster: the rejection is reported.
-                                    assert(state_prime.reconcile_step is AfterPatchOuterStatus);
+                                    // The object names no inner cluster (the rejection is
+                                    // reported) or a binding this reconciler does not
+                                    // serve (the inner cluster is reported unreachable).
+                                    assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
                                     assert(exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status)));
                                 }
                             },

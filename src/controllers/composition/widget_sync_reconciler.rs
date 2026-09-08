@@ -722,11 +722,16 @@ pub open spec fn widget_selector() -> ClusterSelector {
     ClusterSelector::Field(seq!["spec"@, "clusterName"@])
 }
 
+// The configured kind of the demo deployment: one kind, served for the one
+// binding widget_bindings() holds. The binding set is part of the kind because
+// the sync reconciler's model consults it (spec_types::serves); a deployment
+// with more bindings is the same definition with a larger set.
 pub open spec fn widget_kind() -> SyncKind {
     SyncKind {
         outer_kind: model_kind(widget_kind_name(), ClusterIdView::Primary),
         name: widget_kind_name(),
         selector: widget_selector(),
+        bindings: widget_bindings(),
     }
 }
 
@@ -804,6 +809,134 @@ pub proof fn widget_core_holds()
     assert(well_formed(cluster, widget_janitor_core_set(widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok(), widget_janitor_id())));
     assert(well_formed(cluster, widget_sync_core_set(widget_kind(), widget_bindings(), widget_spec_ok(), widget_sync_id(), widget_janitor_ids())));
     widget_pair_core_holds(widget_kind(), widget_binding(), widget_spec_ok(), cluster, widget_janitor_id(), widget_sync_id());
+}
+
+
+// ---------------------------------------------------------------------------
+// A closed two-binding configuration: one kind, two bindings, three controllers.
+// ---------------------------------------------------------------------------
+
+// A second binding of the same namespace, so that the fan-out statement has a
+// concrete instance with more than one janitor.
+pub open spec fn widget_binding_two() -> Binding {
+    ClusterRefView { namespace: "default"@, name: "second"@ }
+}
+
+pub open spec fn widget_fanout_bindings() -> Set<Binding> {
+    Set::empty().insert(widget_binding()).insert(widget_binding_two())
+}
+
+// The same kind served for both bindings. It differs from widget_kind() only in
+// its binding set, which is what the sync reconciler consults.
+pub open spec fn widget_fanout_kind() -> SyncKind {
+    SyncKind {
+        outer_kind: model_kind(widget_kind_name(), ClusterIdView::Primary),
+        name: widget_kind_name(),
+        selector: widget_selector(),
+        bindings: widget_fanout_bindings(),
+    }
+}
+
+pub open spec fn widget_janitor_two_id() -> int { 4 }
+
+pub open spec fn widget_fanout_janitor_ids() -> Map<Binding, int> {
+    Map::empty().insert(widget_binding(), widget_janitor_id()).insert(widget_binding_two(), widget_janitor_two_id())
+}
+
+pub open spec fn widget_fanout_inner_kind(b: Binding) -> Kind { inner_kind(widget_fanout_kind(), b) }
+
+// The two bindings differ, and so do their mirror kinds: the mirror kind name
+// carries the cluster name after the namespace, and the two names differ in
+// length. lemma_inner_kind_same_namespace_injective cancels the common prefix.
+pub proof fn widget_fanout_bindings_distinct()
+    ensures
+        widget_binding() != widget_binding_two(),
+        widget_fanout_inner_kind(widget_binding()) != widget_fanout_inner_kind(widget_binding_two()),
+{
+    reveal_strlit("inner");
+    reveal_strlit("second");
+    assert("inner"@.len() != "second"@.len());
+    if widget_fanout_inner_kind(widget_binding()) == widget_fanout_inner_kind(widget_binding_two()) {
+        lemma_inner_kind_same_namespace_injective(widget_fanout_kind(), "default"@, "inner"@, "second"@);
+    }
+}
+
+pub open spec fn widget_fanout_cluster_instance() -> Cluster {
+    Cluster {
+        installed_types: Map::empty()
+            .insert(widget_fanout_kind().outer_kind->CustomResourceKind_0, Cluster::synced_installed_type(widget_spec_ok(), widget_selector()))
+            .insert(widget_fanout_inner_kind(widget_binding())->CustomResourceKind_0, Cluster::synced_installed_type(widget_spec_ok(), widget_selector()))
+            .insert(widget_fanout_inner_kind(widget_binding_two())->CustomResourceKind_0, Cluster::synced_installed_type(widget_spec_ok(), widget_selector())),
+        controller_models: Map::empty()
+            .insert(widget_janitor_id(), widget_janitor_controller_model(widget_fanout_kind(), widget_binding()))
+            .insert(widget_janitor_two_id(), widget_janitor_controller_model(widget_fanout_kind(), widget_binding_two()))
+            .insert(widget_sync_id(), widget_sync_controller_model(widget_fanout_kind())),
+    }
+}
+
+pub open spec fn widget_fanout_core_cluster() -> CoreCluster {
+    CoreCluster {
+        cluster: widget_fanout_cluster_instance(),
+        registry: Map::empty()
+            .insert(widget_janitor_id(), widget_janitor_controller_spec(widget_fanout_kind(), widget_binding(), widget_fanout_bindings(), widget_spec_ok(), widget_janitor_id()))
+            .insert(widget_janitor_two_id(), widget_janitor_controller_spec(widget_fanout_kind(), widget_binding_two(), widget_fanout_bindings(), widget_spec_ok(), widget_janitor_two_id()))
+            .insert(widget_sync_id(), widget_sync_controller_spec(widget_fanout_kind(), widget_fanout_bindings(), widget_spec_ok(), widget_sync_id(), widget_fanout_janitor_ids())),
+    }
+}
+
+pub open spec fn widget_fanout_core_set() -> CoreSet {
+    union_coreset(
+        widget_janitors_core_set(widget_fanout_bindings(), widget_fanout_janitor_ids()),
+        widget_sync_core_set(widget_fanout_kind(), widget_fanout_bindings(), widget_spec_ok(), widget_sync_id(), widget_fanout_janitor_ids()),
+        true_pred())
+}
+
+// The fan-out statement for a concrete cluster: one sync reconciler serving two
+// bindings, one janitor for each, and the three kinds they need installed. This
+// is the witness that widget_fanout_core_holds has instances with more than one
+// binding.
+pub proof fn widget_fanout_instance_core_holds()
+    ensures
+        well_formed(widget_fanout_core_cluster(), widget_fanout_core_set()),
+        core(widget_fanout_core_cluster(), widget_fanout_core_set()),
+{
+    let k = widget_fanout_kind();
+    let bs = widget_fanout_bindings();
+    let ids = widget_fanout_janitor_ids();
+    let cluster = widget_fanout_core_cluster();
+    widget_fanout_bindings_distinct();
+    assert(bs.contains(widget_binding()) && bs.contains(widget_binding_two()));
+    assert(cluster.cluster.synced_type_is_installed(k.outer_kind, widget_spec_ok(), widget_selector())) by {
+        widget_kind_strings_distinct();
+    }
+    assert forall |b: Binding| #[trigger] bs.contains(b)
+        implies cluster.cluster.synced_type_is_installed(inner_kind(k, b), widget_spec_ok(), widget_selector()) by {
+        widget_kind_strings_distinct();
+        assert(b == widget_binding() || b == widget_binding_two());
+    }
+    assert(ids_ok(bs, ids, widget_sync_id())) by {
+        assert forall |b: Binding| #[trigger] bs.contains(b) implies ids[b] != widget_sync_id() by {
+            assert(b == widget_binding() || b == widget_binding_two());
+        }
+        assert forall |x: Binding, y: Binding| #![trigger ids[x], ids[y]] bs.contains(x) && bs.contains(y) && ids[x] == ids[y] implies x == y by {
+            assert((x == widget_binding() || x == widget_binding_two()) && (y == widget_binding() || y == widget_binding_two()));
+        }
+    }
+    assert(janitors_registered(k, bs, widget_spec_ok(), cluster, ids)) by {
+        assert forall |b: Binding| #[trigger] bs.contains(b) implies {
+            &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, bs, widget_spec_ok(), ids[b]))
+            &&& (widget_janitor_controller_spec(k, b, bs, widget_spec_ok(), ids[b]).membership)(cluster.cluster, ids[b])
+        } by {
+            assert(b == widget_binding() || b == widget_binding_two());
+        }
+    }
+    assert((widget_sync_controller_spec(k, bs, widget_spec_ok(), widget_sync_id(), ids).membership)(cluster.cluster, widget_sync_id())) by {
+        assert forall |b: Binding| #[trigger] bs.contains(b)
+            implies sync_membership(k, b, bs, widget_spec_ok(), cluster.cluster, widget_sync_id(), ids[b]) by {
+            assert(b == widget_binding() || b == widget_binding_two());
+        }
+    }
+    widget_fanout_core_holds(k, bs, widget_spec_ok(), cluster, ids, widget_sync_id());
 }
 
 }

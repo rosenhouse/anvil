@@ -150,6 +150,11 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
                 return write_outer_status_or_done(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::Rejected)));
             }
             let binding = binding_of(kind, outer);
+            if !kind.knows(&binding) {
+                // Not a binding this reconciler was built with: report the inner
+                // cluster as unreachable and requeue, without addressing it.
+                return report_error(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::InnerUnreachable)));
+            }
             let req = KubeAPIRequest::GetRequest(KubeGetRequest {
                 api_resource: kind.inner_api_resource(&binding),
                 name: name,
@@ -162,11 +167,16 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
                 return (at_step(WidgetSyncStep::Error), None);
             }
             let binding = binding_of(kind, outer);
-            let inner_cluster = ClusterId::Remote(binding);
+            let inner_cluster = ClusterId::Remote(binding.clone());
             let get_result = extract_some_k_get_resp!(resp_o);
             if get_result.is_err() {
                 let err = get_result.unwrap_err();
                 if err.is_object_not_found() {
+                    if !kind.knows(&binding) {
+                        // Never reached: Init refused this binding, so no Get of its
+                        // mirror was sent. See model::sync_reconciler.
+                        return (at_step(WidgetSyncStep::Error), None);
+                    }
                     let req = KubeAPIRequest::CreateRequest(KubeCreateRequest {
                         api_resource: kind.entry.api_resource(&inner_cluster),
                         namespace: namespace,

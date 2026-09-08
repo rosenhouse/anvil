@@ -28,12 +28,20 @@ verus! {
 pub type Binding = ClusterRefView;
 
 // A configured kind: the model kind of its outer copies, the CRD name the
-// registry builds model kinds from, and the cluster selector that names each
-// object's binding.
+// registry builds model kinds from, the cluster selector that names each
+// object's binding, and the bindings the controller knows.
+//
+// `bindings` is what makes the mirror kinds of a configuration finitely many
+// (doc/widget_sync_fanout_design.md, section 5.2): the sync reconciler serves
+// exactly these bindings and refuses every other one before it sends a request,
+// so the only mirror kinds it ever writes are `inner_kind(k, b)` for `b` in the
+// set. Exec side it is the snapshot of the bound clusters the runner builds the
+// reconciler with, one snapshot per reconcile (trusted::exec_types::SyncKindExec).
 pub struct SyncKind {
     pub outer_kind: Kind,
     pub name: StringView,
     pub selector: ClusterSelector,
+    pub bindings: Set<Binding>,
 }
 
 // The model kind of the mirrors of `k` in the binding `b`.
@@ -351,6 +359,14 @@ pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
             None => no_cluster_name(),
         },
     }
+}
+
+// The controller knows the binding of `outer`. A reconcile of an outer copy this
+// is false of reports Failed(InnerUnreachable) and ends without ever addressing
+// the inner side, so every request the sync reconciler sends names a binding of
+// `k.bindings` and, with that set finite, a kind a concrete cluster can install.
+pub open spec fn serves(k: SyncKind, outer: SyncedObjectView) -> bool {
+    k.bindings.contains(binding_of(k, outer))
 }
 
 // The key of the mirror of `outer`: same namespace and name, the model kind of

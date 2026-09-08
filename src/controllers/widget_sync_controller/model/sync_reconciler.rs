@@ -104,6 +104,13 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                 // reconcile ends. The boot shape check rules this out for stored
                 // objects; the model does not assume it.
                 write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::Rejected)))
+            } else if !serves(k, outer) {
+                // The object names a binding this controller does not know: report
+                // the inner cluster as unreachable and requeue, without addressing
+                // it. Exec side `k.bindings` is the snapshot of the bound clusters
+                // this reconcile was built with, so a binding that appears later is
+                // served by a later reconcile.
+                report_error(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::InnerUnreachable)))
             } else {
                 let req = APIRequest::GetRequest(GetRequest { key: inner_key(k, outer) });
                 (at_step(WidgetSyncStepView::AfterGetInner), Some(RequestView::KRequest(req)))
@@ -116,12 +123,21 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                 let res = extract_some_k_get_resp_view(resp_o);
                 if res is Err {
                     if res->Err_0 is ObjectNotFound {
-                        // No mirror: create it.
-                        let req = APIRequest::CreateRequest(CreateRequest {
-                            namespace: outer.metadata.namespace->0,
-                            obj: marshal(make_inner(k, outer)),
-                        });
-                        (at_step(WidgetSyncStepView::AfterCreateInner), Some(RequestView::KRequest(req)))
+                        if !serves(k, outer) {
+                            // Never reached: Init refuses an outer copy whose binding
+                            // this controller does not know, so no Get of such a
+                            // mirror is ever sent. Stated here so that the mirror the
+                            // model creates always carries a mirror kind of
+                            // `k.bindings`, which a concrete cluster installs.
+                            error
+                        } else {
+                            // No mirror: create it.
+                            let req = APIRequest::CreateRequest(CreateRequest {
+                                namespace: outer.metadata.namespace->0,
+                                obj: marshal(make_inner(k, outer)),
+                            });
+                            (at_step(WidgetSyncStepView::AfterCreateInner), Some(RequestView::KRequest(req)))
+                        }
                     } else {
                         // The Get failed: report why, then requeue.
                         report_error(k, outer, failure_status(outer, res->Err_0, false))

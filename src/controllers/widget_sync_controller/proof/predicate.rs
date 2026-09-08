@@ -47,14 +47,19 @@ pub open spec fn sync_step_is_terminal() -> spec_fn(ReconcileLocalState) -> bool
 }
 
 // Every step the sync reconciler can be at right after its first transition: the
-// Get of the mirror, or, when the outer copy names no inner cluster, the status
-// write that reports the rejection (or Done, when that status is already there).
+// Get of the mirror; when the outer copy names no inner cluster, the status write
+// that reports the rejection (or Done, when that status is already there); and,
+// when it names a binding the reconciler does not serve, the status write that
+// reports the inner cluster as unreachable (or Error, when that status is already
+// there).
 pub open spec fn sync_step_after_init() -> spec_fn(ReconcileLocalState) -> bool {
     |s: ReconcileLocalState| {
         let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
         ||| step == WidgetSyncStepView::AfterGetInner
         ||| step == WidgetSyncStepView::AfterPatchOuterStatus
+        ||| step == WidgetSyncStepView::AfterReportError
         ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
     }
 }
 

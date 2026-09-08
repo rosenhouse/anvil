@@ -9,6 +9,7 @@ use crate::shim_layer::fault_injection::*;
 use core::fmt::Debug;
 use core::hash::Hash;
 use anyhow::{bail, Result};
+use futures::future::BoxFuture;
 use futures::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -524,6 +525,17 @@ where
     Ok(())
 }
 
+// ReconcilerFactory builds the reconciler value of one reconcile. The dynamic
+// runners hold a factory rather than a reconciler so that a reconciler whose
+// behaviour depends on the process's current bindings is built anew, from a
+// snapshot taken at the start of the reconcile, and is then fixed for the whole
+// of it: the sync reconciler of a kind takes the bound clusters
+// (ClusterClients::remote_refs) as its binding set, and the model its conformance
+// proof is about is the one of that snapshot (doc/widget_sync_fanout_design.md,
+// section 3.2). A reconciler with no such state ignores the argument and returns
+// a constant.
+pub type ReconcilerFactory<R> = Arc<dyn Fn(ClusterClients) -> BoxFuture<'static, R> + Send + Sync>;
+
 // run_dyn_controller runs a DynReconciler for one kind of the registry in the
 // cluster `cr_api` names: the kube-runtime controller is built on
 // Api<DynamicObject> with the entry's discovered ApiResource, and every
@@ -536,7 +548,7 @@ where
 // run_controller_in_clusters.
 pub async fn run_dyn_controller<R, E>(
     clusters: ClusterClients,
-    reconciler: R,
+    make_reconciler: ReconcilerFactory<R>,
     entry: RegistryEntry,
     cr_cluster: ClusterId,
     field_manager: Option<String>,
@@ -553,12 +565,11 @@ where
 {
     let api_resource = entry.kube_api_resource().clone();
     let crs = Api::<KubeDynamicObject>::all_with(clusters.watch_client_of(&cr_cluster).await?, &api_resource);
-    let reconciler = Arc::new(reconciler);
     let entry = Arc::new(entry);
     let reconcile = move |cr: Arc<KubeDynamicObject>, ctx: Arc<Data>| {
-        let reconciler = reconciler.clone();
+        let make_reconciler = make_reconciler.clone();
         let entry = entry.clone();
-        async move { reconcile_dyn_with::<R, E>(cr, ctx, reconciler, entry, fault_injection).await }
+        async move { reconcile_dyn_with::<R, E>(cr, ctx, make_reconciler, entry, fault_injection).await }
     };
 
     info!("starting controller for {} (custom resource in {:?} cluster)", api_resource.kind, cr_cluster);
@@ -592,7 +603,7 @@ where
 // most one requeue interval.
 pub async fn run_dyn_controller_with_triggers<R, E>(
     clusters: ClusterClients,
-    reconciler: R,
+    make_reconciler: ReconcilerFactory<R>,
     entry: RegistryEntry,
     cr_cluster: ClusterId,
     triggers: impl futures::Stream<Item = ObjectRef<KubeDynamicObject>> + Send + 'static,
@@ -610,12 +621,11 @@ where
 {
     let api_resource = entry.kube_api_resource().clone();
     let crs = Api::<KubeDynamicObject>::all_with(clusters.watch_client_of(&cr_cluster).await?, &api_resource);
-    let reconciler = Arc::new(reconciler);
     let entry = Arc::new(entry);
     let reconcile = move |cr: Arc<KubeDynamicObject>, ctx: Arc<Data>| {
-        let reconciler = reconciler.clone();
+        let make_reconciler = make_reconciler.clone();
         let entry = entry.clone();
-        async move { reconcile_dyn_with::<R, E>(cr, ctx, reconciler, entry, fault_injection).await }
+        async move { reconcile_dyn_with::<R, E>(cr, ctx, make_reconciler, entry, fault_injection).await }
     };
 
     info!(
@@ -647,7 +657,7 @@ where
 // triggers through run_dyn_controller_with_triggers.
 pub async fn run_dyn_controller_with_same_name_watch<R, E>(
     clusters: ClusterClients,
-    reconciler: R,
+    make_reconciler: ReconcilerFactory<R>,
     entry: RegistryEntry,
     cr_cluster: ClusterId,
     watched_entry: RegistryEntry,
@@ -668,12 +678,11 @@ where
     let watched_resource = watched_entry.kube_api_resource().clone();
     let crs = Api::<KubeDynamicObject>::all_with(clusters.watch_client_of(&cr_cluster).await?, &api_resource);
     let watched = Api::<KubeDynamicObject>::all_with(clusters.watch_client_of(&watched_cluster).await?, &watched_resource);
-    let reconciler = Arc::new(reconciler);
     let entry = Arc::new(entry);
     let reconcile = move |cr: Arc<KubeDynamicObject>, ctx: Arc<Data>| {
-        let reconciler = reconciler.clone();
+        let make_reconciler = make_reconciler.clone();
         let entry = entry.clone();
-        async move { reconcile_dyn_with::<R, E>(cr, ctx, reconciler, entry, fault_injection).await }
+        async move { reconcile_dyn_with::<R, E>(cr, ctx, make_reconciler, entry, fault_injection).await }
     };
 
     info!(
@@ -848,10 +857,15 @@ where
 // An object whose status is outside the shape (which the boot check makes
 // impossible for stored objects, and unmarshal refuses) is left alone until it
 // changes.
+//
+// The reconciler is built first, from the process's state as it is now: what it
+// reads there (the bound clusters, for the sync reconciler) is fixed for the
+// whole reconcile, so the reconcile conforms to one model rather than to a view
+// that changes under it.
 pub async fn reconcile_dyn_with<R, E>(
     cr: Arc<KubeDynamicObject>,
     ctx: Arc<Data>,
-    reconciler: Arc<R>,
+    make_reconciler: ReconcilerFactory<R>,
     entry: Arc<RegistryEntry>,
     fault_injection: bool,
 ) -> Result<Action, Error>
@@ -859,6 +873,7 @@ where
     R: DynReconciler<K = SyncedObject>,
     E: ExternalShimLayer<R::EReq, R::EResp>,
 {
+    let reconciler = Arc::new(make_reconciler(ctx.clusters.clone()).await);
     let cr_client = ctx.clusters.client_of(&ctx.cr_cluster).await?;
     let (cr_name, cr_namespace) = cr_identity(cr.meta())?;
     let cr_kind = entry.kube_api_resource().kind.clone();

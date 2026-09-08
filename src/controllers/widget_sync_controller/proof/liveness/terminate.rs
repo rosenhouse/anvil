@@ -153,13 +153,16 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     );
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner), sync_step_after_get_inner());
 
-    // Init sends the Get, or, for an outer copy that names no inner cluster,
-    // writes the rejection into the status and ends.
+    // Init sends the Get; for an outer copy that names no inner cluster it writes
+    // the rejection into the status and ends; for one whose binding this
+    // reconciler does not serve it writes InnerUnreachable and ends in Error.
     or_leads_to_combine_and_equality!(
         spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_init())),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
-        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done));
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
         idle
     );
     cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init), sync_step_after_init());

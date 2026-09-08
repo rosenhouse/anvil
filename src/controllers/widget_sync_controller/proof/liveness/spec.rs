@@ -92,6 +92,9 @@ pub open spec fn sync_rely_with_janitor(k: SyncKind, b: Binding, bs: Set<Binding
 // `janitor_id`, and both Widget types are installed.
 pub open spec fn sync_membership(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int) -> bool {
     &&& bs.contains(b)
+    // The bindings the reconciler serves are the ones the statement is read for:
+    // an outer copy of `b` is one the reconcile addresses rather than refuses.
+    &&& k.bindings == bs
     &&& cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k))
     &&& cluster.controller_models.contains_key(janitor_id)
     &&& controller_id != janitor_id

@@ -35,6 +35,7 @@ use verifiable_controllers::shim_layer::bindings::{
 };
 use verifiable_controllers::shim_layer::controller_runtime::{
     discover_kinds, run_dyn_controller, run_dyn_controller_with_triggers, ClusterClients,
+    ReconcilerFactory,
 };
 use verifiable_controllers::shim_layer::crd_shape::{check_crd, CrdCheckError};
 use verifiable_controllers::shim_layer::kind_config::{ClusterSelector, KindConfig};
@@ -166,15 +167,20 @@ fn refused_kind(kind: &KindConfig, err: &CrdCheckError) -> String {
 }
 
 // The exec twin of a configured kind: the discovered registry entry, which ties
-// the kind and a cluster to a model kind, and the cluster selector the
-// reconcilers read an object's cluster with. Built afresh per reconciler so
-// that neither has to be cloned.
-fn sync_kind(entry: &RegistryEntry, config: &KindConfig) -> SyncKindExec {
+// the kind and a cluster to a model kind, the cluster selector the reconcilers
+// read an object's cluster with, and the bindings the reconciler serves. Built
+// afresh per reconcile (the runners take a factory) so that the binding set is
+// the snapshot of the process's bound clusters taken at the start of that
+// reconcile and is fixed for the whole of it, which is what the model with the
+// binding set as a parameter asks for (doc/widget_sync_fanout_design.md,
+// section 3.2). A refused binding is in the snapshot: it is bound, and its
+// requests are the ones the shim answers Forbidden.
+fn sync_kind(entry: &RegistryEntry, config: &KindConfig, bindings: Vec<ClusterRef>) -> SyncKindExec {
     let selector = match &config.selector {
         ClusterSelector::Name => ClusterSelectorExec::Name,
         ClusterSelector::Field(path) => ClusterSelectorExec::Field(path.clone()),
     };
-    SyncKindExec { entry: entry.clone(), selector }
+    SyncKindExec { entry: entry.clone(), selector, bindings }
 }
 
 #[tokio::main]
@@ -291,9 +297,19 @@ async fn main() -> Result<()> {
             let mut binding_kinds = Vec::with_capacity(configured.len());
             for (kind, entry, plural) in &configured {
                 let (triggers, trigger_stream) = same_name_triggers();
+                let (sync_entry, sync_config) = (entry.clone(), kind.clone());
+                let make_sync: ReconcilerFactory<SyncReconciler> = Arc::new(move |clusters: ClusterClients| {
+                    let (entry, config) = (sync_entry.clone(), sync_config.clone());
+                    Box::pin(async move {
+                        // The bindings this reconcile serves: the clusters bound
+                        // right now, refused ones included.
+                        let bindings = clusters.remote_refs().await;
+                        SyncReconciler { kind: sync_kind(&entry, &config, bindings) }
+                    })
+                });
                 runners.push(tokio::spawn(run_dyn_controller_with_triggers::<SyncReconciler, VoidExternalShimLayer>(
                     clusters.clone(),
-                    SyncReconciler { kind: sync_kind(entry, kind) },
+                    make_sync,
                     entry.clone(),
                     ClusterId::Primary,
                     trigger_stream,
@@ -323,8 +339,19 @@ async fn main() -> Result<()> {
             let start_runners = Arc::new(move |binding: &ClusterRef, stop: tokio::sync::watch::Receiver<bool>| {
                 for (kind, entry) in &janitor_kinds {
                     let clusters = janitor_clusters.clone();
-                    let reconciler =
-                        JanitorReconciler { kind: sync_kind(entry, kind), binding: binding.clone() };
+                    let (janitor_entry, janitor_config, janitor_binding) =
+                        (entry.clone(), kind.clone(), binding.clone());
+                    let reconciler: ReconcilerFactory<JanitorReconciler> = Arc::new(move |clusters: ClusterClients| {
+                        let (entry, config, binding) =
+                            (janitor_entry.clone(), janitor_config.clone(), janitor_binding.clone());
+                        Box::pin(async move {
+                            // The janitor does not consult the binding set, but its
+                            // kind value is the same one the sync reconciler of this
+                            // kind runs with, so it snapshots it too.
+                            let bindings = clusters.remote_refs().await;
+                            JanitorReconciler { kind: sync_kind(&entry, &config, bindings), binding }
+                        })
+                    });
                     let entry = entry.clone();
                     let cluster = ClusterId::Remote(binding.clone());
                     let pause_file = janitor_pause.clone();

@@ -13,16 +13,27 @@ use crate::kubernetes_api_objects::spec::model_kind::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::spec_types;
 use vstd::prelude::*;
+use vstd::seq_lib::*;
 
 verus! {
 
-// A configured kind, exec side: the registry entry that names it and the cluster
-// selector of its objects. Its view is the model's SyncKind, whose outer kind is
-// the primary model kind of the entry (so sync_kind_ok holds of it as soon as the
-// CRD name is free of '@', which a DNS name is).
+// The set of bindings a Vec of cluster references stands for: the model's
+// `SyncKind::bindings`, read off the snapshot the reconciler was built with.
+pub open spec fn binding_set(v: Seq<ClusterRef>) -> Set<spec_types::Binding> {
+    v.map_values(|c: ClusterRef| c@).to_set()
+}
+
+// A configured kind, exec side: the registry entry that names it, the cluster
+// selector of its objects, and the bindings this reconciler knows -- the snapshot
+// of the process's bound clusters the runner built it with, one per reconcile
+// (doc/widget_sync_fanout_design.md, section 3.2). Its view is the model's
+// SyncKind, whose outer kind is the primary model kind of the entry (so
+// sync_kind_ok holds of it as soon as the CRD name is free of '@', which a DNS
+// name is) and whose binding set is the snapshot's.
 pub struct SyncKindExec {
     pub entry: RegistryEntry,
     pub selector: ClusterSelectorExec,
+    pub bindings: Vec<ClusterRef>,
 }
 
 impl View for SyncKindExec {
@@ -33,11 +44,39 @@ impl View for SyncKindExec {
             outer_kind: model_kind(self.entry@, ClusterIdView::Primary),
             name: self.entry@,
             selector: self.selector@,
+            bindings: binding_set(self.bindings@),
         }
     }
 }
 
 impl SyncKindExec {
+    // Whether `b` is one of the bindings this reconciler knows: the exec twin of
+    // `k.bindings.contains(b)`, a scan of the snapshot.
+    pub fn knows(&self, b: &ClusterRef) -> (res: bool)
+        ensures res == self@.bindings.contains(b@),
+    {
+        broadcast use Seq::to_set_ensures;
+        let ghost views = self.bindings@.map_values(|c: ClusterRef| c@);
+        let mut i: usize = 0;
+        while i < self.bindings.len()
+            invariant
+                0 <= i <= self.bindings.len(),
+                views == self.bindings@.map_values(|c: ClusterRef| c@),
+                views.len() == self.bindings.len(),
+                forall |j: int| 0 <= j < i ==> #[trigger] views[j] != b@,
+            decreases self.bindings.len() - i,
+        {
+            if self.bindings[i].eq(b) {
+                assert(views[i as int] == b@);
+                assert(views.contains(b@));
+                return true;
+            }
+            i = i + 1;
+        }
+        assert(!views.contains(b@));
+        false
+    }
+
     // The ApiResource of the outer copies of this kind.
     pub fn outer_api_resource(&self) -> (res: ApiResource)
         ensures res@.kind == self@.outer_kind,
