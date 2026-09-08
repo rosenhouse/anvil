@@ -599,11 +599,15 @@ where
 // logs and nothing else acts on.
 //
 // The stream is the only way a running kube-runtime controller takes work from
-// outside its own watches; it needs kube-runtime's
-// `unstable-runtime-reconcile-on` feature, which the `kube/unstable-runtime`
-// of Cargo.toml's `runtime` feature turns on. The triggers are a latency optimization
-// only: liveness rests on the periodic requeue, so a dropped trigger costs at
-// most one requeue interval.
+// outside its own watches; `Controller::reconcile_on` is kube-runtime's
+// `unstable-runtime-reconcile-on` API, which the `dyn-runtime` feature of
+// Cargo.toml turns on through `kube/unstable-runtime` and which
+// widget_sync_controller therefore requires (build.md). Without the feature the
+// library still builds and this runner still runs the kind's own watch: it
+// drops the trigger stream. That is sound because the triggers are a latency
+// optimization only -- liveness rests on the periodic requeue, so a dropped
+// trigger costs at most one requeue interval, and dropping all of them costs at
+// most one requeue interval per mirror change.
 pub async fn run_dyn_controller_with_triggers<R, E>(
     clusters: ClusterClients,
     make_reconciler: ReconcilerFactory<R>,
@@ -635,8 +639,15 @@ where
         "starting controller for {} (custom resource in {:?} cluster, triggered by the bindings' mirrors)",
         api_resource.kind, cr_cluster
     );
-    Controller::new_with(crs, watcher::Config::default(), api_resource.clone())
-        .reconcile_on(triggers)
+    let controller = Controller::new_with(crs, watcher::Config::default(), api_resource.clone());
+    // The one line the feature buys. Built without it, the runner keeps the
+    // kind's own watch and lets the stream go; see the comment above for why
+    // that costs latency and nothing else.
+    #[cfg(feature = "dyn-runtime")]
+    let controller = controller.reconcile_on(triggers);
+    #[cfg(not(feature = "dyn-runtime"))]
+    drop(triggers);
+    controller
         .graceful_shutdown_on(shutdown)
         .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
