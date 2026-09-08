@@ -32,8 +32,9 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   annotation through it), an execution of the one-store model. R1, R2, R3,
   R3s and the janitor's delete soundness (less the clause that no uid the
   primary counter may still issue names the parent) are then stated on
-  two-store executions (`widget_two_cluster_theorem`; `widget_instance_two_cluster_theorem`
-  for the concrete cluster of the pair).
+  two-store executions (`widget_two_cluster_theorem`, for any cluster meeting
+  the refinement's hypotheses; the closed statement for a concrete cluster is
+  open, see doc/widget_sync_fanout_design.md, section 5.2).
 
 ## 1. Design
 
@@ -294,10 +295,15 @@ init, next, the pair's fairness and D3 (`widget_relies_hold_of`);
 of the controller with the pair establishes, the controller's guarantee as an
 invariant under `cluster_model`, given that the guarantee implies the relies
 and that the pair's spec provides every fairness the Welder registry declares.
-No fairness of the other controllers is assumed. `widget_instance_two_cluster_theorem` discharges the
-hypotheses for the concrete cluster of the pair, the case with no other
-controller (`widget_pair_cluster`). `widget_disturbed_two_cluster_theorem`
-does the same for the cluster of the pair with the disturber (section 2.4).
+No fairness of the other controllers is assumed. `widget_pair_cluster` names the
+case with no other controller and `lemma_disturber_is_other_controller_ok`
+admits the disturber (section 2.4) as one. What the fan-out shape does not yet
+have is the *closed* statement for a concrete cluster the fixed pair had
+(`widget_instance_two_cluster_theorem`): the folded store would have to install
+the mirror kind of every binding, of which there are infinitely many, and
+`InstalledTypes` is a finite map. That is the open piece of
+doc/widget_sync_fanout_design.md, section 5.2, which records the exact
+obligation.
 
 The two-store statement thus quantifies over other controllers as the
 one-store theorems do, with hypotheses 1 to 3 added per controller: composing
@@ -390,8 +396,8 @@ of its own key) implies both reconcilers' relies, and
 `composition/widget_disturber_reconciler.rs` composes it with the pair through
 Welder: `widget_disturbed_core_holds` is the closed statement for a cluster
 running the janitor, the sync reconciler and the disturber.
-`widget_disturbed_two_cluster_theorem` (`proof/two_cluster.rs`) is the same
-statement on two stores, with the disturber acting in the remote store: its
+`lemma_disturber_is_other_controller_ok` (`proof/two_cluster.rs`) admits it into
+the two-store statement, acting in the remote store: its
 model reads only the namespace, name and spec of its object and tests nothing,
 so it commutes with the relabeling by computation, and its guarantee gives the
 pair's relies in the form the two-store theorem asks for (section 2.2).

@@ -443,7 +443,7 @@ side as other controllers; they meet the refinement's hypotheses 1 to 3
 with the data as parameters). R1 to R3s and the delete soundness are then
 read on two-store executions per binding, as today.
 
-Two hypotheses the fixed pair did not need appear here. First, the folded
+Three hypotheses the fixed pair did not need appear here. First, the folded
 one-store cluster installs the mirror kind of *every* binding of `k`, not
 only of `b`: the sync controller of `k` serves every binding, so a Create it
 sends for an outer copy of another binding must still name a known kind
@@ -452,7 +452,42 @@ the primary side, which is what the paragraph above says. Second, the
 selector of `k` must be a *field* of the spec, not `metadata.name`: the
 refinement asks that the API server's validation not read metadata
 (`installed_types_ignore_metadata`), and the immutability rule of a `name`
-selector reads `metadata.name`.
+selector reads `metadata.name`. Third, the binding set the theorem is read
+for is the singleton `{b}`: the ESRs it consumes and the D3 it assumes are
+`b`'s, and the janitors of the other bindings enter as other controllers,
+which is what "per binding" means.
+
+`widget_two_cluster_theorem` (`widget_sync_controller/proof/two_cluster.rs`)
+is that statement, for any cluster meeting the hypotheses, and it is proved.
+R3s is read there with its one-store premise, `bound_parent_absent`, which
+fixes the mirror key's kind; the two-store delete-soundness clause is read
+with the conjuncts `parent_absent_forever` has since the port (the parent is
+an outer copy of `k` that selects `b`'s cluster), not over every stored
+object.
+
+**OPEN.** What the fan-out shape has no counterpart of is the fixed pair's
+*closed* statement for a concrete cluster (`widget_instance_two_cluster_theorem`
+and the same with the disturber). The obstacle is the first hypothesis above.
+A mirror kind is `model_kind(k.name, Remote(ns, clusterName))`, so the mirror
+kinds of all bindings are as many as the pairs (namespace, cluster name),
+infinitely many; `InstalledTypes` is vstd's `Map`, whose domain is a finite
+`Set`. No concrete `Cluster` value therefore satisfies "every binding's mirror
+kind installed", and the general theorem cannot be instantiated. Narrowing the
+hypothesis to a finite set of bindings does not help by itself: `models_ok`
+quantifies over every object a reconcile could be triggered by, not only the
+stored ones, and even restricted to stored objects the namespace of an outer
+copy is unbounded and the type validation may not read it
+(`installed_types_ignore_metadata`), so the cluster name a schema could pin
+does not bound the mirror kind. Closing it takes one of: an `InstalledTypes`
+with an infinite domain (vstd's `IMap`), which changes `Cluster` and every
+controller's concrete cluster; a `TwoCluster` whose `request_ok` tolerates a
+Create of an uninstalled kind, which needs `installed_types_ignore_metadata`
+and `installed_types_coherent` for every name rather than every installed one
+(a `Map` says nothing about indexes outside its domain, so a concrete map
+cannot provide that either); or a sync reconciler model that refuses a binding
+outside a configured finite set, which changes the model and its exec
+conformance. The obligation is recorded at the same place in
+`proof/two_cluster.rs`.
 
 ### 5.3 What that leaves unstated
 
