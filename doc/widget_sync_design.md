@@ -186,7 +186,10 @@ covers the `parent-uid` annotation. The proof (`relabel`, `api_server`, `steps`,
 fairness of every action the liveness proofs assume. Fairness needs the
 two-store message behind a one-store message to stay the same while a wait
 lasts, which follows from the one-store invariants that no message is in
-flight twice and that in-flight ids are below the allocator.
+flight twice and that in-flight ids are below the allocator
+(`every_in_flight_msg_has_no_replicas_and_has_unique_id`,
+`every_in_flight_msg_has_lower_id_than_allocator`, proved on the mapped
+execution from init and next, so the transfer is not circular).
 
 `widget_sync_controller/proof/two_cluster.rs` instantiates the refinement.
 Both reconcilers commute with the relabeling. `widget_two_cluster_theorem`
@@ -201,7 +204,9 @@ The cluster may run other controllers beside the pair
 (`widget_cluster_with_others`). Each other controller must meet hypotheses 1
 and 3 below for its own model (`other_model_ok`, `other_model_commutes`), and
 every installed type, including any the other controller brings, must meet
-hypothesis 2. The pair's relies of section 3.2 must hold of the other
+hypothesis 2. For the six-controller cluster of section 3.4 that would mean
+the state validation of the four other controllers' types as well as their
+commutation lemmas, which is why that cluster is not pulled back. The pair's relies of section 3.2 must hold of the other
 controller as invariants of the one-store model from init and next
 (`widget_relies_hold_of`); that is what a Welder composition of the controller
 with the pair establishes from its guarantee. No fairness of the other
@@ -244,7 +249,8 @@ one restriction of the two-store model:
    pod-managing controller verified on `TwoCluster` would lose that fault
    coverage. The restriction exists because which monkey action runs is a
    `choose` over the input, which the proof cannot equate between an input
-   and its relabeling.
+   and its relabeling. The monkey also acts on the primary store only, so a
+   two-store theorem gives no monkey coverage in the remote store at all.
 
 What remains trusted is the usual Anvil boundary, per store: that each real API
 server behaves as the model's API server, with its uids and resource versions
@@ -319,6 +325,21 @@ The trusted specification is `src/controllers/widget_sync_controller/trusted/`:
 types) and `exec_types.rs` (the exec wrappers, bound to `ClusterId::Primary`
 and `ClusterId::Remote`; this binding is the routing the model trusts, section
 2.2). `π` is `WidgetStatusView::mirrored()`.
+
+Trusted beyond the specification, all under `widget_sync_controller/`: the
+`external_body` accessors and constructors of `trusted/exec_types.rs`
+(`well_formed`, `spec`, `status`, `set_spec` and `set_status` of both
+wrappers; `count`, `message`, `observed_generation`, `ready` and
+`observed_count` of the status; `outer_status_for` and
+`outer_status_without_inner`, which build the outer status by hand to match
+the spec's definition), and the three `Marshallable` instances of the
+reconcile states in `model/install.rs`. From the framework the pair relies on
+the wrapper macro's `unmarshal`, `marshal`, `api_resource` and `has_kind`
+postconditions, on `UidToken`, on the `PatchTests` and `Preconditions`
+setters, and on the shim's construction of the JSON `test` operations, which
+is where "patches test uid and generation" becomes real.
+`tools/check-widget-exec-hygiene.sh` fails when an `external_body` appears
+anywhere else under `widget_sync_controller/`.
 
 ### 3.1 Guarantees
 
@@ -406,7 +427,18 @@ nothing in the undisturbed case:
 - a Delete that arrives while no mirror of `outer` is at the key is free.
 
 Only a Delete that would remove the live mirror is excluded, and one that
-keeps arriving forever falsifies the premise rather than the conclusion. R2's premise fixes the inner status instead of assuming
+keeps arriving forever falsifies the premise rather than the conclusion.
+
+These clauses are premises rather than clauses of `widget_sync_rely` on
+purpose. A rely is unconditional and is discharged once, by Welder's
+compatibility check, from the other controller's guarantee; a rely that
+forbade spec edits or deletes of mirrors would exclude the very actor the
+design wants to tolerate. The model has no users, so the clauses do constrain
+other controllers, which is what a rely does; the temporal premise of R1 and
+R2 is the only form in which "that actor has stopped" can be said. The
+disturber (section 2.4) shows the premise is satisfiable and not vacuous
+under the relaxed rely, and `janitor_deletes_are_sound` shows the janitor's
+own Deletes satisfy it. R2's premise fixes the inner status instead of assuming
 the inner implementation is live, so R2 holds for any inner implementation. R3
 is per object; R3s is the stable form and is the sync reconciler's promise
 given R3. Neither R3 nor R3s needs a premise about deletes: the janitor's rely
