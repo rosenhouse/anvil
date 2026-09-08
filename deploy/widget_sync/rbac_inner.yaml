@@ -4,7 +4,10 @@
 # next to the kubeconfig in the Secret the controller mounts in the outer
 # cluster; the token file is re-read, an inline token would not be.
 # The controller creates, patches (spec) and deletes the mirrors it owns and
-# reads every Widget; it never writes Widget status in the inner cluster.
+# reads every object of the configured kinds; it never writes their status in
+# the inner cluster. One rule per kind the controller is given
+# (deploy_local.yaml's --kind flags): the demo configures Widget and Gadget, and
+# the boot access check asks for exactly these verbs on each plural.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -40,6 +43,7 @@ rules:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list

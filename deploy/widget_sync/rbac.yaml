@@ -1,5 +1,9 @@
 # RBAC for the widget sync controller in the outer (primary) cluster.
-# The controller reads Widgets and writes only their status subresource here;
+# One pair of rules per configured kind (deploy_local.yaml's --kind flags):
+# `<plural>` get, list, watch and `<plural>/status` patch, as
+# doc/widget_sync_fanout_design.md, section 4, prescribes. The demo configures
+# Widget and Gadget.
+# The controller reads them and writes only their status subresource here;
 # its access to the inner cluster comes from the kubeconfig in the
 # widget-sync-remote-kubeconfig Secret (see rbac_inner.yaml).
 # The Role in namespace default at the end is what the crash-testing mode
@@ -33,6 +37,7 @@ rules:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list
@@ -41,8 +46,18 @@ rules:
       - anvil.dev
     resources:
       - widgets/status
+      - gadgets/status
     verbs:
       - patch
+  # The boot shape check reads each configured kind's CRD
+  # (doc/widget_sync_fanout_design.md, sections 2.2 and 4). Read-only, and only
+  # get: the CRDs are fetched by name, never listed or watched.
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -280,6 +280,8 @@ jobs:
           ./tools/two-cluster-test.sh --build
       - name: Run widget sync two-cluster e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync
+      - name: Run widget sync e2e tests for the configured kinds
+        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync-kinds
       - name: Collect controller logs
         if: failure()
         run: |
@@ -293,6 +295,10 @@ jobs:
           echo "::group::widgets"
           kubectl --context kind-widget-sync-outer get widgets -A -o yaml || true
           kubectl --context kind-widget-sync-inner get widgets -A -o yaml || true
+          echo "::endgroup::"
+          echo "::group::gadgets"
+          kubectl --context kind-widget-sync-outer get gadgets -A -o yaml || true
+          kubectl --context kind-widget-sync-inner get gadgets -A -o yaml || true
           echo "::endgroup::"
 
   # Aggregates every other job into a single status, so branch protection can

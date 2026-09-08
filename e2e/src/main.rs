@@ -9,6 +9,7 @@ pub mod vstatefulset_admission_e2e;
 pub mod vreplicaset_admission_e2e;
 pub mod vdeployment_admission_e2e;
 pub mod widget_sync_e2e;
+pub mod widget_sync_kinds_e2e;
 
 use common::Error;
 use std::str::FromStr;
@@ -22,6 +23,7 @@ use vdeployment_admission_e2e::vdeployment_admission_e2e_test;
 use vstatefulset_e2e::vstatefulset_e2e_test;
 use vstatefulset_admission_e2e::vstatefulset_admission_e2e_test;
 use widget_sync_e2e::widget_sync_e2e_test;
+use widget_sync_kinds_e2e::widget_sync_kinds_e2e_test;
 
 #[tokio::main]
 async fn main() -> Result<(), Error> {
@@ -69,6 +71,10 @@ async fn main() -> Result<(), Error> {
         "widget-sync" => {
             info!("Running widget-sync two-cluster end-to-end test");
             return widget_sync_e2e_test().await;
+        }
+        "widget-sync-kinds" => {
+            info!("Running widget-sync end-to-end test for the configured kinds");
+            return widget_sync_kinds_e2e_test().await;
         }
         _ => {
             error!("Wrong command. Please specify the correct e2e test workload.");
