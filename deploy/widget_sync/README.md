@@ -120,7 +120,9 @@ widget_sync_controller run \
 required and the same kind twice is refused (two sync controllers on the same
 objects is what the proofs exclude). Each kind gets its own sync reconciler
 and, per binding, its own janitor. `widget_sync_controller export` prints the
-demo CRDs.
+demo CRDs — exactly the two manifests in this directory, immutability rule
+included, so what it prints is what this binary accepts at boot (a test holds
+the two to being the same document).
 
 The **selector** is the field that says which inner cluster an object belongs
 to:
