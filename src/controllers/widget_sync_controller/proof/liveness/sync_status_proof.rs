@@ -131,7 +131,8 @@ pub proof fn lemma_r2_layers_imply_r1_layers(spec: TempPred<ClusterState>, clust
     always_weaken(spec, lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, mirrored))), lift_state(outer_stable(outer)));
     always_weaken(spec, lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, mirrored))), lift_state(inner_settled(outer, mirrored)));
     always_weaken(spec, lift_state(inner_settled(outer, mirrored)), lift_state(mirror_settled(outer)));
-    entails_and(spec, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_stable(outer))));
+    always_weaken(spec, lift_state(outer_stable(outer)), lift_state(outer_spec_stable(outer)));
+    entails_and(spec, sync_stable_spec(cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(outer))));
     entails_and(spec, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
     entails_and(spec, sync_spec_with_phase_i(cluster, controller_id, janitor_id, outer), always(lift_state(sync_phase_ii(controller_id, outer))));
     entails_and(spec, sync_spec_with_phase_ii(cluster, controller_id, janitor_id, outer), always(lift_state(mirror_settled(outer))));
@@ -1600,7 +1601,8 @@ pub proof fn lemma_premise_leads_to_always_status_synced(
     entails_and_split(spec_i, spec_p, phase_i_temp);
     entails_and_split(spec_i, stable_spec, premise_temp);
     always_weaken(spec_i, lift_state(outer_stable(outer)).and(lift_state(inner_settled(outer, mirrored))), lift_state(outer_stable(outer)));
-    entails_and(spec_i, stable_spec, always(lift_state(outer_stable(outer))));
+    always_weaken(spec_i, lift_state(outer_stable(outer)), lift_state(outer_spec_stable(outer)));
+    entails_and(spec_i, stable_spec, always(lift_state(outer_spec_stable(outer))));
     entails_and(spec_i, sync_spec_with_desired(cluster, controller_id, janitor_id, outer), phase_i_temp);
     lemma_true_leads_to_always_sync_phase_ii(spec_i, cluster, controller_id, janitor_id, outer);
     leads_to_trans(spec_i, true_pred(), phase_ii_temp, target);

@@ -22,14 +22,25 @@ pub open spec fn widget_spec_eventually_synced() -> TempPred<ClusterState> {
 }
 
 pub open spec fn widget_spec_eventually_synced_per_cr(outer: OuterWidgetView) -> TempPred<ClusterState> {
-    always(lift_state(outer_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))
+    always(lift_state(outer_spec_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))
 }
 
-// The premise of R1 and R2: the outer copy exists with this uid, spec and
-// generation and is not terminating, every in-flight write of the mirror's spec
-// writes `outer.spec`, and no in-flight Delete would remove a mirror of the outer
-// copy. Convergence is promised for the time after the outer copy stops changing
-// and out-of-band edits and deletes of the mirror stop.
+// The premise of R1: the outer copy exists with this uid and spec and is not
+// terminating, every in-flight write of the mirror's spec writes `outer.spec`, and
+// no in-flight Delete would remove a mirror of the outer copy. Convergence is
+// promised for the time after the outer copy stops changing and out-of-band edits
+// and deletes of the mirror stop. R1 says nothing about status, so it does not
+// need the outer copy's generation to be fixed.
+pub open spec fn outer_spec_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& Cluster::desired_state_is(outer)(s)
+        &&& mirror_spec_undisturbed(outer)(s)
+        &&& mirror_undeleted(outer)(s)
+    }
+}
+
+// The premise of R2: R1's premise, and the outer copy's generation is
+// `outer.metadata.generation`, which the status R2 promises is stamped with.
 pub open spec fn outer_stable(outer: OuterWidgetView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& Cluster::desired_state_is(outer)(s)

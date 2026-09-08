@@ -2,7 +2,7 @@
 // carries the outer spec, and stays so.
 //
 // For an outer copy `outer` (key `key`, mirror key `ikey`):
-//     always(outer_stable(outer)) ~> always(spec_synced(outer))
+//     always(outer_spec_stable(outer)) ~> always(spec_synced(outer))
 //
 // The proof has three parts.
 // 1. Phases I and II (spec.rs): failures are disabled; the snapshots the sync
@@ -1478,13 +1478,13 @@ pub proof fn lemma_true_leads_to_always_spec_synced(
 // Assembly: R1 for one outer copy, then for all.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_outer_stable_leads_to_always_spec_synced(
+pub proof fn lemma_outer_spec_stable_leads_to_always_spec_synced(
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: OuterWidgetView
 )
     requires
         sync_membership(cluster, controller_id, janitor_id),
         spec.entails(sync_stable_spec(cluster, controller_id, janitor_id)),
-    ensures spec.entails(always(lift_state(outer_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))),
+    ensures spec.entails(always(lift_state(outer_spec_stable(outer))).leads_to(always(lift_state(spec_synced(outer))))),
 {
     let target = always(lift_state(spec_synced(outer)));
     let stable_spec = sync_stable_spec(cluster, controller_id, janitor_id);
@@ -1495,7 +1495,7 @@ pub proof fn lemma_outer_stable_leads_to_always_spec_synced(
     let settled_temp = always(lift_state(mirror_settled(outer)));
     let phase_ii_temp = always(lift_state(sync_phase_ii(controller_id, outer)));
     let phase_i_temp = always(lift_state(phase_i(controller_id)));
-    let premise_temp = always(lift_state(outer_stable(outer)));
+    let premise_temp = always(lift_state(outer_spec_stable(outer)));
 
     // Under all layers.
     assert(spec_iii.entails(spec_iii));
@@ -1556,7 +1556,7 @@ pub proof fn sync_eventually_synced(spec: TempPred<ClusterState>, cluster: Clust
     );
     let per_cr = |outer: OuterWidgetView| widget_spec_eventually_synced_per_cr(outer);
     assert forall |outer: OuterWidgetView| spec.entails(#[trigger] per_cr(outer)) by {
-        lemma_outer_stable_leads_to_always_spec_synced(spec, cluster, controller_id, janitor_id, outer);
+        lemma_outer_spec_stable_leads_to_always_spec_synced(spec, cluster, controller_id, janitor_id, outer);
     }
     spec_entails_tla_forall(spec, per_cr);
 }

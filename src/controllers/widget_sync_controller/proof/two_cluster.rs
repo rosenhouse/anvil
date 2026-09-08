@@ -638,9 +638,16 @@ pub open spec fn on_side(side: Side, p: StatePred<ClusterState>) -> StatePred<Tw
     |s: TwoClusterState| p(s.project(side))
 }
 
-// The premise of R1 and R2 on two clusters: the outer copy and the in-flight
+// The premises of R1 and R2 on two clusters: the outer copy and the in-flight
 // writes are read on the primary side; the delete clause, which looks at the
 // mirror, is read on the remote side, where the mirror lives.
+pub open spec fn two_cluster_outer_spec_stable(outer: OuterWidgetView) -> StatePred<TwoClusterState> {
+    |s: TwoClusterState| {
+        &&& outer_spec_stable(outer)(s.project(Side::Primary))
+        &&& mirror_undeleted(outer)(s.project(Side::Remote))
+    }
+}
+
 pub open spec fn two_cluster_outer_stable(outer: OuterWidgetView) -> StatePred<TwoClusterState> {
     |s: TwoClusterState| {
         &&& outer_stable(outer)(s.project(Side::Primary))
@@ -651,7 +658,7 @@ pub open spec fn two_cluster_outer_stable(outer: OuterWidgetView) -> StatePred<T
 // R1 on two clusters: the outer copy is read in the primary store, the mirror in the remote one.
 pub open spec fn two_cluster_spec_eventually_synced() -> TempPred<TwoClusterState> {
     tla_forall(|outer: OuterWidgetView|
-        always(lift_state(two_cluster_outer_stable(outer)))
+        always(lift_state(two_cluster_outer_spec_stable(outer)))
             .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))))
 }
 
@@ -744,13 +751,14 @@ proof fn lemma_desired_state_pull_back(cluster: Cluster, r: Relabeling, s: TwoCl
     }
 }
 
-proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
+// The premise of R1, pulled back.
+proof fn lemma_outer_spec_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
     requires
         widget_relabeling(cluster, r),
         inv(widget_two_cluster(cluster), s),
     ensures ({
         let tc = widget_two_cluster(cluster);
-        outer_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_stable(outer)(s)
+        outer_spec_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_spec_stable(outer)(s)
     }),
 {
     let tc = widget_two_cluster(cluster);
@@ -759,10 +767,6 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
     let a = abs(tc, r, s, uid_next, rv_next);
     let p = s.project(Side::Primary);
     lemma_desired_state_pull_back(cluster, r, s, outer, uid_next, rv_next);
-    lemma_abs_object(cluster, r, s, outer.object_ref(), uid_next, rv_next);
-    if p.resources().contains_key(outer.object_ref()) {
-        lemma_relabel_obj_keeps_identity(tc, r, p.resources()[outer.object_ref()]);
-    }
     // Writes of the mirror's spec in flight.
     let in_flight = s.network.in_flight;
     assert(mirror_spec_undisturbed(outer1)(a) == mirror_spec_undisturbed(outer)(p)) by {
@@ -796,6 +800,30 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
     // equality are false already.
     if Cluster::desired_state_is(outer)(p) {
         lemma_mirror_undeleted_pull_back(cluster, r, s, outer, uid_next, rv_next);
+    }
+}
+
+// The premise of R2, pulled back: R1's premise, and the generation of the outer
+// copy, which relabeling keeps.
+proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
+    requires
+        widget_relabeling(cluster, r),
+        inv(widget_two_cluster(cluster), s),
+    ensures ({
+        let tc = widget_two_cluster(cluster);
+        outer_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_stable(outer)(s)
+    }),
+{
+    let tc = widget_two_cluster(cluster);
+    lemma_widget_sides(cluster);
+    let outer1 = relabel_outer(tc, r, outer);
+    let a = abs(tc, r, s, uid_next, rv_next);
+    let p = s.project(Side::Primary);
+    lemma_outer_spec_stable_pull_back(cluster, r, s, outer, uid_next, rv_next);
+    lemma_desired_state_pull_back(cluster, r, s, outer, uid_next, rv_next);
+    lemma_abs_object(cluster, r, s, outer.object_ref(), uid_next, rv_next);
+    if p.resources().contains_key(outer.object_ref()) {
+        lemma_relabel_obj_keeps_identity(tc, r, p.resources()[outer.object_ref()]);
     }
 }
 
@@ -1211,7 +1239,9 @@ proof fn lemma_outer_without_uid_not_stable_at(cluster: Cluster, r: Relabeling, 
     requires
         widget_sim(cluster, r, ex),
         outer.metadata.uid is None,
-    ensures !two_cluster_outer_stable(outer)(state_at(ex, t)),
+    ensures
+        !two_cluster_outer_spec_stable(outer)(state_at(ex, t)),
+        !two_cluster_outer_stable(outer)(state_at(ex, t)),
 {
     let tc = widget_two_cluster(cluster);
     lemma_widget_sim_inv(cluster, r, ex, t);
@@ -1245,15 +1275,16 @@ proof fn lemma_outer_without_uid_never_stable(cluster: Cluster, r: Relabeling, e
     requires
         widget_sim(cluster, r, ex),
         outer.metadata.uid is None,
-    ensures always(lift_state(two_cluster_outer_stable(outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex),
+    ensures always(lift_state(two_cluster_outer_spec_stable(outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex),
         forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
             .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex),
 {
+    let sp1 = two_cluster_outer_spec_stable(outer);
     let sp = two_cluster_outer_stable(outer);
-    assert forall |t: nat| !sp(#[trigger] state_at(ex, t)) by {
+    assert forall |t: nat| !sp1(#[trigger] state_at(ex, t)) && !sp(state_at(ex, t)) by {
         lemma_outer_without_uid_not_stable_at(cluster, r, ex, outer, t);
     }
-    lemma_vacuous_from_never(ex, sp, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(outer)))));
+    lemma_vacuous_from_never(ex, sp1, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(outer)))));
     assert forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
         .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex) by {
         lemma_vacuous_from_never(ex, sp, lift_state(on_side(Side::Remote, inner_settled(outer, mirrored))), always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored)))));
@@ -1268,7 +1299,7 @@ pub proof fn lemma_r1_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
 {
     let tc = widget_two_cluster(cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |outer: OuterWidgetView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)))
+    assert forall |outer: OuterWidgetView| #[trigger] always(lift_state(two_cluster_outer_spec_stable(outer)))
         .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex) by {
         if outer.metadata.uid is None {
             lemma_outer_without_uid_never_stable(cluster, r, ex, outer);
@@ -1277,13 +1308,13 @@ pub proof fn lemma_r1_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
             let f = |outer: OuterWidgetView| widget_spec_eventually_synced_per_cr(outer);
             assert(tla_forall(f).satisfied_by(ex1));
             assert(f(outer1).satisfied_by(ex1));
-            let p1 = outer_stable(outer1);
+            let p1 = outer_spec_stable(outer1);
             let q1 = spec_synced(outer1);
-            let p2 = two_cluster_outer_stable(outer);
+            let p2 = two_cluster_outer_spec_stable(outer);
             let q2 = on_side(Side::Remote, spec_synced(outer));
             assert forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)) by {
                 lemma_widget_sim_inv(cluster, r, ex, i);
-                lemma_outer_stable_pull_back(cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
+                lemma_outer_spec_stable_pull_back(cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
             }
             assert forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)) by {
                 lemma_widget_sim_inv(cluster, r, ex, i);
