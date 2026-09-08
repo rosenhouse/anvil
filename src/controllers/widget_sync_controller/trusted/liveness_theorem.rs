@@ -21,12 +21,12 @@ verus! {
 // R1, forward eventually stable reconciliation: once the outer copy's spec stops
 // changing, the mirror eventually exists in the binding the copy names, is ours,
 // and carries that spec.
-pub open spec fn widget_spec_eventually_synced(k: SyncKind, bs: Set<Binding>) -> TempPred<ClusterState> {
-    tla_forall(|outer: SyncedObjectView| widget_spec_eventually_synced_per_cr(k, bs, outer))
+pub open spec fn widget_spec_eventually_synced(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|outer: SyncedObjectView| widget_spec_eventually_synced_per_cr(k, b, outer))
 }
 
-pub open spec fn widget_spec_eventually_synced_per_cr(k: SyncKind, bs: Set<Binding>, outer: SyncedObjectView) -> TempPred<ClusterState> {
-    always(lift_state(outer_spec_stable(k, bs, outer))).leads_to(always(lift_state(spec_synced(k, outer))))
+pub open spec fn widget_spec_eventually_synced_per_cr(k: SyncKind, b: Binding, outer: SyncedObjectView) -> TempPred<ClusterState> {
+    always(lift_state(outer_spec_stable(k, b, outer))).leads_to(always(lift_state(spec_synced(k, outer))))
 }
 
 // The premise of R1: the outer copy is one of `k`, it names an inner cluster, it
@@ -36,11 +36,11 @@ pub open spec fn widget_spec_eventually_synced_per_cr(k: SyncKind, bs: Set<Bindi
 // copy stops changing and out-of-band edits and deletes of the mirror stop. R1
 // says nothing about status, so it does not need the outer copy's generation to be
 // fixed.
-pub open spec fn outer_spec_stable(k: SyncKind, bs: Set<Binding>, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn outer_spec_stable(k: SyncKind, b: Binding, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& outer.kind == k.outer_kind
         &&& cluster_of(k.selector, outer) is Some
-        &&& bs.contains(binding_of(k, outer))
+        &&& binding_of(k, outer) == b
         &&& Cluster::synced_desired_state_is(outer)(s)
         &&& mirror_spec_undisturbed(k, outer)(s)
         &&& mirror_undeleted(k, outer)(s)
@@ -49,9 +49,9 @@ pub open spec fn outer_spec_stable(k: SyncKind, bs: Set<Binding>, outer: SyncedO
 
 // The premise of R2: R1's premise, and the outer copy's generation is
 // `outer.metadata.generation`, which the status R2 promises is stamped with.
-pub open spec fn outer_stable(k: SyncKind, bs: Set<Binding>, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn outer_stable(k: SyncKind, b: Binding, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& outer_spec_stable(k, bs, outer)(s)
+        &&& outer_spec_stable(k, b, outer)(s)
         &&& s.resources()[outer.object_ref()].metadata.generation == outer.metadata.generation
     }
 }
@@ -130,12 +130,12 @@ pub open spec fn spec_synced(k: SyncKind, outer: SyncedObjectView) -> StatePred<
 // its observed_generation is fixed by inner_caught_up) instead of assuming that
 // the inner implementation is live, so R2 does not depend on which implementation
 // runs in the inner cluster.
-pub open spec fn widget_status_eventually_mirrored(k: SyncKind, bs: Set<Binding>) -> TempPred<ClusterState> {
-    tla_forall(|i: (SyncedObjectView, SyncedStatusView)| widget_status_eventually_mirrored_per_cr(k, bs, i.0, i.1))
+pub open spec fn widget_status_eventually_mirrored(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|i: (SyncedObjectView, SyncedStatusView)| widget_status_eventually_mirrored_per_cr(k, b, i.0, i.1))
 }
 
-pub open spec fn widget_status_eventually_mirrored_per_cr(k: SyncKind, bs: Set<Binding>, outer: SyncedObjectView, settled: SyncedStatusView) -> TempPred<ClusterState> {
-    always(lift_state(outer_stable(k, bs, outer)).and(lift_state(inner_settled(k, outer, settled))))
+pub open spec fn widget_status_eventually_mirrored_per_cr(k: SyncKind, b: Binding, outer: SyncedObjectView, settled: SyncedStatusView) -> TempPred<ClusterState> {
+    always(lift_state(outer_stable(k, b, outer)).and(lift_state(inner_settled(k, outer, settled))))
         .leads_to(always(lift_state(status_synced(k, outer, settled))))
 }
 
@@ -175,7 +175,7 @@ pub open spec fn widget_mirrors_eventually_collected(k: SyncKind, b: Binding) ->
 }
 
 pub open spec fn widget_mirror_eventually_collected_per_object(k: SyncKind, b: Binding, key: ObjectRef, parent_uid: Uid, uid: Uid) -> TempPred<ClusterState> {
-    always(lift_state(parent_absent(k, b, key, parent_uid))).and(lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)))
+    always(lift_state(parent_absent(k, key, parent_uid))).and(lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)))
         .leads_to(lift_state(object_is_gone(key, uid)))
 }
 
@@ -197,15 +197,12 @@ pub open spec fn object_is_gone(key: ObjectRef, uid: Uid) -> StatePred<ClusterSt
 }
 
 // The outer copy a mirror at `key` would belong to is absent: no object with uid
-// `parent_uid` whose selector names this binding's inner cluster is at that key.
-// A parent that moved to another binding is absent for this one, which is what
-// keeps a janitor from holding on to a mirror the parent no longer wants.
-pub open spec fn parent_absent(k: SyncKind, b: Binding, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
+// `parent_uid` is at that key.
+pub open spec fn parent_absent(k: SyncKind, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let outer_key = outer_key_of(k, key);
         !(s.resources().contains_key(outer_key)
-            && s.resources()[outer_key].metadata.uid == Some(parent_uid)
-            && cluster_of_dynamic(k.selector, s.resources()[outer_key]) == Some(b.name))
+            && s.resources()[outer_key].metadata.uid == Some(parent_uid))
     }
 }
 
@@ -228,20 +225,19 @@ pub open spec fn mirror_collected(kind: Kind, key: ObjectRef, parent_uid: Uid) -
 // `key` points at it. R3 removes each such mirror object; R3s adds that the sync
 // reconciler stops creating them. It is part of the sync reconciler's ESR (which
 // has the janitors' ESRs as its liveness dependency).
-pub open spec fn widget_mirrors_stably_collected(k: SyncKind, bs: Set<Binding>) -> TempPred<ClusterState> {
-    tla_forall(|i: (Binding, ObjectRef, Uid)| widget_mirror_stably_collected_per_key(k, bs, i.0, i.1, i.2))
+pub open spec fn widget_mirrors_stably_collected(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|i: (ObjectRef, Uid)| widget_mirror_stably_collected_per_key(k, b, i.0, i.1))
 }
 
-pub open spec fn widget_mirror_stably_collected_per_key(k: SyncKind, bs: Set<Binding>, b: Binding, key: ObjectRef, parent_uid: Uid) -> TempPred<ClusterState> {
-    always(lift_state(bound_parent_absent(k, bs, b, key, parent_uid))).leads_to(always(lift_state(mirror_collected(inner_kind(k, b), key, parent_uid))))
+pub open spec fn widget_mirror_stably_collected_per_key(k: SyncKind, b: Binding, key: ObjectRef, parent_uid: Uid) -> TempPred<ClusterState> {
+    always(lift_state(bound_parent_absent(k, b, key, parent_uid))).leads_to(always(lift_state(mirror_collected(inner_kind(k, b), key, parent_uid))))
 }
 
-// R3s's premise: `key` is a mirror key of a bound binding whose parent is absent.
-pub open spec fn bound_parent_absent(k: SyncKind, bs: Set<Binding>, b: Binding, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
+// R3s's premise: `key` is a mirror key of this binding whose parent is absent.
+pub open spec fn bound_parent_absent(k: SyncKind, b: Binding, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& bs.contains(b)
         &&& key.kind == inner_kind(k, b)
-        &&& parent_absent(k, b, key, parent_uid)(s)
+        &&& parent_absent(k, key, parent_uid)(s)
     }
 }
 

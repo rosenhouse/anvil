@@ -295,6 +295,18 @@ impl SyncedStatus {
     }
 }
 
+impl SyncedStatus {
+    // Equality of the *view*: the two statuses have the same observedGeneration,
+    // the same conditions field by viewed field, and the same mirrored remainder.
+    // Trusted, like the accessors it is spelled out from.
+    #[verifier(external_body)]
+    pub fn eq(&self, other: &SyncedStatus) -> (b: bool)
+        ensures b == (self@ == other@),
+    {
+        Self::view_eq(&self.inner, &other.inner)
+    }
+}
+
 #[verifier(external)]
 impl SyncedStatus {
     // parse is the shape check of a status value, the exec twin of
@@ -320,6 +332,43 @@ impl SyncedStatus {
     pub fn as_json(&self) -> &serde_json::Value {
         &self.inner
     }
+
+    // The fields SyncedStatusView reads: observedGeneration, the five fields of
+    // each condition, and the remainder of the object.
+    fn view_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+        let og = |v: &serde_json::Value| v.get("observedGeneration").and_then(|x| x.as_i64());
+        if og(a) != og(b) {
+            return false;
+        }
+        let conditions = |v: &serde_json::Value| v.get("conditions").and_then(|x| x.as_array()).cloned();
+        match (conditions(a), conditions(b)) {
+            (None, None) => {}
+            (Some(ca), Some(cb)) => {
+                if ca.len() != cb.len() {
+                    return false;
+                }
+                let field = |c: &serde_json::Value, key: &str| c.get(key).and_then(|x| x.as_str()).map(|s| s.to_string());
+                let gen = |c: &serde_json::Value| c.get("observedGeneration").and_then(|x| x.as_i64());
+                for (x, y) in ca.iter().zip(cb.iter()) {
+                    if field(x, "type") != field(y, "type")
+                        || field(x, "status") != field(y, "status")
+                        || gen(x) != gen(y)
+                        || field(x, "reason") != field(y, "reason")
+                        || field(x, "message") != field(y, "message") {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+        let rest = |v: &serde_json::Value| {
+            let mut o = v.as_object().cloned().unwrap_or_default();
+            o.remove("observedGeneration");
+            o.remove("conditions");
+            o
+        };
+        rest(a) == rest(b)
+    }
 }
 
 #[verifier(external)]
@@ -336,6 +385,25 @@ pub fn marshal_status(status: Option<SyncedStatus>) -> (v: RawValue)
     match status {
         Some(s) => RawValue { inner: s.inner },
         None => RawValue { inner: serde_json::Value::Null },
+    }
+}
+
+// The cluster name the selector picks off a stored object, whatever its shape:
+// the exec twin of spec::cluster_of_dynamic, for a controller that scans a List
+// response. Trusted, and reading the same two places as SyncedObject::cluster_of.
+#[verifier(external_body)]
+pub fn cluster_of_dynamic(selector: &ClusterSelectorExec, obj: &DynamicObject) -> (res: Option<String>)
+    ensures res.deep_view() == spec::cluster_of_dynamic(selector@, obj@),
+{
+    match selector {
+        ClusterSelectorExec::Name => obj.as_kube_ref().metadata.name.clone(),
+        ClusterSelectorExec::Field(path) => {
+            let mut cur = obj.as_kube_ref().data.get("spec")?;
+            for key in path.iter() {
+                cur = cur.get(key)?;
+            }
+            cur.as_str().map(|s| s.to_string())
+        }
     }
 }
 
@@ -418,6 +486,27 @@ impl SyncedObject {
         let inner = obj.into_kube();
         SyncedStatus::parse(inner.data.get("status"))?;
         Ok(SyncedObject { inner, cluster: cluster.clone(), api_resource: entry.kube_api_resource().clone() })
+    }
+
+    // A new object of the entry's kind in `cluster`, with this metadata and spec
+    // and no status: what a controller builds when it creates an object of a kind
+    // it was given at boot. Trusted like unmarshal, and the counterpart of the
+    // typed wrappers' default().
+    #[verifier(external_body)]
+    pub fn new(entry: &RegistryEntry, cluster: &ClusterId, metadata: ObjectMeta, spec: RawValue) -> (o: SyncedObject)
+        ensures o@ == (SyncedObjectView {
+            kind: model_kind(entry@, cluster@),
+            metadata: metadata@,
+            spec: spec@,
+            status: None,
+        }),
+    {
+        let api_resource = entry.kube_api_resource().clone();
+        let mut inner = kube::api::DynamicObject::new("", &api_resource);
+        inner.metadata = metadata.into_kube();
+        inner.data = serde_json::Value::Object(serde_json::Map::new());
+        set_data_member(&mut inner, "spec", spec.inner);
+        SyncedObject { inner, cluster: cluster.clone(), api_resource }
     }
 
     #[verifier(external_body)]

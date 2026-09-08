@@ -77,6 +77,24 @@ pub proof fn lemma_outer_kind_is_not_any_inner(k: SyncKind)
     }
 }
 
+// Two bindings of the same namespace with distinct cluster names give distinct
+// mirror kinds, by cancelling the common prefix; no assumption about the names.
+pub proof fn lemma_inner_kind_same_namespace_injective(k: SyncKind, ns: StringView, c1: StringView, c2: StringView)
+    requires inner_kind(k, ClusterRefView { namespace: ns, name: c1 }) == inner_kind(k, ClusterRefView { namespace: ns, name: c2 }),
+    ensures c1 == c2,
+{
+    let p = k.name + at_sign() + ns + slash();
+    assert(remote_kind_name(k.name, ClusterRefView { namespace: ns, name: c1 }) =~= p + c1);
+    assert(remote_kind_name(k.name, ClusterRefView { namespace: ns, name: c2 }) =~= p + c2);
+    assert(c1 =~= c2) by {
+        assert((p + c1).len() == (p + c2).len());
+        assert forall |i: int| 0 <= i < c1.len() implies c1[i] == c2[i] by {
+            assert((p + c1)[p.len() + i] == c1[i]);
+            assert((p + c2)[p.len() + i] == c2[i]);
+        }
+    }
+}
+
 // Distinct bindings give distinct mirror kinds.
 pub proof fn lemma_inner_kind_injective(k: SyncKind, b1: Binding, b2: Binding)
     requires
@@ -319,13 +337,19 @@ pub open spec fn error_reason(err: APIError, answering_create: bool) -> FailureR
 // The mirror relation between an outer copy and an inner object.
 // ---------------------------------------------------------------------------
 
+// The name an object that selects no inner cluster is treated as naming, so that
+// binding_of is total and the exec reconciler can compute it. The reconcile
+// reports Rejected and ends before it ever sends a request to such a binding.
+pub open spec fn no_cluster_name() -> StringView { ""@ }
+
 // The binding of `outer`: its namespace and the cluster its selector names.
-// Read only where cluster_of(k.selector, outer) is Some; the reconcile reports
-// Rejected and ends when it is None.
 pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
     ClusterRefView {
         namespace: outer.metadata.namespace->0,
-        name: cluster_of(k.selector, outer)->0,
+        name: match cluster_of(k.selector, outer) {
+            Some(c) => c,
+            None => no_cluster_name(),
+        },
     }
 }
 
