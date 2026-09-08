@@ -75,9 +75,21 @@ pub const CLAIM_OWNER_KEY: &str = "owner";
 pub const CLAIM_NAMESPACE_KEY: &str = "namespace";
 pub const CLAIM_CLUSTER_NAME_KEY: &str = "clusterName";
 
-// A bound binding is re-checked (access and claim) this often, so that releasing
-// a claim by hand recovers a refused binding without a restart.
+// A refused binding is re-checked (access and claim) this often, so that
+// releasing a claim by hand, or fixing a credential's RBAC, recovers it without
+// a restart. It is the slow interval: a refused binding sends no request of its
+// own, so nothing about it is urgent.
 pub const RECHECK_INTERVAL: Duration = Duration::from_secs(300);
+
+// A bound binding is re-checked this often. It is the faster of the two because
+// it is the case where something can be wrong without anyone noticing: the
+// claim of a bound binding is the process's evidence that no other binding
+// holds its inner cluster, and a claim that was deleted (or taken over) is not
+// otherwise reported by anything -- no request fails, no condition changes.
+// Every re-check is two SelfSubjectAccessReviews per kind and verb plus a
+// create and a get, so a minute is a bound on the noise as much as on the
+// staleness.
+pub const BOUND_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
 // A binding whose inner cluster did not answer is retried after BACKOFF_START,
 // doubling to at most BACKOFF_MAX.
@@ -660,9 +672,17 @@ impl BindingManager {
     // (BindingRecord::begin_attempt), so a cluster that never answers costs one
     // task, not one per tick.
     async fn start_attempt(&mut self, binding: &ClusterRef) {
-        let (kubeconfig, needs_clients, epoch) = match self.bindings.get_mut(binding) {
+        let (kubeconfig, needs_clients, epoch, held_claim) = match self.bindings.get_mut(binding) {
             Some(record) => match record.begin_attempt() {
-                Some(epoch) => (record.kubeconfig.clone(), record.needs_clients, epoch),
+                // A bound binding held the claim when it was last looked at, so
+                // a re-check that has to create it again, or finds another
+                // holder, is interference and is logged as such.
+                Some(epoch) => (
+                    record.kubeconfig.clone(),
+                    record.needs_clients,
+                    epoch,
+                    record.state == RecordState::Bound,
+                ),
                 None => {
                     debug!("binding {}: an attempt is already running; not starting another", label(binding));
                     return;
@@ -689,7 +709,7 @@ impl BindingManager {
             // retried with backoff.
             let outcome = match tokio::time::timeout(
                 ATTEMPT_TIMEOUT,
-                attempt(&binding, &kubeconfig, registered, &kinds, &verbs, &owner, request_timeout),
+                attempt(&binding, &kubeconfig, registered, &kinds, &verbs, &owner, request_timeout, held_claim),
             )
             .await
             {
@@ -748,7 +768,7 @@ impl BindingManager {
                 record.needs_clients = false;
                 record.refusal_logged = false;
                 record.backoff.reset();
-                record.due_at = Some(Instant::now() + RECHECK_INTERVAL);
+                record.due_at = Some(Instant::now() + BOUND_RECHECK_INTERVAL);
                 was
             }
             None => return,
@@ -916,6 +936,7 @@ async fn attempt(
     verbs: &[String],
     owner: &str,
     request_timeout: Duration,
+    held_claim: bool,
 ) -> AttemptOutcome {
     let clients = match registered {
         Some(clients) => clients,
@@ -942,7 +963,7 @@ async fn attempt(
         }
         Ok(_) => {}
     }
-    match check_claim(&clients.requests, binding, owner).await {
+    match check_claim(&clients.requests, binding, owner, held_claim).await {
         Err(e) => AttemptOutcome::Unreachable(format!("its claim could not be settled: {}", e)),
         Ok(Some(holder)) => {
             AttemptOutcome::Refused(clients, format!("its inner cluster is claimed by {}", holder.holder()))
@@ -1050,14 +1071,31 @@ async fn allowed(client: &Client, namespace: &str, group: &str, resource: &str, 
 /// claim (a first contact, a restart, a re-created Secret); `Ok(Some(claim))` is
 /// a cluster claimed by someone else, which the caller refuses
 /// (doc/widget_sync_fanout_design.md, section 1.3).
+/// `held_before` says this binding held the claim at the last check, which is
+/// what makes the two interesting cases reportable: a claim that is gone and
+/// has to be created again (someone deleted it in the inner cluster), and a
+/// claim that now names someone else (someone took the cluster). Both are
+/// evidence of interference with an assumption the proofs rest on, and neither
+/// shows up anywhere else -- no request fails and no condition changes -- so
+/// each is logged at warn.
 pub async fn check_claim(
     client: &Client,
     binding: &ClusterRef,
     outer_cluster_id: &str,
+    held_before: bool,
 ) -> std::result::Result<Option<Claim>, kube::Error> {
     let claims: Api<ConfigMap> = Api::namespaced(client.clone(), CLAIM_NAMESPACE);
     let want = Claim::of(outer_cluster_id, binding);
     match claims.create(&PostParams::default(), &want.config_map()).await {
+        Ok(_) if held_before => {
+            warn!(
+                "binding {}: its claim was gone and has been created again ({}). Someone removed \
+                 {}/{} in its inner cluster; while it was gone another binding could have claimed \
+                 the cluster.",
+                label(binding), want.holder(), CLAIM_NAMESPACE, CLAIM_NAME
+            );
+            Ok(None)
+        }
         Ok(_) => {
             info!("binding {}: claimed its inner cluster ({})", label(binding), want.holder());
             Ok(None)
@@ -1067,6 +1105,13 @@ pub async fn check_claim(
             if held == want {
                 Ok(None)
             } else {
+                if held_before {
+                    warn!(
+                        "binding {}: its claim now names {}; its inner cluster has been taken by \
+                         another binding since the last check",
+                        label(binding), held.holder()
+                    );
+                }
                 Ok(Some(held))
             }
         }

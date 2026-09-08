@@ -268,7 +268,7 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 | present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; it is retried when the Secret changes |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
 | present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
-| present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it |
+| present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it; its access and its claim are re-checked every minute |
 
 A changed Secret (a rotated credential; Cluster API rewrites the Secret)
 rebuilds the binding's clients and restarts its janitors, with no restart of
@@ -349,8 +349,30 @@ kubectl --context kind-widget-sync-inner-a -n kube-system get configmap anvil-sy
 kubectl --context kind-widget-sync-inner-a -n kube-system delete configmap anvil-sync-claim
 ```
 
-The next re-check, at most five minutes later or at once if the binding's
-Secret is touched, claims it for the binding that is still there.
+The next re-check, at most five minutes later for a refused binding — or at
+once if its Secret's `value` changes — claims it for the binding that is still
+there.
+
+**The claim is re-checked.** A *bound* binding re-runs its access check and its
+claim every **60 seconds**; a *refused* one every **300**. The bound case is the
+faster of the two because it is the one nothing else would report: no request
+fails and no condition changes when a claim is deleted or taken over in an
+inner cluster, and the claim is this process's only evidence that no second
+binding is writing the same mirrors. Both cases are logged at warn, once each
+time they happen:
+
+```
+WARN binding default/a: its claim was gone and has been created again (owner="7f3c…" binding=default/a).
+     Someone removed kube-system/anvil-sync-claim in its inner cluster; while it was gone another
+     binding could have claimed the cluster.
+WARN binding default/a: its claim now names owner="7f3c…" binding=tenant/a; its inner cluster has
+     been taken by another binding since the last check
+```
+
+The second is followed by the refusal: the binding stops its janitors and its
+objects report `Synced=False/Forbidden`. Which binding wins a contested
+re-claim is whichever one asked first — re-creating the claim does not take a
+cluster back from a binding that already holds it.
 
 **The outer cluster id** is the uid of the outer cluster's `kube-system`
 namespace, read once at boot: the de facto stable identity of a cluster.
