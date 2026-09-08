@@ -170,13 +170,19 @@ them:
 | every other status field | mirrored verbatim inner to outer while `Synced` | none |
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
-A status (or a `conditions` item) declared with
-`x-kubernetes-preserve-unknown-fields` passes the rows it does not declare;
-what it does declare is still checked, since a declared string
-`observedGeneration` would reject the integer the controller writes. Anything
-outside the table is opaque: `Gadget`'s `spec.size` is copied without the
+The fields in the table must be **declared, with these types**, even on a
+status (or a `conditions` item) that carries
+`x-kubernetes-preserve-unknown-fields`. That setting makes the API server keep
+a field it does not know; it does not make it check one. The controller — and
+the model it is verified against — takes every stored status to be of this
+shape, and the only thing that holds another writer to it is the CRD's own
+schema: an undeclared `observedGeneration` accepts the string `"three"`, and
+then the mirror's status cannot be read at all. Anything *outside* the table is
+opaque and needs no declaration: `Gadget`'s `spec.size` is copied without the
 controller knowing it exists, and its `status.observedSize` comes back on the
-outer copy as part of the mirrored remainder.
+outer copy as part of the mirrored remainder;
+`x-kubernetes-preserve-unknown-fields` on the status is how a CRD keeps such a
+remainder it does not declare.
 
 Inner clusters are not checked for schema parity beyond serving the kind;
 parity stays an operational assumption. So does this, for now: **fields are

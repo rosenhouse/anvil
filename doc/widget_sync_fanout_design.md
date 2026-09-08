@@ -202,8 +202,12 @@ The controller reads and writes exactly these fields of an object:
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
 At boot the controller fetches each kind's CRD in the outer cluster and
-checks the table. A CRD whose status is `x-kubernetes-preserve-unknown-fields`
-passes the status rows. A kind that fails any row is refused with a usage
+checks the table. The status rows are required as declarations of those
+types even on a status that carries `x-kubernetes-preserve-unknown-fields`:
+that setting keeps a field the API server does not know, it does not check
+it, and the installed type of the kind (section 2.3) says that every stored
+status unmarshals — which, for what other writers store, only the CRD's
+schema makes true. A kind that fails any row is refused with a usage
 error naming the row. Inner clusters are not checked for schema parity
 beyond serving the kind with the status subresource (discovery at bind
 time); parity stays an operational assumption, as today.

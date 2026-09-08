@@ -19,10 +19,12 @@
 //                          holds it or on spec (has_immutability_rule), in
 //                          every served version of the CRD and not only in the
 //                          configured one
-// A status (or a conditions item) with x-kubernetes-preserve-unknown-fields
-// passes the rows for the fields it does not declare; the ones it declares
-// must still have the right type, since a declared string would reject the
-// controller's integer.
+// x-kubernetes-preserve-unknown-fields does not excuse a status (or a
+// conditions item) from declaring these fields: it makes the API server keep
+// what it does not know, not check it, and what makes "every stored status
+// unmarshals" -- the model's installed type -- true of what other writers store
+// is the CRD's schema. The rest of a status is opaque and needs no declaration;
+// preserve-unknown-fields is how a CRD keeps it.
 use crate::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
     CustomResourceDefinition, JSONSchemaProps, JSONSchemaPropsOrArray,
@@ -150,21 +152,24 @@ fn is_required(schema: &JSONSchemaProps, name: &str) -> bool {
     schema.required.as_ref().is_some_and(|r| r.iter().any(|n| n == name))
 }
 
-fn preserves_unknown_fields(schema: &JSONSchemaProps) -> bool {
-    schema.x_kubernetes_preserve_unknown_fields == Some(true)
-}
-
 fn type_of(schema: &JSONSchemaProps) -> &str {
     schema.type_.as_deref().unwrap_or("(untyped)")
 }
 
-// A field of `parent` named `name` must have type `expected`; when the parent
-// preserves unknown fields the field may also be absent.
+// A field of `parent` named `name` must be declared with type `expected`.
+//
+// `x-kubernetes-preserve-unknown-fields` on the parent is not an excuse for
+// leaving it out: it only makes the API server keep a field it does not know,
+// it does not make the server check its type. The model's installed type says
+// that every stored status unmarshals -- observedGeneration an integer,
+// conditions a list of conditions -- and the only thing that makes that true of
+// what other writers store is the CRD's own schema. An undeclared
+// observedGeneration accepts the string "three", which the controller would
+// then fail to unmarshal.
 fn check_typed_field(parent: &JSONSchemaProps, name: &str, expected: &str) -> Result<(), String> {
     match property(parent, name) {
         Some(field) if type_of(field) == expected => Ok(()),
         Some(field) => Err(format!("{} has type {}, must be {}", name, type_of(field), expected)),
-        None if preserves_unknown_fields(parent) => Ok(()),
         None => Err(format!("{} is not declared", name)),
     }
 }
@@ -189,7 +194,6 @@ fn check_status(schema: &JSONSchemaProps, errors: &mut Vec<ShapeError>) {
 fn check_conditions(status: &JSONSchemaProps) -> Result<(), String> {
     let conditions = match property(status, "conditions") {
         Some(c) => c,
-        None if preserves_unknown_fields(status) => return Ok(()),
         None => return Err("conditions is not declared".to_string()),
     };
     if type_of(conditions) != "array" {
@@ -605,25 +609,37 @@ mod tests {
         );
     }
 
+    // preserve-unknown-fields keeps a field the API server does not know; it
+    // does not check its type, so it does not stand in for declaring the fields
+    // the controller reads and writes. Their absence is a failing row wherever
+    // it appears.
     #[test]
-    fn a_preserve_unknown_fields_status_passes_the_status_rows() {
+    fn a_preserve_unknown_fields_status_must_still_declare_the_fields() {
         let status = json!({ "type": "object", "x-kubernetes-preserve-unknown-fields": true });
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
-        assert_eq!(check_shape(&crd, &by_field()), Ok(()));
+        let errors = check_shape(&crd, &by_field()).unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                ShapeError::StatusObservedGeneration("observedGeneration is not declared".to_string()),
+                ShapeError::StatusConditions("conditions is not declared".to_string()),
+            ]
+        );
 
-        // Declared fields are still checked: a string observedGeneration would
-        // reject the controller's integer.
+        // Declared with the wrong type is refused as it was: a string
+        // observedGeneration would reject the controller's integer.
         let status = json!({
             "type": "object", "x-kubernetes-preserve-unknown-fields": true,
             "properties": { "observedGeneration": { "type": "string" } }
         });
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
         let errors = check_shape(&crd, &by_field()).unwrap_err();
-        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert_eq!(errors.len(), 2, "{:?}", errors);
         assert!(matches!(errors[0], ShapeError::StatusObservedGeneration(_)), "{:?}", errors);
 
-        // So is a conditions item that preserves unknown fields but declares
-        // only type and status.
+        // A conditions item that preserves unknown fields but declares only
+        // type and status: the fields the controller reads off a condition are
+        // still required.
         let status = json!({
             "type": "object",
             "properties": {
@@ -636,6 +652,15 @@ mod tests {
                 } }
             }
         });
+        let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
+        let errors = check_shape(&crd, &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].to_string().contains("reason is not declared"), "{}", errors[0]);
+
+        // The whole status declared, with preserve-unknown-fields for the rest
+        // the controller mirrors verbatim, passes.
+        let mut status = widget_status();
+        status["x-kubernetes-preserve-unknown-fields"] = json!(true);
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
         assert_eq!(check_shape(&crd, &by_field()), Ok(()));
     }
