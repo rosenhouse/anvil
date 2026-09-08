@@ -112,6 +112,21 @@ pub uninterp spec fn unmarshal_status(v: Value) -> Result<Option<SyncedStatusVie
 
 pub uninterp spec fn marshal_status(s: Option<SyncedStatusView>) -> Value;
 
+// Whether a value is one a status's `rest` may be: the marshalled form of an
+// object that carries neither `observedGeneration` nor `conditions`, since a
+// status keeps those two apart from the remainder. Uninterpreted, and trusted
+// in the same way unmarshal_status is: what makes it true of a value is the
+// exec side, where `SyncedStatus::rest()` produces exactly such a value (it is
+// the status without those two members) and `RawValue::empty_rest()` produces
+// the empty object.
+//
+// It is the precondition of SyncedStatus::new, whose postcondition says the
+// view's rest is the value it was given: for a value that carried an
+// `observedGeneration` of its own there is no status of which that is true, so
+// without this the constructor's contract was one no implementation could
+// keep -- and a contract that cannot be kept proves anything.
+pub uninterp spec fn status_rest_ok(v: Value) -> bool;
+
 #[verifier(external_body)]
 pub proof fn marshal_status_preserves_integrity()
     ensures forall |s: Option<SyncedStatusView>| unmarshal_status(#[trigger] marshal_status(s)) == Ok::<Option<SyncedStatusView>, UnmarshalError>(s),

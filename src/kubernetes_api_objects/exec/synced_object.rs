@@ -52,6 +52,16 @@ impl RawValue {
         self.inner == other.inner
     }
 
+    // The remainder of a status that has none: the empty object, which carries
+    // neither of the two members a status keeps apart from its rest. It is what
+    // a status the outer copy has never carried is built from.
+    #[verifier(external_body)]
+    pub fn empty_rest() -> (rest: RawValue)
+        ensures spec::status_rest_ok(rest@),
+    {
+        RawValue { inner: serde_json::Value::Object(serde_json::Map::new()) }
+    }
+
     // The string at `path` (a sequence of object keys from the root of the
     // value), None if the path does not lead to a string. The exec twin of
     // spec::spec_field.
@@ -252,10 +262,21 @@ impl std::clone::Clone for SyncedStatus {
 }
 
 impl SyncedStatus {
-    // new builds a status from its three parts. An observedGeneration or
-    // conditions member of `rest` is dropped: the view's rest never holds them.
+    // new builds a status from its three parts: the explicit fields, written
+    // over the mirrored remainder.
+    //
+    // `rest` must be a remainder (`status_rest_ok`): the value another status's
+    // rest() gave, or empty_rest(). That is a precondition and not something
+    // the body arranges, because the postcondition says the view's rest is the
+    // value it was given -- for a value carrying an `observedGeneration` of its
+    // own there is no status of which that is true, whatever the body does with
+    // it. (The body used to strip those two members, which made the
+    // postcondition false rather than making it true.) The two callers pass a
+    // rest() or an empty_rest(): widget_sync_controller's outer_status_for, and
+    // the tests below.
     #[verifier(external_body)]
     pub fn new(observed_generation: Option<i64>, conditions: Option<Vec<SyncedCondition>>, rest: RawValue) -> (s: SyncedStatus)
+        requires spec::status_rest_ok(rest@),
         ensures s@ == (SyncedStatusView {
             observed_generation: opt_i64_as_int(observed_generation),
             conditions: conditions.deep_view(),
@@ -264,10 +285,10 @@ impl SyncedStatus {
     {
         let mut object = match rest.inner {
             serde_json::Value::Object(o) => o,
+            // Outside the precondition; the fields the postcondition names are
+            // kept authoritative rather than a value that is no remainder.
             _ => serde_json::Map::new(),
         };
-        object.remove("observedGeneration");
-        object.remove("conditions");
         if let Some(g) = observed_generation {
             object.insert("observedGeneration".to_string(), serde_json::json!(g));
         }
@@ -293,10 +314,14 @@ impl SyncedStatus {
         })
     }
 
-    // The mirrored remainder: the status without observedGeneration and conditions.
+    // The mirrored remainder: the status without observedGeneration and
+    // conditions, which is what makes it a `status_rest_ok` value and so an
+    // argument SyncedStatus::new accepts.
     #[verifier(external_body)]
     pub fn rest(&self) -> (rest: RawValue)
-        ensures rest@ == self@.rest,
+        ensures
+            rest@ == self@.rest,
+            spec::status_rest_ok(rest@),
     {
         let mut object = self.inner.as_object().cloned().unwrap_or_default();
         object.remove("observedGeneration");
@@ -736,10 +761,17 @@ mod tests {
         assert_eq!(edited_status.observed_generation(), Some(7));
         assert_eq!(edited_status.conditions().unwrap().len(), 1);
         assert_eq!(edited_status.rest().as_json(), s.rest().as_json());
-        let stripped = SyncedStatus::new(None, None, RawValue::from_json(json!({"observedGeneration": 9, "conditions": [], "x": 1})));
-        assert_eq!(stripped.as_json(), &json!({"x": 1}));
-        assert_eq!(stripped.observed_generation(), None);
-        assert!(stripped.conditions().is_none());
+        // A status of the explicit fields alone: empty_rest() is the remainder
+        // of a status that carries nothing else, and the fields are written
+        // over it.
+        let bare = SyncedStatus::new(None, None, RawValue::empty_rest());
+        assert_eq!(bare.as_json(), &json!({}));
+        assert_eq!(bare.observed_generation(), None);
+        assert!(bare.conditions().is_none());
+        assert_eq!(bare.rest().as_json(), &json!({}));
+        let generation_only = SyncedStatus::new(Some(9), None, RawValue::empty_rest());
+        assert_eq!(generation_only.as_json(), &json!({"observedGeneration": 9}));
+        assert_eq!(generation_only.rest().as_json(), &json!({}));
     }
 
     #[test]
