@@ -79,6 +79,27 @@ macro_rules! implement_object_wrapper_type {
                 DynamicObject::from_kube_in(k8s_openapi::serde_json::from_str(&k8s_openapi::serde_json::to_string(&self.inner).unwrap()).unwrap(), $cluster)
             }
 
+            // Whether obj has this wrapper's view kind: it carries the wrapper's
+            // cluster tag and the kube kind of the wrapped type. This is the exec
+            // counterpart of `obj@.kind == $vt::kind()`. DynamicObject::kind() is
+            // not: it reports the API server's kind string, which for a custom
+            // resource (`Widget`) differs from the model kind (`widget`,
+            // `widget@inner`) and is undefined for a list item without type
+            // metadata. Trusted like unmarshal(), with which it agrees: an object
+            // that unmarshals has this kind.
+            #[verifier(external_body)]
+            pub fn has_kind(obj: &DynamicObject) -> (b: bool)
+                ensures b == (obj@.kind == $vt::kind()),
+            {
+                if !obj.cluster().eq(&$cluster) {
+                    return false;
+                }
+                match obj.as_kube_ref().types.as_ref() {
+                    Some(types) => types.kind == <$it as kube::Resource>::kind(&()),
+                    None => false,
+                }
+            }
+
             #[verifier(external_body)]
             pub fn unmarshal(obj: DynamicObject) -> (res: Result<$t, UnmarshalError>)
                 ensures

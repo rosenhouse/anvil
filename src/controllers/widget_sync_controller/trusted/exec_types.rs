@@ -215,3 +215,28 @@ impl WidgetStatus {
 }
 
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::kubernetes_api_objects::exec::dynamic::DynamicObject;
+
+    fn widget(kind: Option<&str>, cluster: ClusterId) -> DynamicObject {
+        let mut obj = kube::api::DynamicObject::new("w", &kube::api::ApiResource::erase::<crate::crds::Widget>(&()));
+        obj.types = kind.map(|k| kube::api::TypeMeta { api_version: "anvil.dev/v1".to_string(), kind: k.to_string() });
+        DynamicObject::from_kube_in(obj, cluster)
+    }
+
+    // The kind test follows the cluster tag and the kube kind, never the model
+    // kind string, and does not panic on a list item without type metadata.
+    #[test]
+    fn has_kind_follows_tag_and_kube_kind() {
+        assert!(OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
+        assert!(!OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
+        assert!(InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
+        assert!(!InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
+        assert!(!OuterWidget::has_kind(&widget(Some("widget"), ClusterId::Primary)));
+        assert!(!OuterWidget::has_kind(&widget(Some("Pod"), ClusterId::Primary)));
+        assert!(!OuterWidget::has_kind(&widget(None, ClusterId::Primary)));
+    }
+}

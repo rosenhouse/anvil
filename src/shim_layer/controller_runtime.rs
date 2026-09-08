@@ -487,11 +487,21 @@ where
                                     log_request_failure(&log_header, "List", cluster, &key, &err);
                                 }
                                 Ok(obj_list) => {
+                                    // Items of a list carry no apiVersion/kind of their own;
+                                    // stamp them from the resource listed so that every
+                                    // DynamicObject the reconcilers see names its kind.
+                                    let listed = list_req.api_resource.as_kube_ref();
+                                    let types = kube::api::TypeMeta { api_version: listed.api_version.clone(), kind: listed.kind.clone() };
                                     kube_resp = KubeAPIResponse::ListResponse(KubeListResponse {
                                         res: Ok(obj_list
                                             .items
                                             .into_iter()
-                                            .map(|obj| DynamicObject::from_kube_in(obj, cluster))
+                                            .map(|mut obj| {
+                                                if obj.types.is_none() {
+                                                    obj.types = Some(types.clone());
+                                                }
+                                                DynamicObject::from_kube_in(obj, cluster)
+                                            })
                                             .collect()),
                                     });
                                     info!("{} List {} done", log_header, key);
