@@ -1204,6 +1204,8 @@ pub fn kube_error_to_api_error(error: &kube::Error) -> APIError {
                 APIError::BadRequest
             } else if &error_resp.reason == "Conflict" {
                 APIError::Conflict
+            } else if &error_resp.reason == "Forbidden" {
+                APIError::Forbidden
             } else if &error_resp.reason == "Invalid" {
                 APIError::Invalid
             } else if &error_resp.reason == "InternalError" {
@@ -1216,6 +1218,9 @@ pub fn kube_error_to_api_error(error: &kube::Error) -> APIError {
                 APIError::Other
             }
         }
+        // The request got no answer: the connection failed or the client's request
+        // timeout fired, which is what a partition from a remote cluster looks like.
+        kube::Error::HyperError(_) | kube::Error::Service(_) => APIError::Timeout,
         _ => APIError::Other,
     }
 }

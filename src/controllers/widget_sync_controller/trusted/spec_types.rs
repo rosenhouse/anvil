@@ -148,6 +148,53 @@ pub open spec fn reason_stale_mirror() -> StringView { "StaleMirror"@ }
 pub open spec fn reason_inner_terminating() -> StringView { "InnerTerminating"@ }
 pub open spec fn reason_synced() -> StringView { "Synced"@ }
 
+// Why a request of the reconcile failed, as reported in the Synced condition
+// before the reconcile ends in Error.
+pub enum FailureReasonView {
+    // An authorization error in the inner cluster.
+    Forbidden,
+    // A timeout or a server-side failure: the inner cluster is not answering.
+    InnerUnreachable,
+    // NotFound answering the Create of the mirror: the inner namespace is missing.
+    CreateFailed,
+    // The request was rejected as invalid.
+    Rejected,
+    // Anything else.
+    RequestFailed,
+}
+
+impl FailureReasonView {
+    pub open spec fn reason(self) -> StringView {
+        match self {
+            FailureReasonView::Forbidden => "Forbidden"@,
+            FailureReasonView::InnerUnreachable => "InnerUnreachable"@,
+            FailureReasonView::CreateFailed => "CreateFailed"@,
+            FailureReasonView::Rejected => "Rejected"@,
+            FailureReasonView::RequestFailed => "RequestFailed"@,
+        }
+    }
+}
+
+// The reason reported for an error response. `answering_create` says whether the
+// failed request was the Create of the mirror, the one request for which NotFound
+// has a meaning of its own (the namespace is missing); a NotFound answering a
+// Patch says the mirror vanished since it was read, which the next reconcile
+// recovers from. A failed JSON patch test is also answered with Invalid, so
+// Rejected can follow a race on the mirror; the next reconcile clears it.
+pub open spec fn error_reason(err: APIError, answering_create: bool) -> FailureReasonView {
+    match err {
+        APIError::Forbidden => FailureReasonView::Forbidden,
+        APIError::Timeout => FailureReasonView::InnerUnreachable,
+        APIError::ServerTimeout => FailureReasonView::InnerUnreachable,
+        APIError::InternalError => FailureReasonView::InnerUnreachable,
+        APIError::ObjectNotFound => if answering_create { FailureReasonView::CreateFailed } else { FailureReasonView::RequestFailed },
+        APIError::Invalid => FailureReasonView::Rejected,
+        APIError::BadRequest => FailureReasonView::Rejected,
+        APIError::NotSupported => FailureReasonView::Rejected,
+        _ => FailureReasonView::RequestFailed,
+    }
+}
+
 // The two copies as view types. They differ only in kind().
 
 pub struct OuterWidgetView {

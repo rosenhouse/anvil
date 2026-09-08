@@ -90,6 +90,24 @@ pub open spec fn write_outer_status_or_done(outer: OuterWidgetView, status: Widg
     }
 }
 
+// The status that reports the failure of a request answered with `err`: the
+// mirrored fields as previously reported, Synced=False with the reason of the
+// error, stamped with the snapshot's generation.
+pub open spec fn failure_status(outer: OuterWidgetView, err: APIError, answering_create: bool) -> WidgetStatusView {
+    outer_status_without_inner(outer.metadata.generation, outer.status, error_reason(err, answering_create).reason())
+}
+
+// Report a failed request in the outer status, then end in Error: write `status`
+// unless the outer copy already has it. The write is not retried if it fails, and
+// the reconcile ends in Error either way, so the shim requeues it.
+pub open spec fn report_error(outer: OuterWidgetView, status: WidgetStatusView) -> (WidgetSyncReconcileState, Option<RequestView<VoidEReqView>>) {
+    if outer.status == Some(status) {
+        (at_step(WidgetSyncStepView::Error), None)
+    } else {
+        (at_step(WidgetSyncStepView::AfterReportError), Some(RequestView::KRequest(APIRequest::PatchStatusRequest(outer_status_patch(outer, status)))))
+    }
+}
+
 pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetSyncReconcileState) -> (WidgetSyncReconcileState, Option<RequestView<VoidEReqView>>) {
     let error = (at_step(WidgetSyncStepView::Error), None::<RequestView<VoidEReqView>>);
     let done = (at_step(WidgetSyncStepView::Done), None::<RequestView<VoidEReqView>>);
@@ -112,7 +130,8 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                         });
                         (at_step(WidgetSyncStepView::AfterCreateInner), Some(RequestView::KRequest(req)))
                     } else {
-                        error
+                        // The Get failed: report why, then requeue.
+                        report_error(outer, failure_status(outer, res->Err_0, false))
                     }
                 } else {
                     let unmarshalled = InnerWidgetView::unmarshal(res->Ok_0);
@@ -147,17 +166,29 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
             }
         },
         WidgetSyncStepView::AfterCreateInner => {
-            if is_some_k_create_resp_view(resp_o) && extract_some_k_create_resp_view(resp_o) is Ok {
-                done
-            } else {
+            if !is_some_k_create_resp_view(resp_o) {
                 error
+            } else {
+                let res = extract_some_k_create_resp_view(resp_o);
+                if res is Ok {
+                    done
+                } else {
+                    // The Create failed: report why, then requeue.
+                    report_error(outer, failure_status(outer, res->Err_0, true))
+                }
             }
         },
         WidgetSyncStepView::AfterPatchInner => {
-            if is_some_k_patch_resp_view(resp_o) && extract_some_k_patch_resp_view(resp_o) is Ok {
-                done
-            } else {
+            if !is_some_k_patch_resp_view(resp_o) {
                 error
+            } else {
+                let res = extract_some_k_patch_resp_view(resp_o);
+                if res is Ok {
+                    done
+                } else {
+                    // The Patch failed: report why, then requeue.
+                    report_error(outer, failure_status(outer, res->Err_0, false))
+                }
             }
         },
         WidgetSyncStepView::AfterPatchOuterStatus => {
@@ -167,6 +198,9 @@ pub open spec fn reconcile_core(outer: OuterWidgetView, resp_o: Option<ResponseV
                 error
             }
         },
+        // The status write that reported a failure is not retried: whatever its
+        // answer, the reconcile ends in Error and is requeued.
+        WidgetSyncStepView::AfterReportError => error,
         _ => (state, None),
     }
 }

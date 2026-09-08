@@ -9,6 +9,8 @@ pub enum WidgetSyncStep {
     AfterCreateInner,
     AfterPatchInner,
     AfterPatchOuterStatus,
+    // After the status write that reports a failed request; ends in Error.
+    AfterReportError,
     Done,
     Error,
 }
@@ -31,6 +33,7 @@ impl View for WidgetSyncStep {
             WidgetSyncStep::AfterCreateInner => WidgetSyncStepView::AfterCreateInner,
             WidgetSyncStep::AfterPatchInner => WidgetSyncStepView::AfterPatchInner,
             WidgetSyncStep::AfterPatchOuterStatus => WidgetSyncStepView::AfterPatchOuterStatus,
+            WidgetSyncStep::AfterReportError => WidgetSyncStepView::AfterReportError,
             WidgetSyncStep::Done => WidgetSyncStepView::Done,
             WidgetSyncStep::Error => WidgetSyncStepView::Error,
         }
@@ -43,6 +46,7 @@ pub enum WidgetSyncStepView {
     AfterCreateInner,
     AfterPatchInner,
     AfterPatchOuterStatus,
+    AfterReportError,
     Done,
     Error,
 }

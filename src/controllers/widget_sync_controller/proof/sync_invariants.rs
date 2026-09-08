@@ -153,6 +153,7 @@ pub open spec fn sync_pending_request_is(controller_id: int, key: ObjectRef, rec
     })
     &&& step is AfterPatchInner ==> exists |inner: InnerWidgetView| msg.content->APIRequest_0 == APIRequest::PatchRequest(#[trigger] inner_spec_patch(inner, outer))
     &&& step is AfterPatchOuterStatus ==> exists |status: WidgetStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] outer_status_patch(outer, status))
+    &&& step is AfterReportError ==> exists |status: WidgetStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] outer_status_patch(outer, status))
 }
 
 pub open spec fn sync_pending_requests_match_snapshots(controller_id: int) -> StatePred<ClusterState> {
@@ -228,9 +229,19 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                                     let inner = InnerWidgetView::unmarshal(res->Ok_0)->Ok_0;
                                     assert(msg.content->APIRequest_0 == APIRequest::PatchRequest(inner_spec_patch(inner, outer)));
                                 } else {
-                                    assert(state_prime.reconcile_step is AfterPatchOuterStatus);
+                                    assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
                                     assert(exists |status: WidgetStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] outer_status_patch(outer, status)));
                                 }
+                            },
+                            WidgetSyncStepView::AfterCreateInner => {
+                                // The Create failed and the failure is being reported.
+                                assert(state_prime.reconcile_step is AfterReportError);
+                                assert(exists |status: WidgetStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] outer_status_patch(outer, status)));
+                            },
+                            WidgetSyncStepView::AfterPatchInner => {
+                                // The Patch failed and the failure is being reported.
+                                assert(state_prime.reconcile_step is AfterReportError);
+                                assert(exists |status: WidgetStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] outer_status_patch(outer, status)));
                             },
                             _ => {
                                 assert(false);

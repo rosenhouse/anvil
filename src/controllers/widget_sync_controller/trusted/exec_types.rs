@@ -137,6 +137,43 @@ impl WidgetSpec {
     }
 }
 
+// The exec twin of spec_types::FailureReasonView.
+pub enum FailureReason {
+    Forbidden,
+    InnerUnreachable,
+    CreateFailed,
+    Rejected,
+    RequestFailed,
+}
+
+impl View for FailureReason {
+    type V = spec_types::FailureReasonView;
+
+    open spec fn view(&self) -> spec_types::FailureReasonView {
+        match self {
+            FailureReason::Forbidden => spec_types::FailureReasonView::Forbidden,
+            FailureReason::InnerUnreachable => spec_types::FailureReasonView::InnerUnreachable,
+            FailureReason::CreateFailed => spec_types::FailureReasonView::CreateFailed,
+            FailureReason::Rejected => spec_types::FailureReasonView::Rejected,
+            FailureReason::RequestFailed => spec_types::FailureReasonView::RequestFailed,
+        }
+    }
+}
+
+impl FailureReason {
+    pub fn reason(&self) -> (reason: String)
+        ensures reason@ == self@.reason(),
+    {
+        match self {
+            FailureReason::Forbidden => "Forbidden".to_string(),
+            FailureReason::InnerUnreachable => "InnerUnreachable".to_string(),
+            FailureReason::CreateFailed => "CreateFailed".to_string(),
+            FailureReason::Rejected => "Rejected".to_string(),
+            FailureReason::RequestFailed => "RequestFailed".to_string(),
+        }
+    }
+}
+
 impl WidgetStatus {
     #[verifier(external_body)]
     pub fn observed_generation(&self) -> (observed_generation: Option<i64>)
