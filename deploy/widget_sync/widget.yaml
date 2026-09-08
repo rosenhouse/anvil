@@ -6,6 +6,6 @@ metadata:
   name: demo
 spec:
   # The binding whose cluster receives the mirror; immutable once set.
-  clusterName: inner
+  clusterName: a
   count: 3
   message: hello from the outer cluster
