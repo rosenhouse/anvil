@@ -1,6 +1,7 @@
-// Two configured kinds beside each other: the sync controller and janitors of
-// `k1` composed with those of `k2` (doc/widget_sync_fanout_design.md,
-// section 5.1).
+// Configured kinds beside each other: the sync controller and janitors of one
+// kind composed with those of another, and, by induction over the kinds, of a
+// whole deployment (doc/widget_sync_fanout_design.md, section 5.1).
+// widget_two_kind_core_holds is the two-kind instance of widget_kinds_core_holds.
 //
 // The whole argument is kind disjointness. A sync controller only ever touches
 // its own outer kind (a status patch) and its own mirror kinds (a Get, a Create,
