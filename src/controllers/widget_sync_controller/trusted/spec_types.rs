@@ -1,19 +1,97 @@
-// Ghost (spec-level) types of the Widget sync example.
+// Ghost (spec-level) types of the Widget sync example, with the kind and the
+// binding as data (doc/widget_sync_fanout_design.md, sections 2.3, 2.4 and 3).
 //
-// One custom resource, Widget, exists in two clusters. The copy in the primary
-// (outer) cluster is what users create; the copy in the remote (inner) cluster
-// is the mirror the sync controller maintains, and the inner cluster's own
-// Widget controller acts on it. The two copies share one spec and one status
-// shape but get distinct model kinds ("widget" and "widget@inner"), because
-// the model has a single logical store keyed by (kind, namespace, name); see
-// kubernetes_api_objects::exec::api_resource::ClusterId for how the tag is
-// attached at the exec/model boundary.
+// One configured kind exists in an outer cluster and in the inner cluster of each
+// of its bindings. The copy in the outer (primary) cluster is what users create;
+// the copy in a binding's inner cluster is the mirror the sync controller
+// maintains, and the inner cluster's own controller acts on it. Both copies are
+// objects of the shape (spec::synced_object::SyncedObjectView); the model has one
+// logical store keyed by (kind, namespace, name), so the cluster is folded into
+// the model kind by spec::model_kind::model_kind: the outer copy has kind
+// `k.outer_kind` and the mirror in binding `b` has kind `inner_kind(k, b)`.
 use crate::kubernetes_api_objects::error::*;
+use crate::kubernetes_api_objects::spec::api_resource::*;
+use crate::kubernetes_api_objects::spec::model_kind::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::vstd_ext::string_view::*;
 use vstd::prelude::*;
 
 verus! {
+
+// ---------------------------------------------------------------------------
+// The kind and the binding.
+// ---------------------------------------------------------------------------
+
+// A binding: the namespace the outer copies live in and the name of the inner
+// cluster they are mirrored into (design, section 1.2).
+pub type Binding = ClusterRefView;
+
+// A configured kind: the model kind of its outer copies, the CRD name the
+// registry builds model kinds from, and the cluster selector that names each
+// object's binding.
+pub struct SyncKind {
+    pub outer_kind: Kind,
+    pub name: StringView,
+    pub selector: ClusterSelector,
+}
+
+// The model kind of the mirrors of `k` in the binding `b`.
+pub open spec fn inner_kind(k: SyncKind, b: Binding) -> Kind {
+    model_kind(k.name, ClusterIdView::Remote(b))
+}
+
+// `kind` is the mirror kind of `k` in some binding. This is what the sync rely
+// forbids Creates of, and what the sync guarantee's requests are addressed to.
+pub open spec fn is_inner_kind(k: SyncKind, kind: Kind) -> bool {
+    exists |b: Binding| kind == #[trigger] inner_kind(k, b)
+}
+
+// The kind is well formed: its name is one model_kind is injective on, and its
+// outer kind is the primary model kind of that name. A hypothesis of the
+// theorems, discharged for a concrete configuration by definition; it is what
+// the distinctness of the outer kind from every inner kind rests on.
+pub open spec fn sync_kind_ok(k: SyncKind) -> bool {
+    &&& kind_name_ok(k.name)
+    &&& k.outer_kind == model_kind(k.name, ClusterIdView::Primary)
+}
+
+pub open spec fn binding_ok(b: Binding) -> bool {
+    cluster_ref_ok(b)
+}
+
+// The outer kind is never a mirror kind.
+pub proof fn lemma_outer_kind_is_not_inner(k: SyncKind, b: Binding)
+    requires sync_kind_ok(k),
+    ensures k.outer_kind != inner_kind(k, b),
+{
+    lemma_remote_kind_name_is_not_primary(k.name, k.name, b);
+}
+
+pub proof fn lemma_outer_kind_is_not_any_inner(k: SyncKind)
+    requires sync_kind_ok(k),
+    ensures !is_inner_kind(k, k.outer_kind),
+{
+    assert forall |b: Binding| k.outer_kind != #[trigger] inner_kind(k, b) by {
+        lemma_outer_kind_is_not_inner(k, b);
+    }
+}
+
+// Distinct bindings give distinct mirror kinds.
+pub proof fn lemma_inner_kind_injective(k: SyncKind, b1: Binding, b2: Binding)
+    requires
+        sync_kind_ok(k),
+        binding_ok(b1),
+        binding_ok(b2),
+        inner_kind(k, b1) == inner_kind(k, b2),
+    ensures b1 == b2,
+{
+    lemma_model_kind_injective(k.name, ClusterIdView::Remote(b1), k.name, ClusterIdView::Remote(b2));
+}
+
+// ---------------------------------------------------------------------------
+// Identity of a mirror.
+// ---------------------------------------------------------------------------
 
 // The label and annotation that identify a mirror and its parent.
 pub open spec fn managed_by_key() -> StringView { "anvil.dev/managed-by"@ }
@@ -28,118 +106,43 @@ pub open spec fn stalled_condition_type() -> StringView { "Stalled"@ }
 pub open spec fn condition_true() -> StringView { "True"@ }
 pub open spec fn condition_false() -> StringView { "False"@ }
 
-pub struct WidgetSpecView {
-    pub count: int,
-    pub message: Option<StringView>,
-}
-
-impl WidgetSpecView {
-    pub open spec fn default() -> WidgetSpecView {
-        WidgetSpecView {
-            count: 0,
-            message: None,
-        }
-    }
-}
-
-// A condition in the style of metav1.Condition. lastTransitionTime is omitted:
-// the model has no clock, and a value that depends on the wall clock cannot be
-// the output of a deterministic reconcile step.
-pub struct WidgetConditionView {
-    pub type_: StringView,
-    pub status: StringView,
-    pub observed_generation: Option<int>,
-    pub reason: Option<StringView>,
-    pub message: Option<StringView>,
-}
-
-impl WidgetConditionView {
-    pub open spec fn default() -> WidgetConditionView {
-        WidgetConditionView {
-            type_: ""@,
-            status: ""@,
-            observed_generation: None,
-            reason: None,
-            message: None,
-        }
-    }
-}
-
-pub struct WidgetStatusView {
-    // Conventional meaning on each copy: the generation its controller last processed.
-    pub observed_generation: Option<int>,
-    // Mirrored fields: written by the inner Widget controller on the inner copy,
-    // copied verbatim onto the outer copy by the sync controller.
-    pub ready: Option<bool>,
-    pub observed_count: Option<int>,
-    // Conditions are per copy and are never mirrored.
-    pub conditions: Option<Seq<WidgetConditionView>>,
-}
-
-impl WidgetStatusView {
-    pub open spec fn default() -> WidgetStatusView {
-        WidgetStatusView {
-            observed_generation: None,
-            ready: None,
-            observed_count: None,
-            conditions: None,
-        }
-    }
-
-    // The projection the sync controller copies from the inner copy to the outer
-    // copy: the data fields, that is everything except the per-copy fields
-    // observed_generation and conditions. Conditions are combined, not copied.
-    pub open spec fn mirrored(self) -> WidgetStatusView {
-        WidgetStatusView {
-            observed_generation: None,
-            conditions: None,
-            ..self
-        }
-    }
-
-    // The first condition of type `type_`, if any. First rather than any, so that
-    // the exec code, which scans the list, computes the same condition.
-    pub open spec fn condition(self, type_: StringView) -> Option<WidgetConditionView> {
-        if self.conditions is Some {
-            find_condition_from(self.conditions->0, type_, 0)
-        } else {
-            None
-        }
-    }
-
-    pub open spec fn synced_condition(self) -> Option<WidgetConditionView> {
+impl SyncedStatusView {
+    pub open spec fn synced_condition(self) -> Option<SyncedConditionView> {
         self.condition(synced_condition_type())
     }
 
-    pub open spec fn ready_condition(self) -> Option<WidgetConditionView> {
+    pub open spec fn ready_condition(self) -> Option<SyncedConditionView> {
         self.condition(ready_condition_type())
     }
 
-    pub open spec fn stalled_condition(self) -> Option<WidgetConditionView> {
+    pub open spec fn stalled_condition(self) -> Option<SyncedConditionView> {
         self.condition(stalled_condition_type())
     }
 }
 
-// The first condition of type `type_` at index `i` or later.
-pub open spec fn find_condition_from(conditions: Seq<WidgetConditionView>, type_: StringView, i: int) -> Option<WidgetConditionView>
-    decreases conditions.len() - i,
-{
-    if i < 0 || i >= conditions.len() {
-        None
-    } else if conditions[i].type_ == type_ {
-        Some(conditions[i])
-    } else {
-        find_condition_from(conditions, type_, i + 1)
+// The mirrored remainder of a status that was never written: what the outer copy
+// reports before it has ever carried an inner status. Trusted, with the exec
+// twin inside trusted::exec_types::outer_status_for.
+pub uninterp spec fn default_status_rest() -> Value;
+
+pub open spec fn default_synced_status() -> SyncedStatusView {
+    SyncedStatusView {
+        observed_generation: None,
+        conditions: None,
+        rest: default_status_rest(),
     }
 }
 
-// `status` if there is one, else the default status: the source of the data
+// `status` if there is one, else the default status: the source of the mirrored
 // fields the outer status keeps when the inner status is not consulted.
-pub open spec fn status_or_default(status: Option<WidgetStatusView>) -> WidgetStatusView {
-    if status is Some { status->0 } else { WidgetStatusView::default() }
+pub open spec fn status_or_default(status: Option<SyncedStatusView>) -> SyncedStatusView {
+    if status is Some { status->0 } else { default_synced_status() }
 }
 
-// The outcome of one reconcile of the outer copy, as its status reports it.
+// ---------------------------------------------------------------------------
+// The outcome of one reconcile, and the status that reports it.
+// ---------------------------------------------------------------------------
+
 pub enum SyncOutcomeView {
     // The mirror carries the outer spec and the inner status observes it; that
     // status is consulted.
@@ -153,7 +156,8 @@ pub enum SyncOutcomeView {
     // The object at the mirror key is a mirror of another incarnation of the
     // outer copy; the janitor removes it.
     StaleMirror,
-    // A request of the reconcile failed; the reconcile is requeued.
+    // A request of the reconcile failed, or the object names no inner cluster;
+    // the reconcile is requeued.
     Failed(FailureReasonView),
 }
 
@@ -176,9 +180,7 @@ impl SyncOutcomeView {
 
     // A case the reconciler cannot get out of by itself: a foreign object it
     // refuses to adopt, a credential the inner cluster refuses, a request it
-    // rejects. The transient cases (a converging or terminating inner copy, a
-    // stale mirror the janitor removes, an unreachable inner cluster, a missing
-    // namespace, a failed request) are not permanent.
+    // rejects, an object that names no inner cluster.
     pub open spec fn permanent(self) -> bool {
         match self {
             SyncOutcomeView::ForeignObject => true,
@@ -188,8 +190,8 @@ impl SyncOutcomeView {
     }
 }
 
-pub open spec fn make_condition(type_: StringView, status: StringView, observed_generation: Option<int>, reason: Option<StringView>, message: Option<StringView>) -> WidgetConditionView {
-    WidgetConditionView { type_: type_, status: status, observed_generation: observed_generation, reason: reason, message: message }
+pub open spec fn make_condition(type_: StringView, status: StringView, observed_generation: Option<int>, reason: Option<StringView>, message: Option<StringView>) -> SyncedConditionView {
+    SyncedConditionView { type_: type_, status: status, observed_generation: observed_generation, reason: reason, message: message }
 }
 
 pub open spec fn condition_status(b: bool) -> StringView {
@@ -197,7 +199,7 @@ pub open spec fn condition_status(b: bool) -> StringView {
 }
 
 // Synced: True exactly when the outcome is Synced, with the outcome's reason.
-pub open spec fn synced_condition_for(outer_generation: Option<int>, outcome: SyncOutcomeView) -> WidgetConditionView {
+pub open spec fn synced_condition_for(outer_generation: Option<int>, outcome: SyncOutcomeView) -> SyncedConditionView {
     make_condition(synced_condition_type(), condition_status(outcome.synced()), outer_generation, Some(outcome.reason()), None)
 }
 
@@ -206,7 +208,7 @@ pub open spec fn synced_condition_for(outer_generation: Option<int>, outcome: Sy
 // True (so Ready and Stalled are never both True). Otherwise False: with reason
 // NotSynced when not synced, else with the reason and message of the inner
 // condition that denies it. `source` is consulted only when synced.
-pub open spec fn ready_condition_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetConditionView {
+pub open spec fn ready_condition_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedConditionView {
     let inner_ready = source.ready_condition();
     let inner_stalled = source.stalled_condition();
     if !outcome.synced() {
@@ -224,7 +226,7 @@ pub open spec fn ready_condition_for(outer_generation: Option<int>, source: Widg
 // when the inner status is consulted (synced) and the inner copy has a Stalled
 // condition of its own, that condition's status, reason and message; else False
 // with the outcome's reason.
-pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetConditionView {
+pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedConditionView {
     let inner_stalled = source.stalled_condition();
     if outcome.permanent() {
         make_condition(stalled_condition_type(), condition_true(), outer_generation, Some(outcome.reason()), None)
@@ -238,16 +240,15 @@ pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: Wi
 // The status the sync controller writes on the outer copy for a snapshot at
 // generation `outer_generation`, as a function of that generation, of a source
 // status and of the outcome of the reconcile. When the outcome is Synced the
-// source is the inner copy's status: its data fields are mirrored and its Ready
-// and Stalled conditions are merged into the outer copy's. Otherwise the source
-// is the outer copy's previous status (status_or_default), whose data fields are
-// kept as previously reported and whose conditions are not read. observed_generation
-// and every condition carry `outer_generation`.
-pub open spec fn outer_status_for(outer_generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView) -> WidgetStatusView {
-    WidgetStatusView {
+// source is the inner copy's status: its mirrored remainder is copied and its
+// Ready and Stalled conditions are merged into the outer copy's. Otherwise the
+// source is the outer copy's previous status (status_or_default), whose mirrored
+// remainder is kept as previously reported and whose conditions are not read.
+// observed_generation and every condition carry `outer_generation`.
+pub open spec fn outer_status_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedStatusView {
+    SyncedStatusView {
         observed_generation: outer_generation,
-        ready: source.ready,
-        observed_count: source.observed_count,
+        rest: source.rest,
         conditions: Some(seq![
             synced_condition_for(outer_generation, outcome),
             ready_condition_for(outer_generation, source, outcome),
@@ -276,7 +277,7 @@ pub enum FailureReasonView {
     InnerUnreachable,
     // NotFound answering the Create of the mirror: the inner namespace is missing.
     CreateFailed,
-    // The request was rejected as invalid.
+    // The request was rejected as invalid, or the object names no inner cluster.
     Rejected,
     // Anything else.
     RequestFailed,
@@ -314,108 +315,51 @@ pub open spec fn error_reason(err: APIError, answering_create: bool) -> FailureR
     }
 }
 
-// The two copies as view types. They differ only in kind().
-
-pub struct OuterWidgetView {
-    pub metadata: ObjectMetaView,
-    pub spec: WidgetSpecView,
-    pub status: Option<WidgetStatusView>,
-}
-
-pub struct InnerWidgetView {
-    pub metadata: ObjectMetaView,
-    pub spec: WidgetSpecView,
-    pub status: Option<WidgetStatusView>,
-}
-
-macro_rules! implement_widget_view_methods {
-    ($t:ident, $kind_string:literal) => {
-        verus! {
-
-        impl $t {
-            pub open spec fn well_formed(self) -> bool {
-                &&& self.metadata.well_formed_for_namespaced()
-                &&& self.state_validation()
-            }
-
-            pub open spec fn with_metadata(self, metadata: ObjectMetaView) -> $t {
-                $t { metadata: metadata, ..self }
-            }
-
-            pub open spec fn with_spec(self, spec: WidgetSpecView) -> $t {
-                $t { spec: spec, ..self }
-            }
-
-            pub open spec fn with_status(self, status: WidgetStatusView) -> $t {
-                $t { status: Some(status), ..self }
-            }
-
-            #[verifier(inline)]
-            pub open spec fn _kind() -> Kind { Kind::CustomResourceKind($kind_string@) }
-
-            #[verifier(inline)]
-            pub open spec fn _state_validation(self) -> bool {
-                self.spec.count >= 0
-            }
-
-            #[verifier(inline)]
-            pub open spec fn _transition_validation(self, old_obj: $t) -> bool {
-                true
-            }
-        }
-
-        implement_resource_view_trait!($t, WidgetSpecView, WidgetSpecView::default(),
-            Option<WidgetStatusView>, None, $t::_kind(), _state_validation, _transition_validation);
-
-        impl CustomResourceView for $t {
-            proof fn kind_is_custom_resource() {}
-
-            open spec fn spec_status_validation(obj_spec: Self::Spec, obj_status: Self::Status) -> bool {
-                $t {
-                    metadata: arbitrary(),
-                    spec: obj_spec,
-                    status: obj_status,
-                }.state_validation()
-            }
-
-            proof fn validation_result_determined_by_spec_and_status()
-                ensures forall |obj: Self| #[trigger] obj.state_validation() == Self::spec_status_validation(obj.spec(), obj.status())
-            {}
-        }
-
-        }
-    };
-}
-
-implement_widget_view_methods!(OuterWidgetView, "widget");
-implement_widget_view_methods!(InnerWidgetView, "widget@inner");
-
-
 // ---------------------------------------------------------------------------
-// The mirror relation between an outer copy and an inner object. Used by the
-// reconcilers and by the theorems in liveness_theorem.rs.
+// The mirror relation between an outer copy and an inner object.
 // ---------------------------------------------------------------------------
 
-// The key of the mirror of `outer` in the inner cluster: same namespace and name,
-// the inner cluster's model kind.
-pub open spec fn inner_key(outer: OuterWidgetView) -> ObjectRef {
+// The binding of `outer`: its namespace and the cluster its selector names.
+// Read only where cluster_of(k.selector, outer) is Some; the reconcile reports
+// Rejected and ends when it is None.
+pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
+    ClusterRefView {
+        namespace: outer.metadata.namespace->0,
+        name: cluster_of(k.selector, outer)->0,
+    }
+}
+
+// The key of the mirror of `outer`: same namespace and name, the model kind of
+// `k` in the binding of `outer`.
+pub open spec fn inner_key(k: SyncKind, outer: SyncedObjectView) -> ObjectRef {
     ObjectRef {
-        kind: InnerWidgetView::kind(),
+        kind: inner_kind(k, binding_of(k, outer)),
         namespace: outer.metadata.namespace->0,
         name: outer.metadata.name->0,
     }
 }
 
+// The mirror key of the outer copy at `outer_key` in the binding `b`.
+pub open spec fn inner_key_of(k: SyncKind, b: Binding, outer_key: ObjectRef) -> ObjectRef {
+    ObjectRef { kind: inner_kind(k, b), ..outer_key }
+}
+
+// The key of the outer copy a mirror at `key` would belong to.
+pub open spec fn outer_key_of(k: SyncKind, key: ObjectRef) -> ObjectRef {
+    ObjectRef { kind: k.outer_kind, ..key }
+}
+
 // The parent-uid annotation value: the outer copy's uid, copied as a string. Uids
 // are opaque tokens; the controller only ever compares them for equality.
-pub open spec fn parent_uid_of(outer: OuterWidgetView) -> StringView {
+pub open spec fn parent_uid_of(outer: SyncedObjectView) -> StringView {
     int_to_string_view(outer.metadata.uid->0)
 }
 
 // The mirror the sync controller creates: same name and namespace, the identifying
-// label and annotation, the outer spec, no owner references, no finalizers.
-pub open spec fn make_inner(outer: OuterWidgetView) -> InnerWidgetView {
-    InnerWidgetView {
+// label and annotation, the outer spec verbatim, no owner references, no finalizers.
+pub open spec fn make_inner(k: SyncKind, outer: SyncedObjectView) -> SyncedObjectView {
+    SyncedObjectView {
+        kind: inner_kind(k, binding_of(k, outer)),
         metadata: ObjectMetaView::default()
             .with_name(outer.metadata.name->0)
             .with_namespace(outer.metadata.namespace->0)
@@ -428,7 +372,7 @@ pub open spec fn make_inner(outer: OuterWidgetView) -> InnerWidgetView {
 
 // An inner object is the mirror of `outer` iff it carries the managed-by label and
 // its parent-uid annotation equals the outer copy's uid. Anything else is refused.
-pub open spec fn is_mirror_of(inner: InnerWidgetView, outer: OuterWidgetView) -> bool {
+pub open spec fn is_mirror_of(inner: SyncedObjectView, outer: SyncedObjectView) -> bool {
     &&& inner.metadata.labels is Some
     &&& inner.metadata.labels->0.contains_key(managed_by_key())
     &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
@@ -438,7 +382,7 @@ pub open spec fn is_mirror_of(inner: InnerWidgetView, outer: OuterWidgetView) ->
 }
 
 // The inner implementation has processed the mirror's current spec.
-pub open spec fn inner_caught_up(inner: InnerWidgetView) -> bool {
+pub open spec fn inner_caught_up(inner: SyncedObjectView) -> bool {
     &&& inner.status is Some
     &&& inner.status->0.observed_generation is Some
     &&& inner.metadata.generation is Some
@@ -447,7 +391,7 @@ pub open spec fn inner_caught_up(inner: InnerWidgetView) -> bool {
 
 // A mirror is one the sync controller created: it carries the managed-by label and
 // a parent-uid annotation. Objects without both are left alone.
-pub open spec fn has_mirror_identity(inner: InnerWidgetView) -> bool {
+pub open spec fn has_mirror_identity(inner: SyncedObjectView) -> bool {
     &&& inner.metadata.labels is Some
     &&& inner.metadata.labels->0.contains_key(managed_by_key())
     &&& inner.metadata.labels->0[managed_by_key()] == managed_by_value()
@@ -455,7 +399,7 @@ pub open spec fn has_mirror_identity(inner: InnerWidgetView) -> bool {
     &&& inner.metadata.annotations->0.contains_key(parent_uid_key())
 }
 
-pub open spec fn parent_uid_annotation(inner: InnerWidgetView) -> StringView {
+pub open spec fn parent_uid_annotation(inner: SyncedObjectView) -> StringView {
     inner.metadata.annotations->0[parent_uid_key()]
 }
 

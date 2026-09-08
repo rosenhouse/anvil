@@ -1,7 +1,7 @@
-// Model of an out-of-band actor in the inner cluster: something outside the
-// Widget pair that edits and deletes mirrors at will. It stands for a
-// `kubectl edit` or `kubectl delete` of a mirror, or for an inner cluster that
-// was rebuilt. It is an ordinary controller model triggered by inner Widgets,
+// Model of an out-of-band actor in an inner cluster: something outside the Widget
+// pair that edits and deletes mirrors of one inner kind at will. It stands for a
+// `kubectl edit` or `kubectl delete` of a mirror, or for an inner cluster that was
+// rebuilt. It is an ordinary controller model triggered by objects of that kind,
 // with no fairness assumed: it may act at any moment and may stop at any moment.
 //
 // On each reconcile it patches the mirror's spec, testing nothing, and then
@@ -13,8 +13,8 @@
 // and no delete that would land on the live mirror is in flight.
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::reconciler::spec::{io::*, reconciler::*};
-use crate::widget_sync_controller::trusted::spec_types::*;
+use crate::kubernetes_api_objects::spec::synced_object::*;
+use crate::reconciler::spec::io::*;
 use vstd::prelude::*;
 
 verus! {
@@ -26,28 +26,8 @@ pub enum WidgetDisturberStepView {
     Done,
 }
 
-pub struct WidgetDisturberReconciler {}
-
 pub struct WidgetDisturberReconcileState {
     pub reconcile_step: WidgetDisturberStepView,
-}
-
-impl Reconciler<WidgetDisturberReconcileState, InnerWidgetView, VoidEReqView, VoidERespView> for WidgetDisturberReconciler {
-    open spec fn reconcile_init_state() -> WidgetDisturberReconcileState {
-        reconcile_init_state()
-    }
-
-    open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetDisturberReconcileState) -> (WidgetDisturberReconcileState, Option<RequestView<VoidEReqView>>) {
-        reconcile_core(inner, resp_o, state)
-    }
-
-    open spec fn reconcile_done(state: WidgetDisturberReconcileState) -> bool {
-        reconcile_done(state)
-    }
-
-    open spec fn reconcile_error(state: WidgetDisturberReconcileState) -> bool {
-        reconcile_error(state)
-    }
 }
 
 pub open spec fn reconcile_init_state() -> WidgetDisturberReconcileState {
@@ -69,34 +49,34 @@ pub open spec fn at_step(step: WidgetDisturberStepView) -> WidgetDisturberReconc
     WidgetDisturberReconcileState { reconcile_step: step }
 }
 
-// The edit: a different spec that is still valid.
-pub open spec fn disturbed_spec(spec: WidgetSpecView) -> WidgetSpecView {
-    WidgetSpecView { count: spec.count + 1, ..spec }
-}
+// The edit: some other value written over the mirror's spec. The spec of an
+// object of the shape is opaque, so the edit is an uninterpreted function of it;
+// nothing the pair proves depends on which value it is.
+pub uninterp spec fn disturbed_spec(spec: Value) -> Value;
 
 // The spec patch, testing nothing: it lands whatever the mirror looks like now.
-pub open spec fn disturbing_patch(inner: InnerWidgetView) -> PatchRequest {
+pub open spec fn disturbing_patch(kind: Kind, inner: SyncedObjectView) -> PatchRequest {
     PatchRequest {
         namespace: inner.metadata.namespace->0,
         name: inner.metadata.name->0,
-        kind: InnerWidgetView::kind(),
+        kind: kind,
         tests: PatchTestsView::default(),
-        spec: inner.with_spec(disturbed_spec(inner.spec)).marshal().spec,
+        spec: disturbed_spec(inner.spec),
     }
 }
 
 // The delete, with no precondition: it removes whatever is at the key now.
-pub open spec fn disturbing_delete(inner: InnerWidgetView) -> DeleteRequest {
+pub open spec fn disturbing_delete(inner: SyncedObjectView) -> DeleteRequest {
     DeleteRequest {
         key: inner.object_ref(),
         preconditions: None,
     }
 }
 
-pub open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetDisturberReconcileState) -> (WidgetDisturberReconcileState, Option<RequestView<VoidEReqView>>) {
+pub open spec fn reconcile_core(kind: Kind, inner: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetDisturberReconcileState) -> (WidgetDisturberReconcileState, Option<RequestView<VoidEReqView>>) {
     match state.reconcile_step {
         WidgetDisturberStepView::Init => {
-            let req = APIRequest::PatchRequest(disturbing_patch(inner));
+            let req = APIRequest::PatchRequest(disturbing_patch(kind, inner));
             (at_step(WidgetDisturberStepView::AfterPatchInner), Some(RequestView::KRequest(req)))
         },
         WidgetDisturberStepView::AfterPatchInner => {

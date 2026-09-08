@@ -11,6 +11,7 @@
 use crate::kubernetes_api_objects::error::UnmarshalError;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
+use crate::reconciler::spec::io::*;
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
     cluster::*,
@@ -179,6 +180,52 @@ pub proof fn lemma_always_synced_objects_in_reconcile_are_valid(
         lift_action(self.next()),
         lift_state(self.synced_objects_in_etcd_are_valid(kind, spec_ok)),
         lift_state(self.synced_objects_in_schedule_are_valid(kind, spec_ok, controller_id)),
+        lift_state(Self::there_is_the_controller_state(controller_id))
+    );
+    init_invariant(spec, self.init(), stronger_next, inv);
+}
+
+// The local state of every ongoing reconcile of a data-driven controller
+// unmarshals. The counterpart of cr_states_are_unmarshallable.
+pub open spec fn synced_states_are_unmarshallable<S: Marshallable>(kind: Kind, controller_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |key: ObjectRef| {
+            #[trigger] s.ongoing_reconciles(controller_id).contains_key(key)
+            && key.kind == kind
+            ==> S::unmarshal(s.ongoing_reconciles(controller_id)[key].local_state) is Ok
+        }
+    }
+}
+
+pub proof fn lemma_always_synced_states_are_unmarshallable<S, EReq, EResp>(
+    self, spec: TempPred<ClusterState>, kind: Kind,
+    init: spec_fn() -> S,
+    core: spec_fn(SyncedObjectView, Option<ResponseView<EResp>>, S) -> (S, Option<RequestView<EReq>>),
+    done: spec_fn(S) -> bool,
+    error: spec_fn(S) -> bool,
+    controller_id: int,
+)
+    where
+        S: Marshallable,
+        EReq: Marshallable,
+        EResp: Marshallable,
+    requires
+        spec.entails(lift_state(self.init())),
+        spec.entails(always(lift_action(self.next()))),
+        self.controller_models.contains_key(controller_id),
+        self.controller_models[controller_id].reconcile_model == Self::synced_reconcile_model::<S, EReq, EResp>(kind, init, core, done, error),
+    ensures spec.entails(always(lift_state(Self::synced_states_are_unmarshallable::<S>(kind, controller_id)))),
+{
+    let inv = Self::synced_states_are_unmarshallable::<S>(kind, controller_id);
+    let stronger_next = |s, s_prime: ClusterState| {
+        &&& self.next()(s, s_prime)
+        &&& Self::there_is_the_controller_state(controller_id)(s)
+    };
+    self.lemma_always_there_is_the_controller_state(spec, controller_id);
+    S::marshal_preserves_integrity();
+    combine_spec_entails_always_n!(
+        spec, lift_action(stronger_next),
+        lift_action(self.next()),
         lift_state(Self::there_is_the_controller_state(controller_id))
     );
     init_invariant(spec, self.init(), stronger_next, inv);

@@ -8,7 +8,7 @@ use crate::kubernetes_cluster::spec::{
     message::*,
 };
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler::*, sync_reconciler::*},
+    model::{install::*, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState},
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
 use verus_temporal_logic::{defs::*, rules::*};
@@ -18,17 +18,17 @@ verus! {
 
 // The rely conditions of every other controller, as one state predicate each.
 
-pub open spec fn lifted_sync_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
+pub open spec fn lifted_sync_rely_condition(k: SyncKind, cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
     lift_state(|s| {
         forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
-            ==> #[trigger] widget_sync_rely(other_id)(s)
+            ==> #[trigger] widget_sync_rely(k, other_id)(s)
     })
 }
 
-pub open spec fn lifted_janitor_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
+pub open spec fn lifted_janitor_rely_condition(k: SyncKind, cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
     lift_state(|s| {
         forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
-            ==> #[trigger] widget_janitor_rely(other_id)(s)
+            ==> #[trigger] widget_janitor_rely(k, other_id)(s)
     })
 }
 
