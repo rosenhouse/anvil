@@ -165,7 +165,9 @@ async fn discover(client: &Client, gvk: &GroupVersionKind) -> Result<ApiResource
     if capabilities.scope != Scope::Namespaced {
         bail!("kind {}/{} is not namespaced", gvk.api_version(), gvk.kind);
     }
-    if !capabilities.subresources.iter().any(|(sub, _)| sub.plural.ends_with("/status")) {
+    // Discovery names a subresource by its own name ("status"), not
+    // "<plural>/status" (kube_core::discovery::ApiCapabilities).
+    if !capabilities.subresources.iter().any(|(sub, _)| sub.plural == "status") {
         bail!("kind {}/{} has no status subresource", gvk.api_version(), gvk.kind);
     }
     Ok(resource)
