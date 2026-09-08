@@ -36,7 +36,7 @@ use verifiable_controllers::shim_layer::bindings::{
 use verifiable_controllers::shim_layer::controller_runtime::{
     discover_kinds, run_dyn_controller, run_dyn_controller_with_triggers, ClusterClients,
 };
-use verifiable_controllers::shim_layer::crd_shape::{check_crd, CrdCheckError};
+use verifiable_controllers::shim_layer::crd_shape::{check_crd, check_kind_name, CrdCheckError};
 use verifiable_controllers::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use verifiable_controllers::widget_sync_controller::exec::janitor_reconciler::JanitorReconciler;
 use verifiable_controllers::widget_sync_controller::exec::sync_reconciler::SyncReconciler;
@@ -161,7 +161,7 @@ fn configured_kinds(args: &[String]) -> Result<Vec<KindConfig>, String> {
 // one line per failing row of the table of doc/widget_sync_fanout_design.md,
 // section 2.2. The boot check runs before any controller starts, so a refused
 // kind is a usage error and the process exits with status 2.
-fn refused_kind(kind: &KindConfig, err: &CrdCheckError) -> String {
+fn refused_kind(kind: &KindConfig, err: &impl std::fmt::Display) -> String {
     format!("--kind {}: {}", kind, err)
 }
 
@@ -252,6 +252,16 @@ async fn main() -> Result<()> {
             for (i, kind) in kinds.iter().enumerate() {
                 let entry = registry.entry(i).clone();
                 let plural = entry.kube_api_resource().plural.clone();
+                // The exec side of model_kind's injectivity hypothesis: the CRD
+                // name is what a mirror's model kind is built from, with '@'
+                // and '/' as its separators. A DNS name has neither, so this is
+                // defensive, but it is a hypothesis the proofs rest on.
+                if let Err(e) = check_kind_name(&entry.crd_name()) {
+                    let message = refused_kind(kind, &e);
+                    error!("{}", message);
+                    eprintln!("{}", message);
+                    process::exit(2);
+                }
                 if let Err(e) = check_crd(&primary, kind, &plural).await {
                     // Nothing has been started yet: print the failing rows and
                     // exit as on any other usage error.

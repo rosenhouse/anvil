@@ -101,6 +101,16 @@ pub fn binding_of_secret(namespace: &str, name: &str) -> Option<ClusterRef> {
     if cluster.is_empty() || namespace.is_empty() {
         return None;
     }
+    // The model kind of a mirror is `<kind name>@<namespace>/<clusterName>`,
+    // and the theorems' distinctness hypotheses are discharged by that being
+    // injective, which holds because the parts are free of the separators
+    // (spec::model_kind::cluster_ref_ok). A DNS name is, so this is defensive
+    // only -- a Kubernetes name or namespace cannot hold either character --
+    // but it is the exec side of a hypothesis the proofs rest on, so it is
+    // checked rather than assumed.
+    if [namespace, cluster].iter().any(|part| part.contains('@') || part.contains('/')) {
+        return None;
+    }
     Some(ClusterRef::new(namespace.to_string(), cluster.to_string()))
 }
 
@@ -950,6 +960,14 @@ mod tests {
         assert!(binding_of_secret("default", "a-kubeconfig-backup").is_none());
         assert!(binding_of_secret("default", "-kubeconfig").is_none());
         assert!(binding_of_secret("", "a-kubeconfig").is_none());
+        // The separators of a mirror's model kind, `<kind>@<namespace>/<name>`:
+        // a binding whose parts held one would break the injectivity the
+        // theorems' distinctness hypotheses are discharged with. No Kubernetes
+        // name or namespace can hold them, so this can only be defensive.
+        assert!(binding_of_secret("default", "a@b-kubeconfig").is_none());
+        assert!(binding_of_secret("default", "a/b-kubeconfig").is_none());
+        assert!(binding_of_secret("de@fault", "a-kubeconfig").is_none());
+        assert!(binding_of_secret("de/fault", "a-kubeconfig").is_none());
     }
 
     // The whole Cluster API convention, not the name alone: an ordinary Secret

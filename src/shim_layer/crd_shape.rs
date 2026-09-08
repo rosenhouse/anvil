@@ -329,6 +329,28 @@ pub fn crd_name(kind: &KindConfig, plural: &str) -> String {
     format!("{}.{}", plural, kind.group)
 }
 
+/// check_kind_name holds a kind's CRD name to what the model assumes of it.
+/// The model kind of an object is the CRD name for an outer copy and
+/// `<crd name>@<namespace>/<clusterName>` for a mirror, and the theorems'
+/// distinctness hypotheses are discharged by that map being injective, which
+/// rests on the CRD name being free of `@` (spec::model_kind::kind_name_ok);
+/// `/` is refused with it, since it separates the binding's two parts.
+///
+/// A CRD name is a DNS subdomain, so this cannot fire on a name the API server
+/// accepted. It is here because it is the exec side of a hypothesis the proofs
+/// rest on, and a hypothesis nothing checks is a hypothesis that can quietly
+/// stop holding.
+pub fn check_kind_name(name: &str) -> Result<(), String> {
+    if name.contains('@') || name.contains('/') {
+        return Err(format!(
+            "the CRD name {:?} contains '@' or '/', which the model kind of a mirror uses as \
+             separators (`<kind>@<namespace>/<clusterName>`)",
+            name
+        ));
+    }
+    Ok(())
+}
+
 /// Fetch the CRD of `kind` from the cluster `client` talks to and run `check_shape`.
 pub async fn check_crd(client: &Client, kind: &KindConfig, plural: &str) -> Result<(), CrdCheckError> {
     let name = crd_name(kind, plural);
