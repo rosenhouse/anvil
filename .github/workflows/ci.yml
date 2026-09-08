@@ -60,6 +60,10 @@ jobs:
         run: |
           . "$HOME/.cargo/env"
           cargo build --lib
+      - name: Run the unit tests (executable model, exec wrappers)
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test --lib
       - name: Verify the library
         run: |
           . "$HOME/.cargo/env"

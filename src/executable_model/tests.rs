@@ -6,10 +6,8 @@
 // rule and the resource-version bump are the update path's), and generation is
 // bumped by spec changes only.
 //
-// The crate only builds through Verus, so build the test harness with
-//   cargo verus build --lib --tests -- --no-verify
-// and run the resulting target/debug/deps/verifiable_controllers-<hash>
-// binary with the filter `executable_model`.
+// Run with `cargo test --lib executable_model`; CI runs `cargo test --lib`
+// after the plain build.
 use crate::executable_model::prelude::*;
 use crate::kubernetes_api_objects::{
     error::APIError,
