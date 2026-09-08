@@ -375,15 +375,12 @@ impl BindingManager {
                 return;
             }
         };
-        match self.bindings.get(&binding) {
-            // Nothing changed: a relist, or a Secret touched elsewhere.
-            Some(record) if record.kubeconfig == kubeconfig && record.state != RecordState::Unbound => return,
-            Some(record) if record.kubeconfig == kubeconfig => {
-                // Still failing; the pending retry does the work.
-                let _ = record;
-                return;
-            }
-            _ => {}
+        // The same credential as before: a relist, or a Secret whose other keys
+        // or labels were touched. A bound binding keeps running and an unbound
+        // one is left to its pending retry; either way nothing is rebuilt, so a
+        // relist does not restart every janitor of the process.
+        if self.bindings.get(&binding).map(|record| record.kubeconfig == kubeconfig).unwrap_or(false) {
+            return;
         }
         // A changed credential: the runners hold clients built from the old one,
         // so they are stopped and started again around the rebind.
