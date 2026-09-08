@@ -71,55 +71,6 @@ jobs:
           export PATH="$PATH:$HOME/verus/source/target-verus/release"
           cargo verus verify --lib
 
-  widget-sync-two-cluster-e2e-test:
-    # The Widget sync controller pair across two kind clusters on one runner:
-    # tools/two-cluster-test.sh builds the image, creates the outer and inner
-    # clusters, installs the CRD, the echo controller and the sync controller,
-    # and the e2e drives a Widget through sync, status, foreign object, janitor
-    # collection and the out-of-band cases.
-    needs: setup-toolchain
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    steps:
-      - uses: actions/checkout@v7
-      - uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo
-            ~/.rustup
-            ~/verus
-            rust-toolchain.toml
-            target
-          key: toolchain-${{ runner.os }}-${{ needs.setup-toolchain.outputs.verus-sha }}
-      - name: Setup Go
-        uses: actions/setup-go@v6
-        with:
-          go-version: ${{ env.go_version }}
-          cache: false
-      - name: Install kind
-        run: go install sigs.k8s.io/kind@v$kind_version
-      - name: Build the image and deploy across two kind clusters
-        run: |
-          . "$HOME/.cargo/env"
-          export PATH="$PATH:$HOME/verus/source/target-verus/release"
-          ./tools/two-cluster-test.sh --build
-      - name: Run the widget sync e2e test
-        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync
-      - name: Collect controller logs
-        if: failure()
-        run: |
-          echo "::group::sync controller (outer)"
-          kubectl --context kind-widget-sync-outer -n widget-sync logs deployment/widget-sync-controller --tail=400 || true
-          kubectl --context kind-widget-sync-outer -n widget-sync describe pod -l app.kubernetes.io/name=widget-sync-controller || true
-          echo "::endgroup::"
-          echo "::group::echo controller (inner)"
-          kubectl --context kind-widget-sync-inner -n widget-echo logs deployment/widget-echo-controller --tail=200 || true
-          echo "::endgroup::"
-          echo "::group::widgets"
-          kubectl --context kind-widget-sync-outer get widgets -A -o yaml || true
-          kubectl --context kind-widget-sync-inner get widgets -A -o yaml || true
-          echo "::endgroup::"
-
   vreplicaset-admission-e2e-test:
     needs: setup-toolchain
     runs-on: ubuntu-24.04
@@ -297,6 +248,7 @@ jobs:
   widget-sync-e2e-test:
     needs: setup-toolchain
     runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: actions/cache@v6
@@ -324,3 +276,18 @@ jobs:
           ./tools/two-cluster-test.sh --build
       - name: Run widget sync two-cluster e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync
+      - name: Collect controller logs
+        if: failure()
+        run: |
+          echo "::group::sync controller (outer)"
+          kubectl --context kind-widget-sync-outer -n widget-sync logs deployment/widget-sync-controller --tail=400 || true
+          kubectl --context kind-widget-sync-outer -n widget-sync describe pod -l app.kubernetes.io/name=widget-sync-controller || true
+          echo "::endgroup::"
+          echo "::group::echo controller (inner)"
+          kubectl --context kind-widget-sync-inner -n widget-echo logs deployment/widget-echo-controller --tail=200 || true
+          echo "::endgroup::"
+          echo "::group::widgets"
+          kubectl --context kind-widget-sync-outer get widgets -A -o yaml || true
+          kubectl --context kind-widget-sync-inner get widgets -A -o yaml || true
+          echo "::endgroup::"
+
