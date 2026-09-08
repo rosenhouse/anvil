@@ -229,8 +229,8 @@ The log ends with
 and the container exits 2. `kubectl apply -f deploy/widget_sync/crd.yaml`
 puts the rule back; the next restart boots. The same CRD is accepted for a
 `name` selector, which needs no rule, so the reproduction isolates exactly
-the row it removes. `cargo test --bin widget_sync_controller` checks that
-message without a cluster.
+the row it removes. `cargo test --features dyn-runtime --bin widget_sync_controller`
+checks that message without a cluster.
 
 **Adding a kind.** Its CRD in the outer cluster and in every inner one, one
 `--kind` flag in `deploy_local.yaml`, its `<plural>` and `<plural>/status` rules in
@@ -288,8 +288,8 @@ relist of the watch, leaves a bound binding running and an unbound one on its
 existing retry schedule — nothing is rebuilt and no janitor of the process is
 restarted by a relist.
 
-**Who may create a binding's Secret.** The owner's decision is that
-`<clusterName>-kubeconfig` Secrets are created by **Cluster API only** — the
+**Who may create a binding's Secret.** `<clusterName>-kubeconfig` Secrets are
+created by **Cluster API only** — the
 management cluster's own controllers — and by nobody else. That is the
 deployment this controller is built for and the one it is supported in. The
 type and label filter on the Secret watch, and the kubeconfig validation below,
