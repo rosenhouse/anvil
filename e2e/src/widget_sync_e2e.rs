@@ -7,19 +7,38 @@
 //      with the same spec, our label and parent-uid annotation, and no owner
 //      references;
 //   2. the outer copy's status reports the inner copy's status, stamped with the
-//      outer generation and a true Synced condition;
-//   3. a spec change propagates and the status catches up at the new generation;
-//   4. a foreign inner object with the same name is refused, not adopted: it stays
+//      outer generation (1 for a fresh object) and a true Synced condition;
+//   3. a spec change bumps the outer generation by exactly one, propagates, and
+//      the status catches up at the new generation;
+//   4. an out-of-band edit of the mirror's spec in the inner cluster is
+//      overwritten with the outer spec within the sync reconciler's requeue
+//      interval, and the outer status never reports the count of the edit;
+//   5. a foreign inner object with the same name is refused, not adopted: it stays
 //      untouched and the outer copy reports Synced=False/ForeignObject;
-//   5. deleting the outer copy makes the janitor remove the mirror, while the
+//   6. a mirror whose parent is alive survives the janitor: for longer than the
+//      janitor's resync interval, from the moment step 1 first saw it, it keeps
+//      its uid and never carries a deletion timestamp (a janitor that recognised
+//      no parent would delete it and the sync reconciler would recreate it under
+//      a new uid);
+//   7. an out-of-band delete of the mirror is repaired: the sync reconciler
+//      recreates it with the outer spec and the same parent uid, and the outer
+//      status is Synced=True against the recreated mirror;
+//   8. deleting the outer copy and recreating it at once under the same name with
+//      another spec makes the janitor collect the stale mirror (meanwhile the
+//      outer copy reports it as ForeignObject or StaleMirror, never as Synced),
+//      a fresh mirror with the new parent uid and spec appears, and the outer
+//      status converges to Synced=True at generation 1 of the new object;
+//   9. deleting the outer copies makes the janitor remove the mirror, while the
 //      foreign object survives the deletion of its outer namesake.
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::{
     api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, ResourceExt},
     config::{KubeConfigOptions, Kubeconfig},
+    core::ErrorResponse,
     Client, Config,
 };
 use serde_json::json;
+use std::future::Future;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::*;
@@ -33,7 +52,28 @@ const MANAGED_BY_KEY: &str = "anvil.dev/managed-by";
 const MANAGED_BY_VALUE: &str = "widget-sync";
 const PARENT_UID_KEY: &str = "anvil.dev/parent-uid";
 const POLL: Duration = Duration::from_secs(3);
+// The generous bound for convergence that also involves the echo controller.
 const TIMEOUT: Duration = Duration::from_secs(300);
+
+// Intervals of the controller under test, from src/shim_layer/controller_runtime.rs.
+// reconcile_with requeues a finished reconcile after 60s: that is the sync
+// reconciler's requeue and the janitor's resync (neither watch relists on its own),
+// and error_policy requeues a failed reconcile after 10s. A remote request times
+// out after 10s (src/bin/widget_sync_controller.rs), so one failed attempt costs
+// at most REMOTE_TIMEOUT + ERROR_REQUEUE before the next.
+const REQUEUE: Duration = Duration::from_secs(60);
+const ERROR_REQUEUE: Duration = Duration::from_secs(10);
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+// Slack for the reconcile itself, the watch latency and the poll period.
+const MARGIN: Duration = Duration::from_secs(30);
+// Within this bound a healthy controller has run at least one full reconcile of an
+// object after any trigger, even if the first attempt failed once: the requeue,
+// one failed attempt, and slack.
+const ONE_RECONCILE: Duration = Duration::from_secs(
+    REQUEUE.as_secs() + REMOTE_TIMEOUT.as_secs() + ERROR_REQUEUE.as_secs() + MARGIN.as_secs(),
+);
+// A window in which the janitor has certainly resynced a mirror at least once.
+const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
 
 async fn client_for_context(context: &str) -> Result<Client, Error> {
     let options = KubeConfigOptions { context: Some(context.to_string()), ..Default::default() };
@@ -48,6 +88,50 @@ fn widget(name: &str, count: i32, message: &str) -> Widget {
     let mut w = Widget::new(name, WidgetSpec { count, message: Some(message.to_string()) });
     w.metadata.namespace = Some("default".to_string());
     w
+}
+
+// Widgets in namespace `default` of one cluster.
+#[derive(Clone)]
+struct Widgets {
+    cluster: &'static str,
+    api: Api<Widget>,
+}
+
+impl Widgets {
+    // Ok(None) for a 404 only. Every other error fails the test: an absence check
+    // must not pass because the cluster was unreachable or the credential forbidden.
+    async fn get_opt(&self, name: &str) -> Result<Option<Widget>, Error> {
+        match self.api.get(name).await {
+            Ok(w) => Ok(Some(w)),
+            Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(None),
+            Err(e) => {
+                error!("get Widget {} in the {} cluster failed (not a 404): {}", name, self.cluster, e);
+                Err(Error::WidgetLookupFailed(e))
+            }
+        }
+    }
+
+    // The Widget, which must exist at this point of the test.
+    async fn get(&self, name: &str) -> Result<Widget, Error> {
+        self.get_opt(name).await?.ok_or_else(|| {
+            error!("Widget {} is absent from the {} cluster but must exist now", name, self.cluster);
+            Error::WidgetSyncFailed
+        })
+    }
+}
+
+fn failed(what: &str) -> impl FnOnce(kube::Error) -> Error + '_ {
+    move |e| {
+        error!("{} failed: {}", what, e);
+        Error::WidgetSyncFailed
+    }
+}
+
+fn uid(w: &Widget) -> Result<String, Error> {
+    w.metadata.uid.clone().ok_or_else(|| {
+        error!("Widget {} has no uid", w.name_any());
+        Error::WidgetSyncFailed
+    })
 }
 
 fn synced_condition(status: &WidgetStatus) -> Option<&WidgetCondition> {
@@ -78,32 +162,100 @@ fn is_mirror_of(inner: &Widget, outer: &Widget) -> bool {
         && inner.spec == outer.spec
 }
 
-async fn wait_until<F>(what: &str, mut check: F) -> Result<(), Error>
+// The inner implementation has processed the mirror's current spec (the sync
+// reconciler copies status only then).
+fn inner_caught_up(inner: &Widget) -> bool {
+    let observed = inner.status.as_ref().and_then(|s| s.observed_generation);
+    observed.is_some() && observed == inner.metadata.generation
+}
+
+// The mirror is the object it was: same uid and no deletion timestamp. A janitor
+// pass that recognised no parent would delete the mirror and the sync reconciler
+// would recreate it under a new uid; the uid comparison catches that even when
+// the gap falls between two polls.
+fn still_the_same_mirror(inner: &Widget, mirror_uid: &str) -> Result<(), Error> {
+    if inner.metadata.uid.as_deref() != Some(mirror_uid) {
+        error!(
+            "the mirror {} was replaced: uid {} is now {:?}; a janitor pass deleted a mirror whose parent is alive",
+            inner.name_any(),
+            mirror_uid,
+            inner.metadata.uid
+        );
+        return Err(Error::WidgetSyncFailed);
+    }
+    if inner.metadata.deletion_timestamp.is_some() {
+        error!("the mirror {} (uid {}) is being deleted while its parent is alive", inner.name_any(), mirror_uid);
+        return Err(Error::WidgetSyncFailed);
+    }
+    Ok(())
+}
+
+// The outer status never carries a count only an out-of-band edit of the mirror
+// asked for.
+fn never_reports(outer: &Widget, count: i32) -> Result<(), Error> {
+    if outer.status.as_ref().and_then(|s| s.observed_count) == Some(count) {
+        error!(
+            "the outer copy reports count {}, which only an out-of-band edit of the mirror asked for: {:?}",
+            count, outer.status
+        );
+        return Err(Error::WidgetSyncFailed);
+    }
+    Ok(())
+}
+
+// While the mirror of a previous incarnation of the outer copy is still there, the
+// new outer copy may report it as not its own; it must never report Synced=True
+// nor InnerConverging, either of which means the stale mirror was adopted.
+fn not_synced_to_stale_mirror(outer: &Widget) -> Result<(), Error> {
+    let condition = match outer.status.as_ref().and_then(synced_condition) {
+        Some(c) => c,
+        None => return Ok(()),
+    };
+    // InnerTerminating is the state the design assigns to a mirror that is being
+    // deleted; it cannot show up here without a finalizer on the mirror, but it
+    // is not adoption either.
+    let stale_reasons = ["ForeignObject", "StaleMirror", "InnerTerminating"];
+    if condition.status == "False" && stale_reasons.contains(&condition.reason.as_deref().unwrap_or("")) {
+        return Ok(());
+    }
+    error!(
+        "the recreated outer copy reports the stale mirror of its predecessor as {:?}/{:?}, expected Synced=False with one of {:?}",
+        condition.status, condition.reason, stale_reasons
+    );
+    Err(Error::WidgetSyncFailed)
+}
+
+// Poll `check` every POLL until it yields a value, or `timeout` elapses.
+async fn wait_for<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<T, Error>
 where
-    F: FnMut() -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<bool, Error>> + Send>>,
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Option<T>, Error>>,
 {
+    info!("{}: waiting (up to {:?})", what, timeout);
     let start = Instant::now();
     loop {
-        if check().await? {
-            info!("{}: ok", what);
-            return Ok(());
+        if let Some(value) = check().await? {
+            info!("{}: ok after {:?}", what, start.elapsed());
+            return Ok(value);
         }
-        if start.elapsed() > TIMEOUT {
-            error!("{}: timed out", what);
+        if start.elapsed() > timeout {
+            error!("{}: timed out after {:?}", what, timeout);
             return Err(Error::Timeout);
         }
         sleep(POLL).await;
     }
 }
 
-async fn get_opt(api: &Api<Widget>, name: &str) -> Result<Option<Widget>, Error> {
-    match api.get_opt(name).await {
-        Ok(w) => Ok(w),
-        Err(e) => {
-            info!("get {} failed: {}", name, e);
-            Ok(None)
-        }
-    }
+async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<(), Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<bool, Error>>,
+{
+    wait_for(what, timeout, || {
+        let fut = check();
+        async move { Ok(if fut.await? { Some(()) } else { None }) }
+    })
+    .await
 }
 
 pub async fn widget_sync_e2e_test() -> Result<(), Error> {
@@ -116,74 +268,141 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
             return Err(Error::CRDGetFailed(e));
         }
     }
-    let outer: Api<Widget> = Api::namespaced(outer_client.clone(), "default");
-    let inner: Api<Widget> = Api::namespaced(inner_client.clone(), "default");
+    let outer = Widgets { cluster: "outer", api: Api::namespaced(outer_client.clone(), "default") };
+    let inner = Widgets { cluster: "inner", api: Api::namespaced(inner_client.clone(), "default") };
 
-    // 1. Create the outer Widget and wait for its mirror.
-    outer.create(&PostParams::default(), &widget("demo", 3, "hello")).await.map_err(|e| {
-        error!("create outer widget failed: {}", e);
-        Error::WidgetSyncFailed
-    })?;
+    // 1. Create the outer Widget and wait for its mirror. The uid of the mirror
+    //    seen here is what check 6 holds the controller to until the mirror is
+    //    deleted on purpose in step 7.
+    outer.api.create(&PostParams::default(), &widget("demo", 3, "hello")).await.map_err(failed("create outer widget demo"))?;
     let (o, i) = (outer.clone(), inner.clone());
-    wait_until("mirror exists with the outer spec", move || {
+    let mirror_uid = wait_for("mirror exists with the outer spec", TIMEOUT, move || {
         let (o, i) = (o.clone(), i.clone());
-        Box::pin(async move {
-            let outer_obj = match get_opt(&o, "demo").await? { Some(w) => w, None => return Ok(false) };
-            let inner_obj = match get_opt(&i, "demo").await? { Some(w) => w, None => return Ok(false) };
-            Ok(is_mirror_of(&inner_obj, &outer_obj))
-        })
+        async move {
+            let outer_obj = match o.get_opt("demo").await? { Some(w) => w, None => return Ok(None) };
+            let inner_obj = match i.get_opt("demo").await? { Some(w) => w, None => return Ok(None) };
+            Ok(if is_mirror_of(&inner_obj, &outer_obj) { Some(uid(&inner_obj)?) } else { None })
+        }
+    })
+    .await?;
+    let mirror_seen_at = Instant::now();
+    info!("mirror demo has uid {}", mirror_uid);
+
+    // 2. The outer status mirrors the inner status at the outer generation, which
+    //    is 1 for a fresh object.
+    let (o, i, u) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    wait_until("outer status reports count 3 at generation 1 with Synced=True", TIMEOUT, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            still_the_same_mirror(&i.get("demo").await?, &u)?;
+            let outer_obj = o.get("demo").await?;
+            Ok(outer_obj.metadata.generation == Some(1) && outer_reports(&outer_obj, 3))
+        }
     })
     .await?;
 
-    // 2. The outer status mirrors the inner status at the outer generation.
-    let o = outer.clone();
-    wait_until("outer status reports count 3 at its generation with Synced=True", move || {
-        let o = o.clone();
-        Box::pin(async move {
-            Ok(get_opt(&o, "demo").await?.map(|w| outer_reports(&w, 3)).unwrap_or(false))
-        })
-    })
-    .await?;
-
-    // 3. A spec change propagates and the status catches up at the new generation.
-    outer
+    // 3. A spec change bumps the generation by exactly one, propagates, and the
+    //    status catches up at the new generation.
+    let generation_before = outer.get("demo").await?.metadata.generation.unwrap_or(0);
+    if generation_before != 1 {
+        error!("outer demo is at generation {} before its first spec change, expected 1", generation_before);
+        return Err(Error::WidgetSyncFailed);
+    }
+    let patched = outer
+        .api
         .patch("demo", &PatchParams::default(), &Patch::Merge(json!({ "spec": { "count": 5 } })))
         .await
-        .map_err(|e| {
-            error!("patch outer widget failed: {}", e);
-            Error::WidgetSyncFailed
-        })?;
-    let (o, i) = (outer.clone(), inner.clone());
-    wait_until("mirror carries count 5 and outer status reports it at generation 2", move || {
-        let (o, i) = (o.clone(), i.clone());
-        Box::pin(async move {
-            let outer_obj = match get_opt(&o, "demo").await? { Some(w) => w, None => return Ok(false) };
-            let inner_obj = match get_opt(&i, "demo").await? { Some(w) => w, None => return Ok(false) };
-            Ok(outer_obj.metadata.generation == Some(2)
+        .map_err(failed("patch outer widget demo"))?;
+    let generation_after = generation_before + 1;
+    if patched.metadata.generation != Some(generation_after) {
+        error!(
+            "the spec change moved the outer generation from {} to {:?}, expected {}",
+            generation_before, patched.metadata.generation, generation_after
+        );
+        return Err(Error::WidgetSyncFailed);
+    }
+    info!("spec change bumped the outer generation from {} to {}: ok", generation_before, generation_after);
+    let (o, i, u) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    wait_until("mirror carries count 5 and outer status reports it at generation 2", TIMEOUT, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            let inner_obj = i.get("demo").await?;
+            still_the_same_mirror(&inner_obj, &u)?;
+            let outer_obj = o.get("demo").await?;
+            Ok(outer_obj.metadata.generation == Some(generation_after)
                 && is_mirror_of(&inner_obj, &outer_obj)
                 && inner_obj.spec.count == 5
                 && outer_reports(&outer_obj, 5))
-        })
+        }
     })
     .await?;
 
-    // 4. A foreign inner object is refused, never adopted.
+    // 4. An out-of-band edit of the mirror's spec is overwritten with the outer
+    //    spec, and the count it asked for never reaches the outer status. The
+    //    edit bumps the mirror's generation once and the overwrite once more; the
+    //    overwrite is a JSON patch that tests the generation, so it lands exactly
+    //    once. The inner watch triggers the reconcile at once; the bound is the
+    //    requeue that liveness rests on.
+    const EDITED_COUNT: i32 = 99;
+    let mirror_before = inner.get("demo").await?;
+    still_the_same_mirror(&mirror_before, &mirror_uid)?;
+    let mirror_generation = mirror_before.metadata.generation.ok_or_else(|| {
+        error!("the mirror has no generation: {:?}", mirror_before.metadata);
+        Error::WidgetSyncFailed
+    })?;
+    inner
+        .api
+        .patch("demo", &PatchParams::default(), &Patch::Merge(json!({ "spec": { "count": EDITED_COUNT } })))
+        .await
+        .map_err(failed("patch the mirror's spec out of band"))?;
+    let (o, i, u) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    wait_until("out-of-band spec edit of the mirror is overwritten with the outer spec", ONE_RECONCILE, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            let inner_obj = i.get("demo").await?;
+            still_the_same_mirror(&inner_obj, &u)?;
+            let outer_obj = o.get("demo").await?;
+            never_reports(&outer_obj, EDITED_COUNT)?;
+            if inner_obj.spec != outer_obj.spec {
+                return Ok(false);
+            }
+            if inner_obj.metadata.generation != Some(mirror_generation + 2) {
+                error!(
+                    "the mirror carries the outer spec again at generation {:?}, expected {} (one edit, one overwrite)",
+                    inner_obj.metadata.generation,
+                    mirror_generation + 2
+                );
+                return Err(Error::WidgetSyncFailed);
+            }
+            Ok(true)
+        }
+    })
+    .await?;
+    let (o, i, u) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    wait_until("outer status reports count 5 at generation 2 with Synced=True against the overwritten mirror", TIMEOUT, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            let inner_obj = i.get("demo").await?;
+            still_the_same_mirror(&inner_obj, &u)?;
+            let outer_obj = o.get("demo").await?;
+            never_reports(&outer_obj, EDITED_COUNT)?;
+            Ok(inner_obj.spec == outer_obj.spec && inner_caught_up(&inner_obj) && outer_reports(&outer_obj, 5))
+        }
+    })
+    .await?;
+
+    // 5. A foreign inner object is refused, never adopted.
     let mut foreign = widget("foreign", 7, "not yours");
     foreign.metadata.labels = Some([("owner".to_string(), "someone-else".to_string())].into());
-    inner.create(&PostParams::default(), &foreign).await.map_err(|e| {
-        error!("create foreign inner widget failed: {}", e);
-        Error::WidgetSyncFailed
-    })?;
-    outer.create(&PostParams::default(), &widget("foreign", 1, "mine")).await.map_err(|e| {
-        error!("create outer widget failed: {}", e);
-        Error::WidgetSyncFailed
-    })?;
-    let (o, i) = (outer.clone(), inner.clone());
-    wait_until("outer copy reports ForeignObject and the foreign object is untouched", move || {
-        let (o, i) = (o.clone(), i.clone());
-        Box::pin(async move {
-            let outer_obj = match get_opt(&o, "foreign").await? { Some(w) => w, None => return Ok(false) };
-            let inner_obj = match get_opt(&i, "foreign").await? { Some(w) => w, None => return Ok(false) };
+    inner.api.create(&PostParams::default(), &foreign).await.map_err(failed("create foreign inner widget"))?;
+    outer.api.create(&PostParams::default(), &widget("foreign", 1, "mine")).await.map_err(failed("create outer widget foreign"))?;
+    let (o, i, u) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    wait_until("outer copy reports ForeignObject and the foreign object is untouched", TIMEOUT, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            still_the_same_mirror(&i.get("demo").await?, &u)?;
+            let outer_obj = o.get("foreign").await?;
+            let inner_obj = i.get("foreign").await?;
             if inner_obj.spec.count != 7 || inner_obj.metadata.labels.as_ref().and_then(|l| l.get(MANAGED_BY_KEY)).is_some() {
                 error!("the sync controller touched a foreign object: {:?}", inner_obj);
                 return Err(Error::WidgetSyncFailed);
@@ -194,30 +413,134 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
                 && condition
                     .map(|c| c.status == "False" && c.reason.as_deref() == Some("ForeignObject"))
                     .unwrap_or(false))
-        })
+        }
     })
     .await?;
 
-    // 5. Deleting the outer copies: the mirror is collected, the foreign object survives.
-    outer.delete("demo", &DeleteParams::default()).await.map_err(|e| {
-        error!("delete outer widget failed: {}", e);
-        Error::WidgetSyncFailed
-    })?;
-    outer.delete("foreign", &DeleteParams::default()).await.map_err(|e| {
-        error!("delete outer widget failed: {}", e);
-        Error::WidgetSyncFailed
-    })?;
+    // 6. The mirror survives the janitor while its parent is alive. Every poll
+    //    since step 1 has checked its uid and deletion timestamp; this wait covers
+    //    whatever is left of a window that contains at least one janitor resync
+    //    of the mirror (the janitor also ran on every event of the mirror so far).
+    info!(
+        "mirror survival: {:?} of the {:?} window covered by the checks so far",
+        mirror_seen_at.elapsed(),
+        JANITOR_WINDOW
+    );
+    let (i, u) = (inner.clone(), mirror_uid.clone());
+    wait_until("mirror with a live parent keeps its uid through the janitor's resync window", JANITOR_WINDOW + MARGIN, move || {
+        let (i, u) = (i.clone(), u.clone());
+        async move {
+            still_the_same_mirror(&i.get("demo").await?, &u)?;
+            Ok(mirror_seen_at.elapsed() >= JANITOR_WINDOW)
+        }
+    })
+    .await?;
+
+    // 7. An out-of-band delete of the mirror is repaired: the sync reconciler,
+    //    triggered by the inner watch and at the latest by its requeue, finds
+    //    NotFound and creates the mirror again for the same parent.
+    inner.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete the mirror out of band"))?;
+    let (o, i, old) = (outer.clone(), inner.clone(), mirror_uid.clone());
+    let recreated_uid = wait_for("mirror deleted out of band is recreated with the outer spec and parent uid", ONE_RECONCILE, move || {
+        let (o, i, old) = (o.clone(), i.clone(), old.clone());
+        async move {
+            let outer_obj = o.get("demo").await?;
+            let inner_obj = match i.get_opt("demo").await? { Some(w) => w, None => return Ok(None) };
+            if uid(&inner_obj)? == old {
+                // The delete has not gone through yet.
+                return Ok(None);
+            }
+            Ok(if is_mirror_of(&inner_obj, &outer_obj) { Some(uid(&inner_obj)?) } else { None })
+        }
+    })
+    .await?;
+    info!("recreated mirror demo has uid {}", recreated_uid);
+    let (o, i, u) = (outer.clone(), inner.clone(), recreated_uid.clone());
+    wait_until("outer status reports count 5 at generation 2 with Synced=True against the recreated mirror", TIMEOUT, move || {
+        let (o, i, u) = (o.clone(), i.clone(), u.clone());
+        async move {
+            let inner_obj = i.get("demo").await?;
+            still_the_same_mirror(&inner_obj, &u)?;
+            let outer_obj = o.get("demo").await?;
+            Ok(inner_obj.spec == outer_obj.spec && inner_caught_up(&inner_obj) && outer_reports(&outer_obj, 5))
+        }
+    })
+    .await?;
+
+    // 8. Delete the outer copy and recreate it at once under the same name with
+    //    another spec. The outer copy has no finalizers, so the delete is final
+    //    when it returns and the name is free. Nothing in the inner cluster
+    //    changes on the outer delete, so the stale mirror is collected at the
+    //    janitor's next resync; the delete event then triggers the sync
+    //    reconciler, which creates the mirror of the new object.
+    let old_parent_uid = uid(&outer.get("demo").await?)?;
+    let stale_mirror_uid = recreated_uid.clone();
+    outer.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete outer widget demo"))?;
+    let new_outer =
+        outer.api.create(&PostParams::default(), &widget("demo", 8, "again")).await.map_err(failed("recreate outer widget demo"))?;
+    let new_parent_uid = uid(&new_outer)?;
+    if new_parent_uid == old_parent_uid {
+        error!("the recreated outer copy has the uid of the deleted one, {}", old_parent_uid);
+        return Err(Error::WidgetSyncFailed);
+    }
+    info!("outer demo recreated: uid {} replaces {}", new_parent_uid, old_parent_uid);
+    let (o, i, stale, parent) = (outer.clone(), inner.clone(), stale_mirror_uid.clone(), new_parent_uid.clone());
+    wait_until("stale mirror of the deleted outer copy is collected by the janitor", ONE_RECONCILE, move || {
+        let (o, i, stale, parent) = (o.clone(), i.clone(), stale.clone(), parent.clone());
+        async move {
+            // Outer first, inner second: if the stale mirror is still there at the
+            // second read, it was there when the outer status was read, and that
+            // status cannot legitimately be Synced.
+            let outer_obj = o.get("demo").await?;
+            if uid(&outer_obj)? != parent {
+                error!("outer demo is not the object the test recreated: {:?}", outer_obj.metadata.uid);
+                return Err(Error::WidgetSyncFailed);
+            }
+            let inner_obj = match i.get_opt("demo").await? { Some(w) => w, None => return Ok(true) };
+            if uid(&inner_obj)? != stale {
+                return Ok(true);
+            }
+            not_synced_to_stale_mirror(&outer_obj)?;
+            Ok(false)
+        }
+    })
+    .await?;
+    let (o, i, stale, parent) = (outer.clone(), inner.clone(), stale_mirror_uid.clone(), new_parent_uid.clone());
+    wait_until("new mirror carries the new parent uid and count 8, and the outer status reports it at generation 1", TIMEOUT, move || {
+        let (o, i, stale, parent) = (o.clone(), i.clone(), stale.clone(), parent.clone());
+        async move {
+            let outer_obj = o.get("demo").await?;
+            if uid(&outer_obj)? != parent {
+                error!("outer demo is not the object the test recreated: {:?}", outer_obj.metadata.uid);
+                return Err(Error::WidgetSyncFailed);
+            }
+            let inner_obj = match i.get_opt("demo").await? { Some(w) => w, None => return Ok(false) };
+            if uid(&inner_obj)? == stale {
+                error!("the stale mirror {} is back after it was collected", stale);
+                return Err(Error::WidgetSyncFailed);
+            }
+            Ok(outer_obj.metadata.generation == Some(1)
+                && is_mirror_of(&inner_obj, &outer_obj)
+                && inner_obj.spec.count == 8
+                && outer_reports(&outer_obj, 8))
+        }
+    })
+    .await?;
+
+    // 9. Deleting the outer copies: the mirror is collected, the foreign object survives.
+    outer.api.delete("demo", &DeleteParams::default()).await.map_err(failed("delete outer widget demo"))?;
+    outer.api.delete("foreign", &DeleteParams::default()).await.map_err(failed("delete outer widget foreign"))?;
     let i = inner.clone();
-    wait_until("mirror is collected by the janitor", move || {
+    wait_until("mirror is collected by the janitor", ONE_RECONCILE, move || {
         let i = i.clone();
-        Box::pin(async move { Ok(get_opt(&i, "demo").await?.is_none()) })
+        async move { Ok(i.get_opt("demo").await?.is_none()) }
     })
     .await?;
     // The janitor has run by now (it reconciles every inner Widget on its own schedule
     // and was triggered by the same deletion); the foreign object must still be there.
     sleep(Duration::from_secs(20)).await;
-    match inner.get_opt("foreign").await {
-        Ok(Some(w)) if w.metadata.deletion_timestamp.is_none() => info!("foreign object survived: ok"),
+    match inner.get_opt("foreign").await? {
+        Some(w) if w.metadata.deletion_timestamp.is_none() => info!("foreign object survived: ok"),
         other => {
             error!("the foreign object did not survive: {:?}", other);
             return Err(Error::WidgetSyncFailed);
