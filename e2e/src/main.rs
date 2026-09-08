@@ -8,6 +8,7 @@ pub mod vstatefulset_e2e;
 pub mod vstatefulset_admission_e2e;
 pub mod vreplicaset_admission_e2e;
 pub mod vdeployment_admission_e2e;
+pub mod widget_sync_bindings_e2e;
 pub mod widget_sync_e2e;
 
 use common::Error;
@@ -21,6 +22,7 @@ use vdeployment_e2e::vdeployment_e2e_test;
 use vdeployment_admission_e2e::vdeployment_admission_e2e_test;
 use vstatefulset_e2e::vstatefulset_e2e_test;
 use vstatefulset_admission_e2e::vstatefulset_admission_e2e_test;
+use widget_sync_bindings_e2e::widget_sync_bindings_e2e_test;
 use widget_sync_e2e::widget_sync_e2e_test;
 
 #[tokio::main]
@@ -67,8 +69,12 @@ async fn main() -> Result<(), Error> {
             return vstatefulset_admission_e2e_test().await;
         }
         "widget-sync" => {
-            info!("Running widget-sync two-cluster end-to-end test");
+            info!("Running widget-sync end-to-end test against the binding default/a");
             return widget_sync_e2e_test().await;
+        }
+        "widget-sync-bindings" => {
+            info!("Running widget-sync end-to-end test of the bindings and the claim");
+            return widget_sync_bindings_e2e_test().await;
         }
         _ => {
             error!("Wrong command. Please specify the correct e2e test workload.");

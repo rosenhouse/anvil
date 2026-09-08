@@ -1,8 +1,10 @@
 #![allow(unused_imports)]
 #![allow(unused_variables)]
-// End-to-end test of the widget sync example across the two kind clusters that
-// tools/two-cluster-test.sh creates (kubectl contexts kind-widget-sync-outer and
-// kind-widget-sync-inner). It checks, in order:
+// End-to-end test of the widget sync example against the binding `default/a` of
+// the three kind clusters tools/two-cluster-test.sh creates (kubectl contexts
+// kind-widget-sync-outer and kind-widget-sync-inner-a). The scenarios of the
+// bindings themselves, which use the second inner cluster too, are in
+// widget_sync_bindings_e2e.rs. It checks, in order:
 //   1. a Widget created in the outer cluster gets a mirror in the inner cluster
 //      with the same spec, our label and parent-uid annotation, and no owner
 //      references;
@@ -46,14 +48,14 @@ use verifiable_controllers::crds::{Widget, WidgetCondition, WidgetSpec, WidgetSt
 
 use crate::common::*;
 
-const OUTER_CONTEXT: &str = "kind-widget-sync-outer";
-const INNER_CONTEXT: &str = "kind-widget-sync-inner";
-const MANAGED_BY_KEY: &str = "anvil.dev/managed-by";
-const MANAGED_BY_VALUE: &str = "widget-sync";
-const PARENT_UID_KEY: &str = "anvil.dev/parent-uid";
-const POLL: Duration = Duration::from_secs(3);
+pub(crate) const OUTER_CONTEXT: &str = "kind-widget-sync-outer";
+pub(crate) const INNER_CONTEXT: &str = "kind-widget-sync-inner-a";
+pub(crate) const MANAGED_BY_KEY: &str = "anvil.dev/managed-by";
+pub(crate) const MANAGED_BY_VALUE: &str = "widget-sync";
+pub(crate) const PARENT_UID_KEY: &str = "anvil.dev/parent-uid";
+pub(crate) const POLL: Duration = Duration::from_secs(3);
 // The generous bound for convergence that also involves the echo controller.
-const TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(300);
 
 // Intervals of the controller under test, from src/shim_layer/controller_runtime.rs.
 // reconcile_with requeues a finished reconcile after 60s: that is the sync
@@ -61,21 +63,21 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 // and error_policy requeues a failed reconcile after 10s. A remote request times
 // out after 10s (src/bin/widget_sync_controller.rs), so one failed attempt costs
 // at most REMOTE_TIMEOUT + ERROR_REQUEUE before the next.
-const REQUEUE: Duration = Duration::from_secs(60);
-const ERROR_REQUEUE: Duration = Duration::from_secs(10);
-const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const REQUEUE: Duration = Duration::from_secs(60);
+pub(crate) const ERROR_REQUEUE: Duration = Duration::from_secs(10);
+pub(crate) const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 // Slack for the reconcile itself, the watch latency and the poll period.
-const MARGIN: Duration = Duration::from_secs(30);
+pub(crate) const MARGIN: Duration = Duration::from_secs(30);
 // Within this bound a healthy controller has run at least one full reconcile of an
 // object after any trigger, even if the first attempt failed once: the requeue,
 // one failed attempt, and slack.
-const ONE_RECONCILE: Duration = Duration::from_secs(
+pub(crate) const ONE_RECONCILE: Duration = Duration::from_secs(
     REQUEUE.as_secs() + REMOTE_TIMEOUT.as_secs() + ERROR_REQUEUE.as_secs() + MARGIN.as_secs(),
 );
 // A window in which the janitor has certainly resynced a mirror at least once.
-const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
+pub(crate) const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
 
-async fn client_for_context(context: &str) -> Result<Client, Error> {
+pub(crate) async fn client_for_context(context: &str) -> Result<Client, Error> {
     let options = KubeConfigOptions { context: Some(context.to_string()), ..Default::default() };
     let config = Config::from_kubeconfig(&options).await.map_err(|e| {
         error!("cannot load kubeconfig context {}: {}", context, e);
@@ -85,8 +87,8 @@ async fn client_for_context(context: &str) -> Result<Client, Error> {
 }
 
 fn widget(name: &str, count: i32, message: &str) -> Widget {
-    // The binding name of the single-pair testbed; the bindings work renames it as needed.
-    let spec = WidgetSpec { cluster_name: "inner".to_string(), count, message: Some(message.to_string()) };
+    // The binding whose inner cluster these scenarios run against.
+    let spec = WidgetSpec { cluster_name: "a".to_string(), count, message: Some(message.to_string()) };
     let mut w = Widget::new(name, spec);
     w.metadata.namespace = Some("default".to_string());
     w
@@ -94,15 +96,15 @@ fn widget(name: &str, count: i32, message: &str) -> Widget {
 
 // Widgets in namespace `default` of one cluster.
 #[derive(Clone)]
-struct Widgets {
-    cluster: &'static str,
-    api: Api<Widget>,
+pub(crate) struct Widgets {
+    pub(crate) cluster: &'static str,
+    pub(crate) api: Api<Widget>,
 }
 
 impl Widgets {
     // Ok(None) for a 404 only. Every other error fails the test: an absence check
     // must not pass because the cluster was unreachable or the credential forbidden.
-    async fn get_opt(&self, name: &str) -> Result<Option<Widget>, Error> {
+    pub(crate) async fn get_opt(&self, name: &str) -> Result<Option<Widget>, Error> {
         match self.api.get(name).await {
             Ok(w) => Ok(Some(w)),
             Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(None),
@@ -114,7 +116,7 @@ impl Widgets {
     }
 
     // The Widget, which must exist at this point of the test.
-    async fn get(&self, name: &str) -> Result<Widget, Error> {
+    pub(crate) async fn get(&self, name: &str) -> Result<Widget, Error> {
         self.get_opt(name).await?.ok_or_else(|| {
             error!("Widget {} is absent from the {} cluster but must exist now", name, self.cluster);
             Error::WidgetSyncFailed
@@ -122,26 +124,26 @@ impl Widgets {
     }
 }
 
-fn failed(what: &str) -> impl FnOnce(kube::Error) -> Error + '_ {
+pub(crate) fn failed(what: &str) -> impl FnOnce(kube::Error) -> Error + '_ {
     move |e| {
         error!("{} failed: {}", what, e);
         Error::WidgetSyncFailed
     }
 }
 
-fn uid(w: &Widget) -> Result<String, Error> {
+pub(crate) fn uid(w: &Widget) -> Result<String, Error> {
     w.metadata.uid.clone().ok_or_else(|| {
         error!("Widget {} has no uid", w.name_any());
         Error::WidgetSyncFailed
     })
 }
 
-fn synced_condition(status: &WidgetStatus) -> Option<&WidgetCondition> {
+pub(crate) fn synced_condition(status: &WidgetStatus) -> Option<&WidgetCondition> {
     status.conditions.as_ref()?.iter().find(|c| c.type_ == "Synced")
 }
 
 // The outer copy reports `count` at its current generation with Synced=True.
-fn outer_reports(outer: &Widget, count: i32) -> bool {
+pub(crate) fn outer_reports(outer: &Widget, count: i32) -> bool {
     let status = match &outer.status {
         Some(s) => s,
         None => return false,
@@ -155,7 +157,7 @@ fn outer_reports(outer: &Widget, count: i32) -> bool {
         && condition.map(|c| c.status == "True" && c.observed_generation == generation).unwrap_or(false)
 }
 
-fn is_mirror_of(inner: &Widget, outer: &Widget) -> bool {
+pub(crate) fn is_mirror_of(inner: &Widget, outer: &Widget) -> bool {
     let labels = inner.metadata.labels.as_ref();
     let annotations = inner.metadata.annotations.as_ref();
     labels.and_then(|l| l.get(MANAGED_BY_KEY)).map(|v| v == MANAGED_BY_VALUE).unwrap_or(false)
@@ -166,7 +168,7 @@ fn is_mirror_of(inner: &Widget, outer: &Widget) -> bool {
 
 // The inner implementation has processed the mirror's current spec (the sync
 // reconciler copies status only then).
-fn inner_caught_up(inner: &Widget) -> bool {
+pub(crate) fn inner_caught_up(inner: &Widget) -> bool {
     let observed = inner.status.as_ref().and_then(|s| s.observed_generation);
     observed.is_some() && observed == inner.metadata.generation
 }
@@ -175,7 +177,7 @@ fn inner_caught_up(inner: &Widget) -> bool {
 // pass that recognised no parent would delete the mirror and the sync reconciler
 // would recreate it under a new uid; the uid comparison catches that even when
 // the gap falls between two polls.
-fn still_the_same_mirror(inner: &Widget, mirror_uid: &str) -> Result<(), Error> {
+pub(crate) fn still_the_same_mirror(inner: &Widget, mirror_uid: &str) -> Result<(), Error> {
     if inner.metadata.uid.as_deref() != Some(mirror_uid) {
         error!(
             "the mirror {} was replaced: uid {} is now {:?}; a janitor pass deleted a mirror whose parent is alive",
@@ -228,7 +230,7 @@ fn not_synced_to_stale_mirror(outer: &Widget) -> Result<(), Error> {
 }
 
 // Poll `check` every POLL until it yields a value, or `timeout` elapses.
-async fn wait_for<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<T, Error>
+pub(crate) async fn wait_for<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<T, Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Option<T>, Error>>,
@@ -248,7 +250,7 @@ where
     }
 }
 
-async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<(), Error>
+pub(crate) async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<(), Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<bool, Error>>,
