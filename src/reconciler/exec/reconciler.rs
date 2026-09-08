@@ -1,4 +1,7 @@
-use crate::kubernetes_api_objects::spec::resource::{CustomResourceView, ResourceView};
+use crate::kubernetes_api_objects::spec::resource::{CustomResourceView, Marshallable, ResourceView};
+use crate::kubernetes_api_objects::spec::synced_object::DynamicObjectLike;
+use crate::kubernetes_cluster::spec::controller::types::ReconcileModel;
+use crate::kubernetes_cluster::spec::install_helpers::*;
 use crate::reconciler::exec::io::*;
 use crate::reconciler::spec::reconciler::Reconciler as ModelReconciler;
 use vstd::prelude::*;
@@ -54,6 +57,62 @@ where
     // It conforms to the model's reconciler_error.
     fn reconcile_error(state: &Self::S) -> (res: bool)
         ensures res == Self::M::reconcile_error(state@);
+}
+
+// DynReconciler is a reconciler whose behaviour is a function of data it holds
+// (a kind, a binding, a registry entry) rather than of its type, so that one
+// implementation serves every kind it is instantiated for at boot. Its methods
+// take &self, and its model is a ReconcileModel value computed from the same
+// data (Cluster::synced_reconcile_model builds one from spec functions over the
+// shape). The postconditions relate each method to the model's closure applied
+// to the marshalled views, which is how the cluster model runs the closures;
+// lemma_synced_reconcile_model_transition and
+// lemma_synced_reconcile_model_init_done_error reduce them to the typed spec
+// functions the model was built from.
+//
+// The shim calls reconcile_core on an object it fetched from the cluster and
+// wrapped for the kind the controller was started for, which is what the
+// precondition on the kind trusts (shim_layer::controller_runtime::
+// reconcile_dyn_with).
+pub trait DynReconciler
+where
+    Self::S: View,
+    <Self::S as View>::V: Marshallable,
+    Self::K: View,
+    <Self::K as View>::V: DynamicObjectLike,
+    Self::EReq: View,
+    <Self::EReq as View>::V: Marshallable,
+    Self::EResp: View,
+    <Self::EResp as View>::V: Marshallable,
+{
+    // S: type of the reconciler state of the reconciler.
+    type S;
+    // K: type of the triggering object (SyncedObject for a kind of the shape).
+    type K;
+    // EReq: type of request the controller sends to the external systems (if any).
+    type EReq;
+    // EResp: type of response the controller receives from the external systems (if any).
+    type EResp;
+
+    // The model this reconciler conforms to.
+    spec fn model(&self) -> ReconcileModel;
+
+    fn reconcile_init_state(&self) -> (state: Self::S)
+        ensures state@.marshal() == (self.model().init)();
+
+    fn reconcile_core(&self, cr: &Self::K, resp_o: Option<Response<Self::EResp>>, state: Self::S) -> (res: (Self::S, Option<Request<Self::EReq>>))
+        requires
+            cr@.metadata().well_formed_for_namespaced(),
+            cr@.kind() == self.model().kind,
+        ensures
+            (self.model().transition)(cr@.marshal(), marshal_response_view::<<Self::EResp as View>::V>(resp_o.deep_view()), state@.marshal())
+                == (res.0@.marshal(), marshal_request_view::<<Self::EReq as View>::V>(res.1.deep_view()));
+
+    fn reconcile_done(&self, state: &Self::S) -> (res: bool)
+        ensures res == (self.model().done)(state@.marshal());
+
+    fn reconcile_error(&self, state: &Self::S) -> (res: bool)
+        ensures res == (self.model().error)(state@.marshal());
 }
 
 }
