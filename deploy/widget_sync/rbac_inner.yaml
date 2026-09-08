@@ -1,10 +1,19 @@
-# RBAC for the widget sync controller's access to the inner (remote) cluster.
-# Apply this in the inner cluster. tools/two-cluster-test.sh puts the service
-# account token, as a separate `token` key referenced by a relative tokenFile,
-# next to the kubeconfig in the Secret the controller mounts in the outer
-# cluster; the token file is re-read, an inline token would not be.
+# RBAC for the widget sync controller's access to an inner (remote) cluster.
+# Apply this in the inner cluster. tools/two-cluster-test.sh builds a
+# self-contained kubeconfig for this service account (the token and the CA
+# inline) and puts it in the outer cluster as the `value` of the binding's
+# Secret `<clusterName>-kubeconfig`, the Cluster API convention; a rotation is
+# that Secret changing, which rebuilds the binding's clients.
 # The controller creates, patches (spec) and deletes the mirrors it owns and
-# reads every Widget; it never writes Widget status in the inner cluster.
+# reads every object of the configured kinds; it never writes their status in
+# the inner cluster. One rule per kind the controller is given
+# (deploy_local.yaml's --kind flags): the demo configures Widget and Gadget, and
+# the per-binding access check asks for exactly these verbs on each plural.
+# The controller also settles the claim of this cluster (ConfigMap
+# kube-system/anvil-sync-claim, doc/widget_sync_fanout_design.md, section 1.3):
+# it creates it on first contact and reads it afterwards, and it never updates
+# or deletes it — releasing a claim is an operator's decision, made with a
+# credential of their own.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -40,6 +49,7 @@ rules:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list
@@ -58,6 +68,50 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: ClusterRole
   name: widget-sync-remote-role
+subjects:
+  - kind: ServiceAccount
+    name: widget-sync-remote
+    namespace: widget-sync
+---
+# The claim (doc/widget_sync_fanout_design.md, section 1.3). `create` cannot be
+# limited by name, so it is granted on configmaps of kube-system; `get` is
+# limited to the claim itself. The binding manager asks for exactly these two
+# verbs in its access check, so a cluster without this Role reports the binding
+# as refused instead of failing every reconcile.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-remote
+  name: widget-sync-remote-claim
+  namespace: kube-system
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - anvil-sync-claim
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/name: widget-sync-remote
+  name: widget-sync-remote-claim
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: widget-sync-remote-claim
 subjects:
   - kind: ServiceAccount
     name: widget-sync-remote

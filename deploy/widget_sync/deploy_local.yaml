@@ -1,16 +1,17 @@
 # The widget sync controller, deployed in the outer (primary) cluster.
 # Exactly one replica: the proofs assume a single active sync controller.
-# The Secret widget-sync-remote-kubeconfig holds a kubeconfig for the inner
-# cluster (key "kubeconfig") and the bearer token it references through a
-# relative tokenFile (key "token"); tools/two-cluster-test.sh creates it. Both
-# keys land in the same mounted directory. kube re-reads the token file at
-# least once a minute, so rotating the Secret takes effect without a restart.
-# Readiness is the file the binary creates at $READY_FILE once the remote
-# credential has passed its SelfSubjectAccessReview check (a denial makes the
-# process exit instead, so the pod crash-loops and never becomes ready). There
-# is no liveness probe: the binary exposes nothing that reflects whether the
-# reconcilers are still making progress, and a probe that does not measure that
-# would only restart a healthy pod.
+# No kubeconfig is mounted: the controller reads the credential of each binding
+# from the Secret `<clusterName>-kubeconfig` of the binding's namespace through
+# the API server (rbac.yaml grants secrets get, list and watch), so bindings come
+# and go, and their credentials rotate, without touching this Deployment.
+# Readiness is the file the binary creates at $READY_FILE once its configured
+# kinds have passed the boot checks and the sync controllers are running. It
+# says nothing about the bindings on purpose: an inner cluster that is down or
+# that refuses the credential is one binding among many, degraded and retried,
+# and must not keep the pod from becoming ready. There is no liveness probe:
+# the binary exposes nothing that reflects whether the reconcilers are still
+# making progress, and a probe that does not measure that would only restart a
+# healthy pod.
 #
 # The ConfigMap widget-sync-janitor is the janitor's pause gate. It is mounted
 # read-only at /etc/widget-sync/janitor and the binary is told, through
@@ -59,15 +60,25 @@ spec:
         - image: local/widget-sync-controller:v0.1.0
           imagePullPolicy: IfNotPresent
           name: controller
+          # The image's entrypoint is `controller run`; these follow it. One
+          # --kind per kind the controller takes on, each with the field that
+          # names an object's cluster: Widget's is spec.clusterName (a required,
+          # immutable string), Gadget's is its own metadata.name. Adding a kind
+          # here means its CRD in both clusters and its rules in rbac.yaml and
+          # rbac_inner.yaml; a CRD without the shape of the design's section 2.2
+          # is refused at boot and the pod never becomes ready.
+          args:
+            - --kind
+            - anvil.dev/v1/Widget:field:spec.clusterName
+            - --kind
+            - anvil.dev/v1/Gadget:name
           env:
-            - name: REMOTE_KUBECONFIG
-              value: /etc/widget-sync/remote-kubeconfig/kubeconfig
             - name: READY_FILE
               value: /run/widget-sync/ready
             - name: JANITOR_PAUSE_FILE
               value: /etc/widget-sync/janitor/pause
           # A startup probe, not a readiness probe: the file appears once the
-          # access check has passed and never disappears, so there is nothing
+          # boot checks have passed and never disappears, so there is nothing
           # to re-check afterwards.
           startupProbe:
             exec:
@@ -91,9 +102,6 @@ spec:
               drop:
                 - ALL
           volumeMounts:
-            - name: remote-kubeconfig
-              mountPath: /etc/widget-sync/remote-kubeconfig
-              readOnly: true
             # The janitor's pause gate: the file `pause` here withholds deletes.
             - name: janitor
               mountPath: /etc/widget-sync/janitor
@@ -102,9 +110,6 @@ spec:
             - name: run
               mountPath: /run/widget-sync
       volumes:
-        - name: remote-kubeconfig
-          secret:
-            secretName: widget-sync-remote-kubeconfig
         - name: janitor
           configMap:
             name: widget-sync-janitor

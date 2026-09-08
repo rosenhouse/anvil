@@ -1,12 +1,27 @@
 // The Widget controllers in the two-store model: the outer copies live in the
-// primary store, the mirrors in the remote one. This module instantiates the
-// refinement of kubernetes_cluster::proof::two_cluster for them: the annotation
-// hook that carries a parent uid across the relabeling, the proof that both
-// reconcilers commute with the relabeling, and the reading of R1, R2 and R3s
-// on two-store executions.
+// primary store, the mirrors of one binding in the remote one. This module
+// instantiates the refinement of kubernetes_cluster::proof::two_cluster for them:
+// the annotation hook that carries a parent uid across the relabeling, the proof
+// that both reconcilers commute with the relabeling, and the reading of R1, R2
+// and R3s on two-store executions.
+//
+// The statements here were vacuous between the fan-out port (commit 7eebc12) and
+// the change that added SyncKind::bindings: all_inner_kinds_installed asked that
+// the mirror kind of *every* binding be installed, and those kinds are infinitely
+// many while InstalledTypes is a finite Map, so no Cluster satisfied it. The sync
+// reconciler model now serves the finite set k.bindings and refuses every other
+// binding before it sends a request, so the hypothesis is a finite conjunction;
+// widget_instance_two_cluster_theorem and widget_disturbed_two_cluster_theorem at
+// the end of this file close the statement for the cluster of any configuration,
+// and are the witness that the hypotheses of the general theorem are satisfiable
+// at all. Nothing there names a kind: the distinctness of the model kinds comes
+// from sync_kind_ok and binding_ok through the injectivity of model_kind, and the
+// demo configuration is one line applying them.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_api_objects::spec::model_kind::*;
+use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::proof::{composition::*, core::*, temporal_rules::*};
 use crate::kubernetes_cluster::proof::two_cluster::{api_server::*, execution::*, fairness::*, relabel::*, steps::*};
 use crate::kubernetes_cluster::spec::{
@@ -31,18 +46,41 @@ verus! {
 // The two-store cluster and its hook.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_two_cluster(cluster: Cluster) -> TwoCluster {
-    TwoCluster { cluster: cluster, remote_kinds: Set::<Kind>::empty().insert(InnerWidgetView::kind()) }
+// What the two-store instantiation needs of the configured kind and binding: the
+// outer kind is not this binding's mirror kind (so side_of_kind splits them;
+// lemma_widget_kinds_ok discharges it from sync_kind_ok, by the injectivity of
+// model_kind), and the selector reads the spec, not metadata, so that the API
+// server's validation is metadata-blind as the refinement requires.
+pub open spec fn widget_kinds_ok(sk: SyncKind, bnd: Binding) -> bool {
+    &&& sk.outer_kind != inner_kind(sk, bnd)
+    &&& sk.selector is Field
 }
 
-pub proof fn lemma_widget_sides(cluster: Cluster)
+// The folded one-store cluster holds the mirror kinds of every binding the sync
+// controller of `k` serves, not only of `bnd`: it serves all of `sk.bindings`,
+// and its Create of a mirror for an outer copy of another one of them must still
+// write a known kind (TwoCluster::request_ok). The mirrors of the other bindings
+// sit on the primary side, as doc/widget_sync_fanout_design.md section 5.2
+// describes. A binding outside `sk.bindings` is refused by the model before any
+// request is sent (spec_types::serves), which is what keeps this set finite and
+// so lets a concrete cluster satisfy the hypothesis.
+pub open spec fn all_inner_kinds_installed(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: Cluster) -> bool {
+    forall |b2: Binding| sk.bindings.contains(b2) ==> cluster.synced_type_is_installed(#[trigger] inner_kind(sk, b2), spec_ok, sk.selector)
+}
+
+pub open spec fn widget_two_cluster(sk: SyncKind, bnd: Binding, cluster: Cluster) -> TwoCluster {
+    TwoCluster { cluster: cluster, remote_kinds: Set::<Kind>::empty().insert(inner_kind(sk, bnd)) }
+}
+
+// The two sides of the pair's kinds, from the distinctness widget_kinds_ok
+// carries: a hypothesis of this lemma, discharged for any configuration by
+// lemma_widget_kinds_ok and never from the characters of a kind name.
+pub proof fn lemma_widget_sides(sk: SyncKind, bnd: Binding, cluster: Cluster)
+    requires widget_kinds_ok(sk, bnd),
     ensures
-        widget_two_cluster(cluster).side_of_kind(OuterWidgetView::kind()) == Side::Primary,
-        widget_two_cluster(cluster).side_of_kind(InnerWidgetView::kind()) == Side::Remote,
+        widget_two_cluster(sk, bnd, cluster).side_of_kind(sk.outer_kind) == Side::Primary,
+        widget_two_cluster(sk, bnd, cluster).side_of_kind(inner_kind(sk, bnd)) == Side::Remote,
 {
-    reveal_strlit("widget");
-    reveal_strlit("widget@inner");
-    assert("widget"@.len() != "widget@inner"@.len());
 }
 
 // A uid written as a string follows the uid of the primary side; other strings
@@ -112,104 +150,118 @@ pub proof fn lemma_widget_hook_injective()
 // The relabeling on the Widget views.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_outer(tc: TwoCluster, r: Relabeling, o: OuterWidgetView) -> OuterWidgetView {
-    OuterWidgetView { metadata: relabel_meta(tc, r, OuterWidgetView::kind(), o.metadata), ..o }
+// The relabeling on an object of the shape: its metadata is relabeled by the side
+// its kind lives on, everything else is left alone. The same function serves the
+// outer copies and the mirrors; which side an object is on is read off its kind.
+pub open spec fn relabel_synced(tc: TwoCluster, r: Relabeling, o: SyncedObjectView) -> SyncedObjectView {
+    SyncedObjectView { metadata: relabel_meta(tc, r, o.kind, o.metadata), ..o }
 }
 
-pub open spec fn relabel_inner(tc: TwoCluster, r: Relabeling, o: InnerWidgetView) -> InnerWidgetView {
-    InnerWidgetView { metadata: relabel_meta(tc, r, InnerWidgetView::kind(), o.metadata), ..o }
-}
-
-pub proof fn lemma_unmarshal_outer_relabel(tc: TwoCluster, r: Relabeling, obj: DynamicObjectView)
+pub proof fn lemma_unmarshal_outer_relabel(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, obj: DynamicObjectView)
+    requires widget_kinds_ok(sk, bnd),
     ensures
-        OuterWidgetView::unmarshal(relabel_obj(tc, r, obj)) is Ok == OuterWidgetView::unmarshal(obj) is Ok,
-        OuterWidgetView::unmarshal(obj) is Ok ==> OuterWidgetView::unmarshal(relabel_obj(tc, r, obj))->Ok_0 == relabel_outer(tc, r, OuterWidgetView::unmarshal(obj)->Ok_0),
-        !(OuterWidgetView::unmarshal(obj) is Ok) ==> OuterWidgetView::unmarshal(relabel_obj(tc, r, obj)) == OuterWidgetView::unmarshal(obj),
+        unmarshal(sk.outer_kind, relabel_obj(tc, r, obj)) is Ok == unmarshal(sk.outer_kind, obj) is Ok,
+        unmarshal(sk.outer_kind, obj) is Ok ==> unmarshal(sk.outer_kind, relabel_obj(tc, r, obj))->Ok_0 == relabel_synced(tc, r, unmarshal(sk.outer_kind, obj)->Ok_0),
+        !(unmarshal(sk.outer_kind, obj) is Ok) ==> unmarshal(sk.outer_kind, relabel_obj(tc, r, obj)) == unmarshal(sk.outer_kind, obj),
 {
 }
 
-pub proof fn lemma_unmarshal_inner_relabel(tc: TwoCluster, r: Relabeling, obj: DynamicObjectView)
+pub proof fn lemma_unmarshal_inner_relabel(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, obj: DynamicObjectView)
+    requires widget_kinds_ok(sk, bnd),
     ensures
-        InnerWidgetView::unmarshal(relabel_obj(tc, r, obj)) is Ok == InnerWidgetView::unmarshal(obj) is Ok,
-        InnerWidgetView::unmarshal(obj) is Ok ==> InnerWidgetView::unmarshal(relabel_obj(tc, r, obj))->Ok_0 == relabel_inner(tc, r, InnerWidgetView::unmarshal(obj)->Ok_0),
-        !(InnerWidgetView::unmarshal(obj) is Ok) ==> InnerWidgetView::unmarshal(relabel_obj(tc, r, obj)) == InnerWidgetView::unmarshal(obj),
+        unmarshal(inner_kind(sk, bnd), relabel_obj(tc, r, obj)) is Ok == unmarshal(inner_kind(sk, bnd), obj) is Ok,
+        unmarshal(inner_kind(sk, bnd), obj) is Ok ==> unmarshal(inner_kind(sk, bnd), relabel_obj(tc, r, obj))->Ok_0 == relabel_synced(tc, r, unmarshal(inner_kind(sk, bnd), obj)->Ok_0),
+        !(unmarshal(inner_kind(sk, bnd), obj) is Ok) ==> unmarshal(inner_kind(sk, bnd), relabel_obj(tc, r, obj)) == unmarshal(inner_kind(sk, bnd), obj),
+{
+}
+
+// The same at any kind: relabel_synced is one function of the object's own kind,
+// and the sync reconciler reads the mirror of whatever binding its outer copy
+// selects, not only of `bnd`.
+pub proof fn lemma_unmarshal_kind_relabel(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, kind: Kind, obj: DynamicObjectView)
+    requires widget_kinds_ok(sk, bnd),
+    ensures
+        unmarshal(kind, relabel_obj(tc, r, obj)) is Ok == unmarshal(kind, obj) is Ok,
+        unmarshal(kind, obj) is Ok ==> unmarshal(kind, relabel_obj(tc, r, obj))->Ok_0 == relabel_synced(tc, r, unmarshal(kind, obj)->Ok_0),
 {
 }
 
 // The hypotheses the Widget instantiation works under.
-pub open spec fn widget_relabeling(cluster: Cluster, r: Relabeling) -> bool {
+pub open spec fn widget_relabeling(r: Relabeling) -> bool {
     &&& injective(r)
     &&& r.annotation == widget_hook()(r.uid, r.rv)
 }
 
 // The parent-uid annotation of a relabeled mirror.
-pub proof fn lemma_parent_annotation_relabel(cluster: Cluster, r: Relabeling, inner: InnerWidgetView)
-    requires
-        widget_relabeling(cluster, r),
+pub proof fn lemma_parent_annotation_relabel(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, inner: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
         has_mirror_identity(inner),
     ensures
-        has_mirror_identity(relabel_inner(widget_two_cluster(cluster), r, inner)),
-        parent_uid_annotation(relabel_inner(widget_two_cluster(cluster), r, inner)) == relabel_uid_string(r.uid, parent_uid_annotation(inner)),
+        has_mirror_identity(relabel_synced(widget_two_cluster(sk, bnd, cluster), r, inner)),
+        parent_uid_annotation(relabel_synced(widget_two_cluster(sk, bnd, cluster), r, inner)) == relabel_uid_string(r.uid, parent_uid_annotation(inner)),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let m = inner.metadata.annotations->0;
-    let m1 = relabel_inner(tc, r, inner).metadata.annotations->0;
-    assert(m1 == Map::new(m.dom(), |k: StringView| (r.annotation)(InnerWidgetView::kind(), k, m[k])));
+    let m1 = relabel_synced(tc, r, inner).metadata.annotations->0;
+    assert(m1 == Map::new(m.dom(), |k: StringView| (r.annotation)(inner.kind, k, m[k])));
     assert(m1.contains_key(parent_uid_key()));
-    assert(m1[parent_uid_key()] == (r.annotation)(InnerWidgetView::kind(), parent_uid_key(), m[parent_uid_key()]));
+    assert(m1[parent_uid_key()] == (r.annotation)(inner_kind(sk, bnd), parent_uid_key(), m[parent_uid_key()]));
 }
 
-pub proof fn lemma_has_mirror_identity_relabel(cluster: Cluster, r: Relabeling, inner: InnerWidgetView)
-    requires widget_relabeling(cluster, r),
-    ensures has_mirror_identity(relabel_inner(widget_two_cluster(cluster), r, inner)) == has_mirror_identity(inner),
+pub proof fn lemma_has_mirror_identity_relabel(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, inner: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd), widget_relabeling(r),
+    ensures has_mirror_identity(relabel_synced(widget_two_cluster(sk, bnd, cluster), r, inner)) == has_mirror_identity(inner),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     match inner.metadata.annotations {
         Some(m) => {
-            let m1 = relabel_inner(tc, r, inner).metadata.annotations->0;
-            assert(m1 == Map::new(m.dom(), |k: StringView| (r.annotation)(InnerWidgetView::kind(), k, m[k])));
+            let m1 = relabel_synced(tc, r, inner).metadata.annotations->0;
+            assert(m1 == Map::new(m.dom(), |k: StringView| (r.annotation)(inner.kind, k, m[k])));
             assert(m1.contains_key(parent_uid_key()) == m.contains_key(parent_uid_key()));
         },
         None => {},
     }
 }
 
-pub proof fn lemma_is_mirror_of_relabel(cluster: Cluster, r: Relabeling, inner: InnerWidgetView, outer: OuterWidgetView)
-    requires
-        widget_relabeling(cluster, r),
+pub proof fn lemma_is_mirror_of_relabel(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, inner: SyncedObjectView, outer: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        outer.kind == sk.outer_kind,
         outer.metadata.uid is Some,
-    ensures is_mirror_of(relabel_inner(widget_two_cluster(cluster), r, inner), relabel_outer(widget_two_cluster(cluster), r, outer)) == is_mirror_of(inner, outer),
+    ensures is_mirror_of(relabel_synced(widget_two_cluster(sk, bnd, cluster), r, inner), relabel_synced(widget_two_cluster(sk, bnd, cluster), r, outer)) == is_mirror_of(inner, outer),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let inner1 = relabel_inner(tc, r, inner);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let inner1 = relabel_synced(tc, r, inner);
+    let outer1 = relabel_synced(tc, r, outer);
     assert(outer1.metadata.uid == Some((r.uid)(Side::Primary, outer.metadata.uid->0)));
-    lemma_has_mirror_identity_relabel(cluster, r, inner);
+    lemma_has_mirror_identity_relabel(sk, bnd, cluster, r, inner);
     if has_mirror_identity(inner) {
-        lemma_parent_annotation_relabel(cluster, r, inner);
+        lemma_parent_annotation_relabel(sk, bnd, cluster, r, inner);
         lemma_uid_string_eq(r.uid, parent_uid_annotation(inner), outer.metadata.uid->0);
     }
 }
 
 // The mirror the sync reconciler would create for the relabeled outer copy is
 // the relabeled mirror.
-pub proof fn lemma_make_inner_relabel(cluster: Cluster, r: Relabeling, outer: OuterWidgetView)
-    requires
-        widget_relabeling(cluster, r),
+pub proof fn lemma_make_inner_relabel(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, outer: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        outer.kind == sk.outer_kind,
         outer.metadata.uid is Some,
-    ensures relabel_obj(widget_two_cluster(cluster), r, make_inner(outer).marshal()) == make_inner(relabel_outer(widget_two_cluster(cluster), r, outer)).marshal(),
+    ensures relabel_obj(widget_two_cluster(sk, bnd, cluster), r, marshal(make_inner(sk, outer))) == marshal(make_inner(sk, relabel_synced(widget_two_cluster(sk, bnd, cluster), r, outer))),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
-    let lhs = relabel_obj(tc, r, make_inner(outer).marshal());
-    let rhs = make_inner(outer1).marshal();
-    let m = make_inner(outer).metadata.annotations->0;
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
+    let lhs = relabel_obj(tc, r, marshal(make_inner(sk, outer)));
+    let rhs = marshal(make_inner(sk, outer1));
+    let m = make_inner(sk, outer).metadata.annotations->0;
     assert(m == Map::<StringView, StringView>::empty().insert(parent_uid_key(), parent_uid_of(outer)));
     let m_lhs = lhs.metadata.annotations->0;
     let m_rhs = rhs.metadata.annotations->0;
-    assert(m_lhs == Map::new(m.dom(), |k: StringView| (r.annotation)(InnerWidgetView::kind(), k, m[k])));
+    assert(m_lhs == Map::new(m.dom(), |k: StringView| (r.annotation)(make_inner(sk, outer).kind, k, m[k])));
     lemma_uid_string_of(r.uid, outer.metadata.uid->0);
     assert(parent_uid_of(outer1) == int_to_string_view((r.uid)(Side::Primary, outer.metadata.uid->0)));
     assert(m_lhs =~= m_rhs);
@@ -235,19 +287,20 @@ pub open spec fn relabel_req_view(tc: TwoCluster, r: Relabeling, req: Option<Req
     }
 }
 
-pub proof fn lemma_sync_core_commutes(cluster: Cluster, r: Relabeling, outer: OuterWidgetView, resp: Option<ResponseView<VoidERespView>>, state: sync_reconciler::WidgetSyncReconcileState)
-    requires
-        widget_relabeling(cluster, r),
+pub proof fn lemma_sync_core_commutes(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, outer: SyncedObjectView, resp: Option<ResponseView<VoidERespView>>, state: sync_reconciler::WidgetSyncReconcileState)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        outer.kind == sk.outer_kind,
         outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let (state1, req1) = sync_reconciler::reconcile_core(outer, resp, state);
-        sync_reconciler::reconcile_core(relabel_outer(tc, r, outer), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let (state1, req1) = sync_reconciler::reconcile_core(sk, outer, resp, state);
+        sync_reconciler::reconcile_core(sk, relabel_synced(tc, r, outer), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
     let resp1 = relabel_resp_view(tc, r, resp);
     match state.reconcile_step {
         WidgetSyncStepView::Init => {},
@@ -257,21 +310,27 @@ pub proof fn lemma_sync_core_commutes(cluster: Cluster, r: Relabeling, outer: Ou
                 match res {
                     Err(_) => {
                         if res->Err_0 is ObjectNotFound {
-                            lemma_make_inner_relabel(cluster, r, outer);
+                            lemma_make_inner_relabel(sk, bnd, cluster, r, outer);
                         }
                     },
                     Ok(obj) => {
-                        lemma_unmarshal_inner_relabel(tc, r, obj);
-                        if InnerWidgetView::unmarshal(obj) is Ok {
-                            let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
-                            let inner1 = relabel_inner(tc, r, inner);
-                            assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, obj))->Ok_0 == inner1);
-                            lemma_is_mirror_of_relabel(cluster, r, inner, outer);
-                            lemma_has_mirror_identity_relabel(cluster, r, inner);
+                        // The mirror kind is the one the outer copy's own selector names,
+                        // which need not be `bnd`: the sync reconciler of a kind serves
+                        // every binding, and only the mirrors of `bnd` are remote.
+                        let ik = inner_key(sk, outer).kind;
+                        assert(inner_key(sk, outer1) == inner_key(sk, outer));
+                        lemma_unmarshal_kind_relabel(sk, bnd, tc, r, ik, obj);
+                        if unmarshal(ik, obj) is Ok {
+                            let inner = unmarshal(ik, obj)->Ok_0;
+                            let inner1 = relabel_synced(tc, r, inner);
+                            assert(unmarshal(ik, relabel_obj(tc, r, obj))->Ok_0 == inner1);
+                            lemma_is_mirror_of_relabel(sk, bnd, cluster, r, inner, outer);
+                            lemma_has_mirror_identity_relabel(sk, bnd, cluster, r, inner);
                             if inner.metadata.deletion_timestamp is None && is_mirror_of(inner, outer) && inner.spec != outer.spec {
-                                let p = sync_reconciler::inner_spec_patch(inner, outer);
-                                let p1 = sync_reconciler::inner_spec_patch(inner1, outer1);
-                                assert(p1 == PatchRequest { tests: relabel_tests(r, Side::Remote, p.tests), ..p });
+                                let p = sync_reconciler::inner_spec_patch(sk, inner, outer);
+                                let p1 = sync_reconciler::inner_spec_patch(sk, inner1, outer1);
+                                assert(inner.kind == ik);
+                                assert(p1 == PatchRequest { tests: relabel_tests(r, tc.side_of_kind(ik), p.tests), ..p });
                             }
                         }
                     },
@@ -285,12 +344,12 @@ pub proof fn lemma_sync_core_commutes(cluster: Cluster, r: Relabeling, outer: Ou
     }
 }
 
-pub proof fn lemma_parent_listed_relabel(cluster: Cluster, r: Relabeling, objs: Seq<DynamicObjectView>, parent: StringView)
-    requires widget_relabeling(cluster, r),
-    ensures janitor_reconciler::parent_listed(relabel_list(widget_two_cluster(cluster), r, objs), relabel_uid_string(r.uid, parent)) == janitor_reconciler::parent_listed(objs, parent),
+pub proof fn lemma_parent_listed_relabel(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, objs: Seq<DynamicObjectView>, parent: StringView)
+    requires widget_kinds_ok(sk, bnd), widget_relabeling(r),
+    ensures janitor_reconciler::parent_listed(sk, bnd, relabel_list(widget_two_cluster(sk, bnd, cluster), r, objs), relabel_uid_string(r.uid, parent)) == janitor_reconciler::parent_listed(sk, bnd, objs, parent),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
     let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
     let image = objs.to_set().map(f);
     let objs1 = relabel_list(tc, r, objs);
@@ -298,11 +357,12 @@ pub proof fn lemma_parent_listed_relabel(cluster: Cluster, r: Relabeling, objs: 
     assert(objs1.to_set() == image);
     let parent1 = relabel_uid_string(r.uid, parent);
     int_to_string_view_injectivity();
-    if janitor_reconciler::parent_listed(objs, parent) {
+    if janitor_reconciler::parent_listed(sk, bnd, objs, parent) {
         let i = choose |i: int| 0 <= i < objs.len()
-            && (#[trigger] objs[i]).kind == OuterWidgetView::kind()
+            && (#[trigger] objs[i]).kind == sk.outer_kind
             && objs[i].metadata.uid is Some
-            && int_to_string_view(objs[i].metadata.uid->0) == parent;
+            && int_to_string_view(objs[i].metadata.uid->0) == parent
+            && cluster_of_dynamic(sk.selector, objs[i]) == Some(bnd.name);
         let o = objs[i];
         let o1 = f(o);
         assert(objs.to_set().contains(o));
@@ -312,14 +372,16 @@ pub proof fn lemma_parent_listed_relabel(cluster: Cluster, r: Relabeling, objs: 
         let j = choose |j: int| 0 <= j < objs1.len() && objs1[j] == o1;
         lemma_uid_string_of(r.uid, o.metadata.uid->0);
         assert(o1.metadata.uid == Some((r.uid)(Side::Primary, o.metadata.uid->0)));
-        assert((#[trigger] objs1[j]).kind == OuterWidgetView::kind() && objs1[j].metadata.uid is Some
-            && int_to_string_view(objs1[j].metadata.uid->0) == parent1);
+        assert((#[trigger] objs1[j]).kind == sk.outer_kind && objs1[j].metadata.uid is Some
+            && int_to_string_view(objs1[j].metadata.uid->0) == parent1
+            && cluster_of_dynamic(sk.selector, objs1[j]) == Some(bnd.name));
     }
-    if janitor_reconciler::parent_listed(objs1, parent1) {
+    if janitor_reconciler::parent_listed(sk, bnd, objs1, parent1) {
         let j = choose |j: int| 0 <= j < objs1.len()
-            && (#[trigger] objs1[j]).kind == OuterWidgetView::kind()
+            && (#[trigger] objs1[j]).kind == sk.outer_kind
             && objs1[j].metadata.uid is Some
-            && int_to_string_view(objs1[j].metadata.uid->0) == parent1;
+            && int_to_string_view(objs1[j].metadata.uid->0) == parent1
+            && cluster_of_dynamic(sk.selector, objs1[j]) == Some(bnd.name);
         let o1 = objs1[j];
         assert(objs1.to_set().contains(o1));
         objs.to_set().lemma_map_contains(f, o1);
@@ -329,31 +391,33 @@ pub proof fn lemma_parent_listed_relabel(cluster: Cluster, r: Relabeling, objs: 
         let w = o.metadata.uid->0;
         assert(o1.metadata.uid == Some((r.uid)(Side::Primary, w)));
         lemma_uid_string_eq(r.uid, parent, w);
-        assert((#[trigger] objs[i]).kind == OuterWidgetView::kind() && objs[i].metadata.uid is Some
-            && int_to_string_view(objs[i].metadata.uid->0) == parent);
+        assert((#[trigger] objs[i]).kind == sk.outer_kind && objs[i].metadata.uid is Some
+            && int_to_string_view(objs[i].metadata.uid->0) == parent
+            && cluster_of_dynamic(sk.selector, objs[i]) == Some(bnd.name));
     }
 }
 
-pub proof fn lemma_janitor_core_commutes(cluster: Cluster, r: Relabeling, inner: InnerWidgetView, resp: Option<ResponseView<VoidERespView>>, state: janitor_reconciler::WidgetJanitorReconcileState)
-    requires widget_relabeling(cluster, r),
+pub proof fn lemma_janitor_core_commutes(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, inner: SyncedObjectView, resp: Option<ResponseView<VoidERespView>>, state: janitor_reconciler::WidgetJanitorReconcileState)
+    requires widget_kinds_ok(sk, bnd), widget_relabeling(r),
+        inner.kind == inner_kind(sk, bnd),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let (state1, req1) = janitor_reconciler::reconcile_core(inner, resp, state);
-        janitor_reconciler::reconcile_core(relabel_inner(tc, r, inner), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let (state1, req1) = janitor_reconciler::reconcile_core(sk, bnd, inner, resp, state);
+        janitor_reconciler::reconcile_core(sk, bnd, relabel_synced(tc, r, inner), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let inner1 = relabel_inner(tc, r, inner);
-    lemma_has_mirror_identity_relabel(cluster, r, inner);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let inner1 = relabel_synced(tc, r, inner);
+    lemma_has_mirror_identity_relabel(sk, bnd, cluster, r, inner);
     match state.reconcile_step {
         WidgetJanitorStepView::Init => {},
         WidgetJanitorStepView::AfterListOuter => {
             if has_mirror_identity(inner) && is_some_k_list_resp_view(resp) && extract_some_k_list_resp_view(resp) is Ok {
                 let objs = extract_some_k_list_resp_view(resp)->Ok_0;
-                lemma_parent_annotation_relabel(cluster, r, inner);
-                lemma_parent_listed_relabel(cluster, r, objs, parent_uid_annotation(inner));
-                if !janitor_reconciler::parent_listed(objs, parent_uid_annotation(inner)) {
+                lemma_parent_annotation_relabel(sk, bnd, cluster, r, inner);
+                lemma_parent_listed_relabel(sk, bnd, cluster, r, objs, parent_uid_annotation(inner));
+                if !janitor_reconciler::parent_listed(sk, bnd, objs, parent_uid_annotation(inner)) {
                     let d = DeleteRequest { key: inner.object_ref(), preconditions: Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)) };
                     let d1 = DeleteRequest { key: inner1.object_ref(), preconditions: Some(PreconditionsView::default().with_uid_from_object_meta(inner1.metadata)) };
                     assert(d1 == DeleteRequest { preconditions: relabel_preconditions(r, Side::Remote, d.preconditions), ..d });
@@ -368,44 +432,42 @@ pub proof fn lemma_janitor_core_commutes(cluster: Cluster, r: Relabeling, inner:
 // A triggering object of the sync reconciler, as the simulation sees it: of the
 // model's kind, with a uid, and unmarshallable (all three hold of objects taken
 // from a store).
-pub proof fn lemma_outer_unmarshals(cluster: Cluster, cr: DynamicObjectView)
-    requires
-        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
-        cr.kind == OuterWidgetView::kind(),
+pub proof fn lemma_outer_unmarshals(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, cr: DynamicObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
+        cr.kind == sk.outer_kind,
         unmarshallable_object(cr, cluster.installed_types),
-    ensures OuterWidgetView::unmarshal(cr) is Ok,
+    ensures unmarshal(sk.outer_kind, cr) is Ok,
 {
-    OuterWidgetView::unmarshal_result_determined_by_unmarshal_spec_and_status();
 }
 
-pub proof fn lemma_inner_unmarshals(cluster: Cluster, cr: DynamicObjectView)
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cr.kind == InnerWidgetView::kind(),
+pub proof fn lemma_inner_unmarshals(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, cr: DynamicObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cr.kind == inner_kind(sk, bnd),
         unmarshallable_object(cr, cluster.installed_types),
-    ensures InnerWidgetView::unmarshal(cr) is Ok,
+    ensures unmarshal(inner_kind(sk, bnd), cr) is Ok,
 {
-    InnerWidgetView::unmarshal_result_determined_by_unmarshal_spec_and_status();
 }
 
 // The installed reconcile models commute: what models_commute asks of them.
-pub proof fn lemma_sync_model_commutes(cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
-    requires
-        widget_relabeling(cluster, r),
-        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
-        cr.kind == OuterWidgetView::kind(),
+pub proof fn lemma_sync_model_commutes(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
+        cr.kind == sk.outer_kind,
         cr.metadata.uid is Some,
         unmarshallable_object(cr, cluster.installed_types),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let t = widget_sync_controller_model().reconcile_model.transition;
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let t = widget_sync_controller_model(sk).reconcile_model.transition;
         t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls) == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_outer_unmarshals(cluster, cr);
-    lemma_unmarshal_outer_relabel(tc, r, cr);
-    let outer = OuterWidgetView::unmarshal(cr)->Ok_0;
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_outer_unmarshals(sk, bnd, spec_ok, cluster, cr);
+    lemma_unmarshal_outer_relabel(sk, bnd, tc, r, cr);
+    let outer = unmarshal(sk.outer_kind, cr)->Ok_0;
     let resp_um = match resp {
         None => None,
         Some(x) => Some(match x {
@@ -414,26 +476,26 @@ pub proof fn lemma_sync_model_commutes(cluster: Cluster, r: Relabeling, cr: Dyna
         }),
     };
     let state = sync_reconciler::WidgetSyncReconcileState::unmarshal(ls)->Ok_0;
-    assert(OuterWidgetView::unmarshal(relabel_obj(tc, r, cr))->Ok_0 == relabel_outer(tc, r, outer));
-    lemma_sync_core_commutes(cluster, r, outer, resp_um, state);
+    assert(unmarshal(sk.outer_kind, relabel_obj(tc, r, cr))->Ok_0 == relabel_synced(tc, r, outer));
+    lemma_sync_core_commutes(sk, bnd, cluster, r, outer, resp_um, state);
 }
 
-pub proof fn lemma_janitor_model_commutes(cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
-    requires
-        widget_relabeling(cluster, r),
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cr.kind == InnerWidgetView::kind(),
+pub proof fn lemma_janitor_model_commutes(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cr.kind == inner_kind(sk, bnd),
         unmarshallable_object(cr, cluster.installed_types),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let t = widget_janitor_controller_model().reconcile_model.transition;
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let t = widget_janitor_controller_model(sk, bnd).reconcile_model.transition;
         t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls) == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_inner_unmarshals(cluster, cr);
-    lemma_unmarshal_inner_relabel(tc, r, cr);
-    let inner = InnerWidgetView::unmarshal(cr)->Ok_0;
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_inner_unmarshals(sk, bnd, spec_ok, cluster, cr);
+    lemma_unmarshal_inner_relabel(sk, bnd, tc, r, cr);
+    let inner = unmarshal(inner_kind(sk, bnd), cr)->Ok_0;
     let resp_um = match resp {
         None => None,
         Some(x) => Some(match x {
@@ -442,26 +504,28 @@ pub proof fn lemma_janitor_model_commutes(cluster: Cluster, r: Relabeling, cr: D
         }),
     };
     let state = janitor_reconciler::WidgetJanitorReconcileState::unmarshal(ls)->Ok_0;
-    assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, cr))->Ok_0 == relabel_inner(tc, r, inner));
-    lemma_janitor_core_commutes(cluster, r, inner, resp_um, state);
+    assert(unmarshal(inner_kind(sk, bnd), relabel_obj(tc, r, cr))->Ok_0 == relabel_synced(tc, r, inner));
+    lemma_janitor_core_commutes(sk, bnd, cluster, r, inner, resp_um, state);
 }
 
 // The disturber (model/disturber_reconciler.rs) reads only the namespace, name
 // and spec of its object and tests nothing, so it commutes by computation.
-pub proof fn lemma_disturber_core_commutes(cluster: Cluster, r: Relabeling, inner: InnerWidgetView, resp: Option<ResponseView<VoidERespView>>, state: disturber_reconciler::WidgetDisturberReconcileState)
+pub proof fn lemma_disturber_core_commutes(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, inner: SyncedObjectView, resp: Option<ResponseView<VoidERespView>>, state: disturber_reconciler::WidgetDisturberReconcileState)
+    requires widget_kinds_ok(sk, bnd),
+        inner.kind == inner_kind(sk, bnd),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let (state1, req1) = disturber_reconciler::reconcile_core(inner, resp, state);
-        disturber_reconciler::reconcile_core(relabel_inner(tc, r, inner), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let (state1, req1) = disturber_reconciler::reconcile_core(inner_kind(sk, bnd), inner, resp, state);
+        disturber_reconciler::reconcile_core(inner_kind(sk, bnd), relabel_synced(tc, r, inner), relabel_resp_view(tc, r, resp), state) == (state1, relabel_req_view(tc, r, req1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let inner1 = relabel_inner(tc, r, inner);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let inner1 = relabel_synced(tc, r, inner);
     match state.reconcile_step {
         disturber_reconciler::WidgetDisturberStepView::Init => {
-            let p = disturber_reconciler::disturbing_patch(inner);
-            let p1 = disturber_reconciler::disturbing_patch(inner1);
+            let p = disturber_reconciler::disturbing_patch(inner_kind(sk, bnd), inner);
+            let p1 = disturber_reconciler::disturbing_patch(inner_kind(sk, bnd), inner1);
             assert(p1 == PatchRequest { tests: relabel_tests(r, Side::Remote, p.tests), ..p });
         },
         disturber_reconciler::WidgetDisturberStepView::AfterPatchInner => {
@@ -473,21 +537,21 @@ pub proof fn lemma_disturber_core_commutes(cluster: Cluster, r: Relabeling, inne
     }
 }
 
-pub proof fn lemma_disturber_model_commutes(cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cr.kind == InnerWidgetView::kind(),
+pub proof fn lemma_disturber_model_commutes(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, r: Relabeling, cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cr.kind == inner_kind(sk, bnd),
         unmarshallable_object(cr, cluster.installed_types),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        let t = widget_disturber_controller_model().reconcile_model.transition;
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        let t = widget_disturber_controller_model(inner_kind(sk, bnd)).reconcile_model.transition;
         t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls) == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_inner_unmarshals(cluster, cr);
-    lemma_unmarshal_inner_relabel(tc, r, cr);
-    let inner = InnerWidgetView::unmarshal(cr)->Ok_0;
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_inner_unmarshals(sk, bnd, spec_ok, cluster, cr);
+    lemma_unmarshal_inner_relabel(sk, bnd, tc, r, cr);
+    let inner = unmarshal(inner_kind(sk, bnd), cr)->Ok_0;
     let resp_um = match resp {
         None => None,
         Some(x) => Some(match x {
@@ -496,8 +560,8 @@ pub proof fn lemma_disturber_model_commutes(cluster: Cluster, r: Relabeling, cr:
         }),
     };
     let state = disturber_reconciler::WidgetDisturberReconcileState::unmarshal(ls)->Ok_0;
-    assert(InnerWidgetView::unmarshal(relabel_obj(tc, r, cr))->Ok_0 == relabel_inner(tc, r, inner));
-    lemma_disturber_core_commutes(cluster, r, inner, resp_um, state);
+    assert(unmarshal(inner_kind(sk, bnd), relabel_obj(tc, r, cr))->Ok_0 == relabel_synced(tc, r, inner));
+    lemma_disturber_core_commutes(sk, bnd, cluster, r, inner, resp_um, state);
 }
 
 
@@ -534,26 +598,26 @@ pub open spec fn other_model_commutes(tc: TwoCluster, r: Relabeling, m: Controll
 // is stated under cluster_model (init, next and every registered fairness),
 // can be cited: lemma_relies_hold_of_from_welder. No fairness of the other
 // controller is assumed anywhere.
-pub open spec fn widget_relies_hold_of(cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
-    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
-    &&& spec.entails(always(lift_state(widget_sync_rely(id))))
-    &&& spec.entails(always(lift_state(widget_janitor_rely(id))))
+pub open spec fn widget_relies_hold_of(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
+    let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
+    &&& spec.entails(always(lift_state(widget_sync_rely(sk, id))))
+    &&& spec.entails(always(lift_state(widget_janitor_rely(sk, id))))
 }
 
 // A Welder registry on this cluster whose model the pair's spec covers: every
 // fairness it declares is entailed by the pair's spec (the pair's own, or
 // true_pred for a controller that assumes none, like the disturber).
-pub open spec fn pair_spec_covers(cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster) -> bool {
+pub open spec fn pair_spec_covers(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster) -> bool {
     &&& cc.cluster == cluster
     &&& forall |i: int| #[trigger] cc.registry.contains_key(i)
-        ==> widget_one_cluster_spec(cluster, sync_id, janitor_id).entails((cc.registry[i].fairness)(cluster))
+        ==> widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id).entails((cc.registry[i].fairness)(cluster))
 }
 
-pub proof fn lemma_pair_spec_entails_cluster_model(cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster)
-    requires pair_spec_covers(cluster, sync_id, janitor_id, cc),
-    ensures widget_one_cluster_spec(cluster, sync_id, janitor_id).entails(cluster_model(cc)),
+pub proof fn lemma_pair_spec_entails_cluster_model(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int, cc: CoreCluster)
+    requires widget_kinds_ok(sk, bnd), pair_spec_covers(sk, bnd, cluster, sync_id, janitor_id, cc),
+    ensures widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id).entails(cluster_model(cc)),
 {
-    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
     let fairness_fn = |i: int| if cc.registry.contains_key(i) { (cc.registry[i].fairness)(cc.cluster) } else { true_pred::<ClusterState>() };
     assert(spec.entails(lift_state(cc.cluster.init())));
     assert(spec.entails(sync_next_with_wf(cluster, sync_id)));
@@ -573,8 +637,8 @@ pub proof fn lemma_pair_spec_entails_cluster_model(cluster: Cluster, sync_id: in
 
 // A member's guarantee under cluster_model, read off the core of a set it
 // belongs to (a singleton core, or a composed one).
-pub proof fn lemma_core_member_guarantee(cc: CoreCluster, cs: CoreSet, id: int)
-    requires
+pub proof fn lemma_core_member_guarantee(sk: SyncKind, bnd: Binding, cc: CoreCluster, cs: CoreSet, id: int)
+    requires widget_kinds_ok(sk, bnd),
         cs.members.contains(id),
         core(cc, cs),
     ensures cluster_model(cc).entails(cc.registry[id].safety_guarantee),
@@ -600,74 +664,82 @@ pub proof fn lemma_core_member_guarantee(cc: CoreCluster, cs: CoreSet, id: int)
 // spec covers cc's model. The last hypothesis is where the fairness gap
 // between the two statements closes: a Welder fact is stated under every
 // registered fairness, widget_relies_hold_of under the pair's alone.
-pub proof fn lemma_relies_hold_of_from_welder(cluster: Cluster, sync_id: int, janitor_id: int, id: int, cc: CoreCluster, guarantee: StatePred<ClusterState>)
-    requires
-        pair_spec_covers(cluster, sync_id, janitor_id, cc),
+pub proof fn lemma_relies_hold_of_from_welder(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int, id: int, cc: CoreCluster, guarantee: StatePred<ClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        pair_spec_covers(sk, bnd, cluster, sync_id, janitor_id, cc),
         cluster_model(cc).entails(always(lift_state(guarantee))),
-        lift_state(guarantee).entails(lift_state(widget_sync_rely(id))),
-        lift_state(guarantee).entails(lift_state(widget_janitor_rely(id))),
-    ensures widget_relies_hold_of(cluster, sync_id, janitor_id, id),
+        lift_state(guarantee).entails(lift_state(widget_sync_rely(sk, id))),
+        lift_state(guarantee).entails(lift_state(widget_janitor_rely(sk, id))),
+    ensures widget_relies_hold_of(sk, bnd, cluster, sync_id, janitor_id, id),
 {
-    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
-    lemma_pair_spec_entails_cluster_model(cluster, sync_id, janitor_id, cc);
+    let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
+    lemma_pair_spec_entails_cluster_model(sk, bnd, cluster, sync_id, janitor_id, cc);
     entails_trans(spec, cluster_model(cc), always(lift_state(guarantee)));
-    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_sync_rely(id)));
-    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_janitor_rely(id)));
-    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_sync_rely(id))));
-    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_janitor_rely(id))));
+    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_sync_rely(sk, id)));
+    entails_preserved_by_always(lift_state(guarantee), lift_state(widget_janitor_rely(sk, id)));
+    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_sync_rely(sk, id))));
+    entails_trans(spec, always(lift_state(guarantee)), always(lift_state(widget_janitor_rely(sk, id))));
 }
 
 // A controller other than the pair that the two-store theorem admits: its model
 // meets the per-controller hypotheses of the refinement (hypotheses 1 and 3 of
 // doc/widget_sync_design.md section 2.2, under the Widget hook), and the pair's
 // relies hold of it.
-pub open spec fn widget_other_controller_ok(cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
-    let tc = widget_two_cluster(cluster);
+pub open spec fn widget_other_controller_ok(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int, id: int) -> bool {
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let m = cluster.controller_models[id];
     &&& other_model_ok(tc, m)
-    &&& forall |r: Relabeling| widget_relabeling(cluster, r) ==> #[trigger] other_model_commutes(tc, r, m)
-    &&& widget_relies_hold_of(cluster, sync_id, janitor_id, id)
+    &&& forall |r: Relabeling| widget_relabeling(r) ==> #[trigger] other_model_commutes(tc, r, m)
+    &&& widget_relies_hold_of(sk, bnd, cluster, sync_id, janitor_id, id)
 }
 
 // A cluster running the sync reconciler and the janitor, with the two Widget
 // types installed, installed types the refinement can follow, and any number of
 // other controllers, each admitted by widget_other_controller_ok.
-pub open spec fn widget_cluster_with_others(cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
-    &&& sync_membership(cluster, sync_id, janitor_id)
-    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model())
+pub open spec fn widget_cluster_with_others(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
+    // The refinement is read one binding at a time: `bnd` is one of the bindings
+    // the sync reconciler serves, the ESRs and D3 of this theorem are the ones of
+    // `bnd`, and the janitors of the other bindings are other controllers
+    // (widget_other_controller_ok), whose mirrors stay on the primary side.
+    &&& sk.bindings.contains(bnd)
+    &&& sync_membership(sk, bnd, spec_ok, cluster, sync_id, janitor_id)
+    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd))
+    &&& all_inner_kinds_installed(sk, spec_ok, cluster)
     &&& installed_types_ignore_metadata(cluster.installed_types)
     &&& installed_types_coherent(cluster.installed_types)
     &&& forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
-        ==> widget_other_controller_ok(cluster, sync_id, janitor_id, id)
+        ==> widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id)
 }
 
 // A cluster running exactly the sync reconciler and the janitor: the special
 // case with no other controller.
-pub open spec fn widget_pair_cluster(cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
-    &&& sync_membership(cluster, sync_id, janitor_id)
-    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model())
+pub open spec fn widget_pair_cluster(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
+    &&& sk.bindings.contains(bnd)
+    &&& sync_membership(sk, bnd, spec_ok, cluster, sync_id, janitor_id)
+    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd))
     &&& cluster.controller_models.dom() == Set::<int>::empty().insert(sync_id).insert(janitor_id)
+    &&& all_inner_kinds_installed(sk, spec_ok, cluster)
     &&& installed_types_ignore_metadata(cluster.installed_types)
     &&& installed_types_coherent(cluster.installed_types)
 }
 
-pub proof fn lemma_pair_cluster_is_cluster_with_others(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_pair_cluster(cluster, sync_id, janitor_id),
-    ensures widget_cluster_with_others(cluster, sync_id, janitor_id),
+pub proof fn lemma_pair_cluster_is_cluster_with_others(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_kinds_ok(sk, bnd), widget_pair_cluster(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
+    ensures widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
 {
     assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
-        implies widget_other_controller_ok(cluster, sync_id, janitor_id, id) by {
+        implies widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id) by {
         assert(cluster.controller_models.dom().contains(id));
         assert(false);
     }
 }
 
-pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
-    ensures models_ok(widget_two_cluster(cluster)),
+pub proof fn lemma_widget_models_ok(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_kinds_ok(sk, bnd), widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
+    ensures models_ok(widget_two_cluster(sk, bnd, cluster)),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
     assert forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) implies {
         let m = tc.cluster.controller_models[id];
         &&& m.external_model is None
@@ -686,16 +758,23 @@ pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: 
                 if req_o is Some && req_o->0 is KubernetesRequest {
                     let req = req_o->0->KubernetesRequest_0;
                     if id == sync_id {
-                        let outer = OuterWidgetView::unmarshal(cr)->Ok_0;
+                        let outer = unmarshal(sk.outer_kind, cr)->Ok_0;
                         let state = sync_reconciler::WidgetSyncReconcileState::unmarshal(ls)->Ok_0;
                         match state.reconcile_step {
                             WidgetSyncStepView::AfterGetInner => {
                                 // A Create of the mirror: named, of the inner kind, without owner references.
                                 if req is CreateRequest {
-                                    let obj = make_inner(outer).marshal();
+                                    let obj = marshal(make_inner(sk, outer));
                                     assert(req->CreateRequest_0.obj == obj);
                                     assert(obj.metadata.owner_references is None);
-                                    assert(obj.kind == InnerWidgetView::kind());
+                                    // The mirror's kind is the mirror kind of the outer
+                                    // copy's own binding. The model creates a mirror
+                                    // only for a binding it serves, and every served
+                                    // binding's mirror kind is installed.
+                                    assert(serves(sk, outer));
+                                    assert(obj.kind == inner_kind(sk, binding_of(sk, outer)));
+                                    assert(cluster.synced_type_is_installed(inner_kind(sk, binding_of(sk, outer)), spec_ok, sk.selector));
+                                    assert(tc.kind_ok(obj.kind));
                                 }
                             },
                             _ => {},
@@ -704,19 +783,19 @@ pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: 
                 }
             }
         } else {
-            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, id));
+            assert(widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id));
             assert(other_model_ok(tc, m));
         }
     }
 }
 
-pub proof fn lemma_widget_models_commute(cluster: Cluster, sync_id: int, janitor_id: int, r: Relabeling)
-    requires
-        widget_cluster_with_others(cluster, sync_id, janitor_id),
-        widget_relabeling(cluster, r),
-    ensures models_commute(widget_two_cluster(cluster), r),
+pub proof fn lemma_widget_models_commute(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int, r: Relabeling)
+    requires widget_kinds_ok(sk, bnd),
+        widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
+        widget_relabeling(r),
+    ensures models_commute(widget_two_cluster(sk, bnd, cluster), r),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     assert forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) implies {
         let m = tc.cluster.controller_models[id].reconcile_model;
         let t = m.transition;
@@ -733,28 +812,28 @@ pub proof fn lemma_widget_models_commute(cluster: Cluster, sync_id: int, janitor
                 implies #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
                     == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1)) by {
                 if id == sync_id {
-                    lemma_sync_model_commutes(cluster, r, cr, resp, ls);
+                    lemma_sync_model_commutes(sk, bnd, spec_ok, cluster, r, cr, resp, ls);
                 } else {
-                    lemma_janitor_model_commutes(cluster, r, cr, resp, ls);
+                    lemma_janitor_model_commutes(sk, bnd, spec_ok, cluster, r, cr, resp, ls);
                 }
             }
         } else {
-            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, id));
+            assert(widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id));
             assert(other_model_commutes(tc, r, tc.cluster.controller_models[id]));
         }
     }
 }
 
-pub proof fn lemma_widget_refinement_hyps(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
-    ensures refinement_hyps(widget_two_cluster(cluster), widget_hook()),
+pub proof fn lemma_widget_refinement_hyps(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_kinds_ok(sk, bnd), widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
+    ensures refinement_hyps(widget_two_cluster(sk, bnd, cluster), widget_hook()),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let hook = widget_hook();
-    lemma_widget_models_ok(cluster, sync_id, janitor_id);
+    lemma_widget_models_ok(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
     lemma_widget_hook_injective();
     assert forall |r: Relabeling| injective(r) && r.annotation == hook(r.uid, r.rv) implies #[trigger] models_commute(tc, r) by {
-        lemma_widget_models_commute(cluster, sync_id, janitor_id, r);
+        lemma_widget_models_commute(sk, bnd, spec_ok, cluster, sync_id, janitor_id, r);
     }
 }
 
@@ -774,16 +853,16 @@ pub open spec fn two_cluster_next_with_wf(tc: TwoCluster, id: int) -> TempPred<T
 }
 
 // The one-store fairness of a controller on the abstract execution.
-pub proof fn lemma_next_with_wf_transfer(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int)
-    requires
-        fair_sim(widget_two_cluster(cluster), r, ex),
-        always(lift_action(cluster.next())).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-        two_cluster_next_with_wf(widget_two_cluster(cluster), id).satisfied_by(ex),
+pub proof fn lemma_next_with_wf_transfer(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int)
+    requires widget_kinds_ok(sk, bnd),
+        fair_sim(widget_two_cluster(sk, bnd, cluster), r, ex),
+        always(lift_action(cluster.next())).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+        two_cluster_next_with_wf(widget_two_cluster(sk, bnd, cluster), id).satisfied_by(ex),
     ensures
-        sync_next_with_wf(cluster, id).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-        janitor_next_with_wf(cluster, id).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
+        sync_next_with_wf(cluster, id).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+        janitor_next_with_wf(cluster, id).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
     let f_api = |input: (Side, Option<Message>)| tc.api_server_next(input.0).weak_fairness(input.1);
     let f_gc = |input: (Side, (BuiltinControllerChoice, ObjectRef))| tc.builtin_controllers_next(input.0).weak_fairness(input.1);
@@ -854,63 +933,63 @@ pub open spec fn on_side(side: Side, p: StatePred<ClusterState>) -> StatePred<Tw
 // The premises of R1 and R2 on two clusters: the outer copy and the in-flight
 // writes are read on the primary side; the delete clause, which looks at the
 // mirror, is read on the remote side, where the mirror lives.
-pub open spec fn two_cluster_outer_spec_stable(outer: OuterWidgetView) -> StatePred<TwoClusterState> {
+pub open spec fn two_cluster_outer_spec_stable(sk: SyncKind, bnd: Binding, outer: SyncedObjectView) -> StatePred<TwoClusterState> {
     |s: TwoClusterState| {
-        &&& outer_spec_stable(outer)(s.project(Side::Primary))
-        &&& mirror_undeleted(outer)(s.project(Side::Remote))
+        &&& outer_spec_stable(sk, bnd, outer)(s.project(Side::Primary))
+        &&& mirror_undeleted(sk, outer)(s.project(Side::Remote))
     }
 }
 
-pub open spec fn two_cluster_outer_stable(outer: OuterWidgetView) -> StatePred<TwoClusterState> {
+pub open spec fn two_cluster_outer_stable(sk: SyncKind, bnd: Binding, outer: SyncedObjectView) -> StatePred<TwoClusterState> {
     |s: TwoClusterState| {
-        &&& outer_stable(outer)(s.project(Side::Primary))
-        &&& mirror_undeleted(outer)(s.project(Side::Remote))
+        &&& outer_stable(sk, bnd, outer)(s.project(Side::Primary))
+        &&& mirror_undeleted(sk, outer)(s.project(Side::Remote))
     }
 }
 
 // R1 on two clusters: the outer copy is read in the primary store, the mirror in the remote one.
-pub open spec fn two_cluster_spec_eventually_synced() -> TempPred<TwoClusterState> {
-    tla_forall(|outer: OuterWidgetView|
-        always(lift_state(two_cluster_outer_spec_stable(outer)))
-            .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))))
+pub open spec fn two_cluster_spec_eventually_synced(sk: SyncKind, bnd: Binding) -> TempPred<TwoClusterState> {
+    tla_forall(|outer: SyncedObjectView|
+        always(lift_state(two_cluster_outer_spec_stable(sk, bnd, outer)))
+            .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(sk, outer))))))
 }
 
 // R2 on two clusters.
-pub open spec fn two_cluster_status_eventually_mirrored() -> TempPred<TwoClusterState> {
-    tla_forall(|i: (OuterWidgetView, WidgetStatusView)|
-        always(lift_state(two_cluster_outer_stable(i.0)).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
-            .leads_to(always(lift_state(on_side(Side::Primary, status_synced(i.0, i.1))))))
+pub open spec fn two_cluster_status_eventually_mirrored(sk: SyncKind, bnd: Binding) -> TempPred<TwoClusterState> {
+    tla_forall(|i: (SyncedObjectView, SyncedStatusView)|
+        always(lift_state(two_cluster_outer_stable(sk, bnd, i.0)).and(lift_state(on_side(Side::Remote, inner_settled(sk, i.0, i.1)))))
+            .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, i.0, i.1))))))
 }
 
 // R3s on two clusters: the parent is looked for in the primary store, the mirror
 // at `key` in the store of the key's kind.
-pub open spec fn two_cluster_mirrors_stably_collected(tc: TwoCluster) -> TempPred<TwoClusterState> {
+pub open spec fn two_cluster_mirrors_stably_collected(sk: SyncKind, bnd: Binding, tc: TwoCluster) -> TempPred<TwoClusterState> {
     tla_forall(|i: (ObjectRef, Uid)|
-        always(lift_state(on_side(Side::Primary, parent_absent(i.0, i.1))))
-            .leads_to(always(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_collected(i.0, i.1))))))
+        always(lift_state(on_side(Side::Primary, bound_parent_absent(sk, bnd, i.0, i.1))))
+            .leads_to(always(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_collected(inner_kind(sk, bnd), i.0, i.1))))))
 }
 
 // R3 on two clusters.
-pub open spec fn two_cluster_mirrors_eventually_collected(tc: TwoCluster) -> TempPred<TwoClusterState> {
+pub open spec fn two_cluster_mirrors_eventually_collected(sk: SyncKind, bnd: Binding, tc: TwoCluster) -> TempPred<TwoClusterState> {
     tla_forall(|i: (ObjectRef, Uid, Uid)|
-        always(lift_state(on_side(Side::Primary, parent_absent(i.0, i.1)))).and(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_object_is(i.0, i.1, i.2))))
+        always(lift_state(on_side(Side::Primary, parent_absent(sk, i.0, i.1)))).and(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_object_is(inner_kind(sk, bnd), i.0, i.1, i.2))))
             .leads_to(lift_state(on_side(tc.side_of_kind(i.0.kind), object_is_gone(i.0, i.2)))))
 }
 
 // D3 on two clusters: the inner side releases terminating mirrors.
-pub open spec fn two_cluster_inner_releases_terminating_objects(tc: TwoCluster) -> TempPred<TwoClusterState> {
+pub open spec fn two_cluster_inner_releases_terminating_objects(sk: SyncKind, bnd: Binding, tc: TwoCluster) -> TempPred<TwoClusterState> {
     tla_forall(|i: (ObjectRef, Uid)|
-        lift_state(on_side(tc.side_of_kind(i.0.kind), inner_terminating_object(i.0, i.1)))
+        lift_state(on_side(tc.side_of_kind(i.0.kind), inner_terminating_object(sk, bnd, i.0, i.1)))
             .leads_to(lift_state(on_side(tc.side_of_kind(i.0.kind), object_is_gone(i.0, i.1)))))
 }
 
 // The spec of the Widget pair on two clusters.
-pub open spec fn widget_two_cluster_spec(cluster: Cluster, sync_id: int, janitor_id: int) -> TempPred<TwoClusterState> {
-    let tc = widget_two_cluster(cluster);
+pub open spec fn widget_two_cluster_spec(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int) -> TempPred<TwoClusterState> {
+    let tc = widget_two_cluster(sk, bnd, cluster);
     lift_state(tc.init())
     .and(two_cluster_next_with_wf(tc, sync_id))
     .and(two_cluster_next_with_wf(tc, janitor_id))
-    .and(two_cluster_inner_releases_terminating_objects(tc))
+    .and(two_cluster_inner_releases_terminating_objects(sk, bnd, tc))
 }
 
 // ---------------------------------------------------------------------------
@@ -918,10 +997,10 @@ pub open spec fn widget_two_cluster_spec(cluster: Cluster, sync_id: int, janitor
 // ---------------------------------------------------------------------------
 
 // The object at a key of the primary side, in the abstraction and in the primary store.
-proof fn lemma_abs_object(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid_next: Uid, rv_next: ResourceVersion)
-    requires inv(widget_two_cluster(cluster), s),
+proof fn lemma_abs_object(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd), inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
         let a = abs(tc, r, s, uid_next, rv_next);
         &&& a.resources().contains_key(key) == s.project(side).resources().contains_key(key)
@@ -930,30 +1009,31 @@ proof fn lemma_abs_object(cluster: Cluster, r: Relabeling, s: TwoClusterState, k
             && s.project(side).resources()[key].metadata.uid is Some
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     lemma_abs_store_index(tc, r, s, key);
 }
 
-proof fn lemma_desired_state_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_desired_state_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        Cluster::desired_state_is(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == Cluster::desired_state_is(outer)(s.project(Side::Primary))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        Cluster::synced_desired_state_is(relabel_synced(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == Cluster::synced_desired_state_is(outer)(s.project(Side::Primary))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
     let key = outer.object_ref();
     assert(outer1.object_ref() == key);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let a = abs(tc, r, s, uid_next, rv_next);
     let p = s.project(Side::Primary);
     if p.resources().contains_key(key) {
         let obj = p.resources()[key];
-        lemma_unmarshal_outer_relabel(tc, r, obj);
+        lemma_unmarshal_outer_relabel(sk, bnd, tc, r, obj);
         lemma_relabel_obj_keeps_identity(tc, r, obj);
         match (obj.metadata.uid, outer.metadata.uid) {
             (Some(x), Some(y)) => {
@@ -965,29 +1045,32 @@ proof fn lemma_desired_state_pull_back(cluster: Cluster, r: Relabeling, s: TwoCl
 }
 
 // The premise of R1, pulled back.
-proof fn lemma_outer_spec_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_outer_spec_stable_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
+        binding_of(sk, outer) == bnd,
+        outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        outer_spec_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_spec_stable(outer)(s)
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        outer_spec_stable(sk, bnd, relabel_synced(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_spec_stable(sk, bnd, outer)(s)
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
     let a = abs(tc, r, s, uid_next, rv_next);
     let p = s.project(Side::Primary);
-    lemma_desired_state_pull_back(cluster, r, s, outer, uid_next, rv_next);
+    lemma_desired_state_pull_back(sk, bnd, cluster, r, s, outer, uid_next, rv_next);
     // Writes of the mirror's spec in flight.
     let in_flight = s.network.in_flight;
-    assert(mirror_spec_undisturbed(outer1)(a) == mirror_spec_undisturbed(outer)(p)) by {
-        if mirror_spec_undisturbed(outer)(p) {
+    assert(mirror_spec_undisturbed(sk, outer1)(a) == mirror_spec_undisturbed(sk, outer)(p)) by {
+        if mirror_spec_undisturbed(sk, outer)(p) {
             assert forall |msg: Message| #[trigger] a.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
-                APIRequest::UpdateRequest(req) => req.key() == inner_key(outer1) ==> writes_outer_spec(req.obj.spec, outer1),
-                APIRequest::GetThenUpdateRequest(req) => req.key() == inner_key(outer1) ==> writes_outer_spec(req.obj.spec, outer1),
-                APIRequest::PatchRequest(req) => req.key() == inner_key(outer1) ==> writes_outer_spec(req.spec, outer1),
+                APIRequest::UpdateRequest(req) => req.key() == inner_key(sk, outer1) ==> writes_outer_spec(req.obj.spec, outer1),
+                APIRequest::GetThenUpdateRequest(req) => req.key() == inner_key(sk, outer1) ==> writes_outer_spec(req.obj.spec, outer1),
+                APIRequest::PatchRequest(req) => req.key() == inner_key(sk, outer1) ==> writes_outer_spec(req.spec, outer1),
                 _ => true,
             } by {
                 lemma_relabel_msgs_contains(tc, r, in_flight, msg);
@@ -995,11 +1078,11 @@ proof fn lemma_outer_spec_stable_pull_back(cluster: Cluster, r: Relabeling, s: T
                 assert(p.in_flight().contains(m2));
             }
         }
-        if mirror_spec_undisturbed(outer1)(a) {
+        if mirror_spec_undisturbed(sk, outer1)(a) {
             assert forall |msg: Message| #[trigger] p.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
-                APIRequest::UpdateRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
-                APIRequest::GetThenUpdateRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.obj.spec, outer),
-                APIRequest::PatchRequest(req) => req.key() == inner_key(outer) ==> writes_outer_spec(req.spec, outer),
+                APIRequest::UpdateRequest(req) => req.key() == inner_key(sk, outer) ==> writes_outer_spec(req.obj.spec, outer),
+                APIRequest::GetThenUpdateRequest(req) => req.key() == inner_key(sk, outer) ==> writes_outer_spec(req.obj.spec, outer),
+                APIRequest::PatchRequest(req) => req.key() == inner_key(sk, outer) ==> writes_outer_spec(req.spec, outer),
                 _ => true,
             } by {
                 lemma_relabel_msgs_contains(tc, r, in_flight, msg);
@@ -1008,33 +1091,32 @@ proof fn lemma_outer_spec_stable_pull_back(cluster: Cluster, r: Relabeling, s: T
             }
         }
     }
-    // Deletes of the mirror key in flight, read on the remote side. Only needed when
-    // the outer copy exists, which fixes its uid; otherwise both sides of the
-    // equality are false already.
-    if Cluster::desired_state_is(outer)(p) {
-        lemma_mirror_undeleted_pull_back(cluster, r, s, outer, uid_next, rv_next);
-    }
+    // Deletes of the mirror key in flight, read on the remote side.
+    lemma_mirror_undeleted_pull_back(sk, bnd, cluster, r, s, outer, uid_next, rv_next);
 }
 
 // The premise of R2, pulled back: R1's premise, and the generation of the outer
 // copy, which relabeling keeps.
-proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_outer_stable_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
+        binding_of(sk, outer) == bnd,
+        outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        outer_stable(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_stable(outer)(s)
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        outer_stable(sk, bnd, relabel_synced(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == two_cluster_outer_stable(sk, bnd, outer)(s)
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
     let a = abs(tc, r, s, uid_next, rv_next);
     let p = s.project(Side::Primary);
-    lemma_outer_spec_stable_pull_back(cluster, r, s, outer, uid_next, rv_next);
-    lemma_desired_state_pull_back(cluster, r, s, outer, uid_next, rv_next);
-    lemma_abs_object(cluster, r, s, outer.object_ref(), uid_next, rv_next);
+    lemma_outer_spec_stable_pull_back(sk, bnd, cluster, r, s, outer, uid_next, rv_next);
+    lemma_desired_state_pull_back(sk, bnd, cluster, r, s, outer, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, outer.object_ref(), uid_next, rv_next);
     if p.resources().contains_key(outer.object_ref()) {
         lemma_relabel_obj_keeps_identity(tc, r, p.resources()[outer.object_ref()]);
     }
@@ -1043,39 +1125,41 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
 // The delete clause of the premise, pulled back: a Delete of the mirror key misses
 // the relabeled mirror exactly when its preimage misses the mirror in the remote
 // store, since uids of one side are relabeled injectively.
-proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_mirror_undeleted_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
+        binding_of(sk, outer) == bnd,
         outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        mirror_undeleted(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == mirror_undeleted(outer)(s.project(Side::Remote))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        mirror_undeleted(sk, relabel_synced(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == mirror_undeleted(sk, outer)(s.project(Side::Remote))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
     let a = abs(tc, r, s, uid_next, rv_next);
     let q = s.project(Side::Remote);
-    let key = inner_key(outer);
-    assert(inner_key(outer1) == key);
+    let key = inner_key(sk, outer);
+    assert(inner_key(sk, outer1) == key);
     let in_flight = s.network.in_flight;
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     // The mirror at the key, on both sides of the abstraction.
     if q.resources().contains_key(key) {
         let obj = q.resources()[key];
-        lemma_unmarshal_inner_relabel(tc, r, obj);
+        lemma_unmarshal_inner_relabel(sk, bnd, tc, r, obj);
         lemma_relabel_obj_keeps_identity(tc, r, obj);
-        if InnerWidgetView::unmarshal(obj) is Ok {
-            lemma_is_mirror_of_relabel(cluster, r, InnerWidgetView::unmarshal(obj)->Ok_0, outer);
+        if unmarshal(inner_kind(sk, bnd), obj) is Ok {
+            lemma_is_mirror_of_relabel(sk, bnd, cluster, r, unmarshal(inner_kind(sk, bnd), obj)->Ok_0, outer);
         }
     }
     // A Delete of the mirror key and its relabeling miss the mirror together.
     assert forall |m2: Message| #[trigger] in_flight.contains(m2) && m2.content is APIRequest && m2.content->APIRequest_0 is DeleteRequest
         && m2.content->APIRequest_0->DeleteRequest_0.key == key
-        implies delete_misses_mirror(relabel_msg(tc, r, m2).content->APIRequest_0->DeleteRequest_0, outer1)(a)
-            == delete_misses_mirror(m2.content->APIRequest_0->DeleteRequest_0, outer)(q) by {
+        implies delete_misses_mirror(sk, relabel_msg(tc, r, m2).content->APIRequest_0->DeleteRequest_0, outer1)(a)
+            == delete_misses_mirror(sk, m2.content->APIRequest_0->DeleteRequest_0, outer)(q) by {
         let req2 = m2.content->APIRequest_0->DeleteRequest_0;
         let req1 = relabel_msg(tc, r, m2).content->APIRequest_0->DeleteRequest_0;
         assert(req1.preconditions == relabel_preconditions(r, Side::Remote, req2.preconditions));
@@ -1093,9 +1177,9 @@ proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: Tw
             }
         }
     }
-    if mirror_undeleted(outer)(q) {
+    if mirror_undeleted(sk, outer)(q) {
         assert forall |msg: Message| #[trigger] a.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
-            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(req, outer1)(a),
+            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(sk, req, outer1)(a),
             _ => true,
         } by {
             lemma_relabel_msgs_contains(tc, r, in_flight, msg);
@@ -1103,9 +1187,9 @@ proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: Tw
             assert(q.in_flight().contains(m2));
         }
     }
-    if mirror_undeleted(outer1)(a) {
+    if mirror_undeleted(sk, outer1)(a) {
         assert forall |msg: Message| #[trigger] q.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
-            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(req, outer)(q),
+            APIRequest::DeleteRequest(req) => req.key == key ==> delete_misses_mirror(sk, req, outer)(q),
             _ => true,
         } by {
             lemma_relabel_msgs_contains(tc, r, in_flight, msg);
@@ -1115,89 +1199,94 @@ proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: Tw
     }
 }
 
-proof fn lemma_spec_synced_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_spec_synced_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
+        binding_of(sk, outer) == bnd,
         outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        spec_synced(relabel_outer(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == spec_synced(outer)(s.project(Side::Remote))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        spec_synced(sk, relabel_synced(tc, r, outer))(abs(tc, r, s, uid_next, rv_next)) == spec_synced(sk, outer)(s.project(Side::Remote))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let outer1 = relabel_outer(tc, r, outer);
-    let key = inner_key(outer);
-    assert(inner_key(outer1) == key);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let outer1 = relabel_synced(tc, r, outer);
+    let key = inner_key(sk, outer);
+    assert(inner_key(sk, outer1) == key);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(Side::Remote);
     if q.resources().contains_key(key) {
         let obj = q.resources()[key];
-        lemma_unmarshal_inner_relabel(tc, r, obj);
+        lemma_unmarshal_inner_relabel(sk, bnd, tc, r, obj);
         lemma_relabel_obj_keeps_identity(tc, r, obj);
-        if InnerWidgetView::unmarshal(obj) is Ok {
-            lemma_is_mirror_of_relabel(cluster, r, InnerWidgetView::unmarshal(obj)->Ok_0, outer);
+        if unmarshal(inner_kind(sk, bnd), obj) is Ok {
+            lemma_is_mirror_of_relabel(sk, bnd, cluster, r, unmarshal(inner_kind(sk, bnd), obj)->Ok_0, outer);
         }
     }
 }
 
-proof fn lemma_inner_settled_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, mirrored: WidgetStatusView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_inner_settled_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, mirrored: SyncedStatusView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
+        binding_of(sk, outer) == bnd,
         outer.metadata.uid is Some,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        inner_settled(relabel_outer(tc, r, outer), mirrored)(abs(tc, r, s, uid_next, rv_next)) == inner_settled(outer, mirrored)(s.project(Side::Remote))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        inner_settled(sk, relabel_synced(tc, r, outer), mirrored)(abs(tc, r, s, uid_next, rv_next)) == inner_settled(sk, outer, mirrored)(s.project(Side::Remote))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    lemma_spec_synced_pull_back(cluster, r, s, outer, uid_next, rv_next);
-    let key = inner_key(outer);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    lemma_spec_synced_pull_back(sk, bnd, cluster, r, s, outer, uid_next, rv_next);
+    let key = inner_key(sk, outer);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(Side::Remote);
     if q.resources().contains_key(key) {
         let obj = q.resources()[key];
-        lemma_unmarshal_inner_relabel(tc, r, obj);
+        lemma_unmarshal_inner_relabel(sk, bnd, tc, r, obj);
     }
 }
 
-proof fn lemma_status_synced_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, mirrored: WidgetStatusView, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_status_synced_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: SyncedObjectView, mirrored: SyncedStatusView, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        outer.kind == sk.outer_kind,
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        status_synced(relabel_outer(tc, r, outer), mirrored)(abs(tc, r, s, uid_next, rv_next)) == status_synced(outer, mirrored)(s.project(Side::Primary))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        status_synced(sk, relabel_synced(tc, r, outer), mirrored)(abs(tc, r, s, uid_next, rv_next)) == status_synced(sk, outer, mirrored)(s.project(Side::Primary))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
     let key = outer.object_ref();
-    assert(relabel_outer(tc, r, outer).object_ref() == key);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    assert(relabel_synced(tc, r, outer).object_ref() == key);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let p = s.project(Side::Primary);
     if p.resources().contains_key(key) {
         let obj = p.resources()[key];
-        lemma_unmarshal_outer_relabel(tc, r, obj);
+        lemma_unmarshal_outer_relabel(sk, bnd, tc, r, obj);
     }
 }
 
-proof fn lemma_parent_absent_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_parent_absent_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        parent_absent(key, (r.uid)(Side::Primary, parent_uid))(abs(tc, r, s, uid_next, rv_next)) == parent_absent(key, parent_uid)(s.project(Side::Primary))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        parent_absent(sk, key, (r.uid)(Side::Primary, parent_uid))(abs(tc, r, s, uid_next, rv_next)) == parent_absent(sk, key, parent_uid)(s.project(Side::Primary))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
-    let okey = outer_key_of(key);
-    lemma_abs_object(cluster, r, s, okey, uid_next, rv_next);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
+    let okey = outer_key_of(sk, key);
+    lemma_abs_object(sk, bnd, cluster, r, s, okey, uid_next, rv_next);
     let p = s.project(Side::Primary);
     if p.resources().contains_key(okey) {
         let obj = p.resources()[okey];
@@ -1208,75 +1297,75 @@ proof fn lemma_parent_absent_pull_back(cluster: Cluster, r: Relabeling, s: TwoCl
     }
 }
 
-proof fn lemma_mirror_of_parent_pull_back(cluster: Cluster, r: Relabeling, obj: DynamicObjectView, parent_uid: Uid)
-    requires widget_relabeling(cluster, r),
-    ensures mirror_of_parent(relabel_obj(widget_two_cluster(cluster), r, obj), (r.uid)(Side::Primary, parent_uid)) == mirror_of_parent(obj, parent_uid),
+proof fn lemma_mirror_of_parent_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, obj: DynamicObjectView, parent_uid: Uid)
+    requires widget_kinds_ok(sk, bnd), widget_relabeling(r),
+    ensures mirror_of_parent(inner_kind(sk, bnd), relabel_obj(widget_two_cluster(sk, bnd, cluster), r, obj), (r.uid)(Side::Primary, parent_uid)) == mirror_of_parent(inner_kind(sk, bnd), obj, parent_uid),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_unmarshal_inner_relabel(tc, r, obj);
-    if InnerWidgetView::unmarshal(obj) is Ok {
-        let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
-        lemma_has_mirror_identity_relabel(cluster, r, inner);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_unmarshal_inner_relabel(sk, bnd, tc, r, obj);
+    if unmarshal(inner_kind(sk, bnd), obj) is Ok {
+        let inner = unmarshal(inner_kind(sk, bnd), obj)->Ok_0;
+        lemma_has_mirror_identity_relabel(sk, bnd, cluster, r, inner);
         if has_mirror_identity(inner) {
-            lemma_parent_annotation_relabel(cluster, r, inner);
+            lemma_parent_annotation_relabel(sk, bnd, cluster, r, inner);
             lemma_uid_string_eq(r.uid, parent_uid_annotation(inner), parent_uid);
         }
     }
 }
 
-proof fn lemma_mirror_collected_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_mirror_collected_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        mirror_collected(key, (r.uid)(Side::Primary, parent_uid))(abs(tc, r, s, uid_next, rv_next)) == mirror_collected(key, parent_uid)(s.project(tc.side_of_kind(key.kind)))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        mirror_collected(inner_kind(sk, bnd), key, (r.uid)(Side::Primary, parent_uid))(abs(tc, r, s, uid_next, rv_next)) == mirror_collected(inner_kind(sk, bnd), key, parent_uid)(s.project(tc.side_of_kind(key.kind)))
     }),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(tc.side_of_kind(key.kind));
     if q.resources().contains_key(key) {
-        lemma_mirror_of_parent_pull_back(cluster, r, q.resources()[key], parent_uid);
+        lemma_mirror_of_parent_pull_back(sk, bnd, cluster, r, q.resources()[key], parent_uid);
     }
 }
 
 // mirror_object_is and object_is_gone name the mirror's own uid, which lives on the key's side.
-proof fn lemma_mirror_object_is_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_mirror_object_is_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, parent_uid: Uid, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
-        mirror_object_is(key, (r.uid)(Side::Primary, parent_uid), (r.uid)(side, uid))(abs(tc, r, s, uid_next, rv_next)) == mirror_object_is(key, parent_uid, uid)(s.project(side))
+        mirror_object_is(inner_kind(sk, bnd), key, (r.uid)(Side::Primary, parent_uid), (r.uid)(side, uid))(abs(tc, r, s, uid_next, rv_next)) == mirror_object_is(inner_kind(sk, bnd), key, parent_uid, uid)(s.project(side))
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let side = tc.side_of_kind(key.kind);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(side);
     if q.resources().contains_key(key) {
         let obj = q.resources()[key];
-        lemma_mirror_of_parent_pull_back(cluster, r, obj, parent_uid);
+        lemma_mirror_of_parent_pull_back(sk, bnd, cluster, r, obj, parent_uid);
         let x = obj.metadata.uid->0;
         if (r.uid)(side, x) == (r.uid)(side, uid) { assert(x == uid); }
     }
 }
 
-proof fn lemma_object_is_gone_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_object_is_gone_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
         object_is_gone(key, (r.uid)(side, uid))(abs(tc, r, s, uid_next, rv_next)) == object_is_gone(key, uid)(s.project(side))
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let side = tc.side_of_kind(key.kind);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(side);
     if q.resources().contains_key(key) {
         let x = q.resources()[key].metadata.uid->0;
@@ -1284,19 +1373,19 @@ proof fn lemma_object_is_gone_pull_back(cluster: Cluster, r: Relabeling, s: TwoC
     }
 }
 
-proof fn lemma_inner_terminating_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
+proof fn lemma_inner_terminating_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, key: ObjectRef, uid: Uid, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
-        inner_terminating_object(key, (r.uid)(side, uid))(abs(tc, r, s, uid_next, rv_next)) == inner_terminating_object(key, uid)(s.project(side))
+        inner_terminating_object(sk, bnd, key, (r.uid)(side, uid))(abs(tc, r, s, uid_next, rv_next)) == inner_terminating_object(sk, bnd, key, uid)(s.project(side))
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let side = tc.side_of_kind(key.kind);
-    lemma_abs_object(cluster, r, s, key, uid_next, rv_next);
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_next, rv_next);
     let q = s.project(side);
     if q.resources().contains_key(key) {
         let obj = q.resources()[key];
@@ -1312,7 +1401,8 @@ proof fn lemma_inner_terminating_pull_back(cluster: Cluster, r: Relabeling, s: T
 // two-store execution through per-state equivalences.
 // ---------------------------------------------------------------------------
 
-proof fn lemma_heads(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, t: nat, d: nat, k: nat)
+proof fn lemma_heads(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, t: nat, d: nat, k: nat)
+    requires widget_kinds_ok(sk, bnd),
     ensures
         ex.suffix(t).suffix(k).head() == state_at(ex, t + k),
         alpha(tc, r, ex).suffix(t).suffix(k).head() == abs_at(tc, r, ex, t + k),
@@ -1322,8 +1412,8 @@ proof fn lemma_heads(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterStat
 }
 
 // always p2 ~> always q2 on ex, from always p1 ~> always q1 on the abstract execution.
-proof fn lemma_pull_back_always_leads_to_always(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
-    requires
+proof fn lemma_pull_back_always_leads_to_always(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
         forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)),
         forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)),
         always(lift_state(p1)).leads_to(always(lift_state(q1))).satisfied_by(alpha(tc, r, ex)),
@@ -1334,14 +1424,14 @@ proof fn lemma_pull_back_always_leads_to_always(tc: TwoCluster, r: Relabeling, e
         if always(lift_state(p2)).satisfied_by(ex.suffix(t)) {
             assert forall |k: nat| #[trigger] lift_state(p1).satisfied_by(ex1.suffix(t).suffix(k)) by {
                 assert(lift_state(p2).satisfied_by(ex.suffix(t).suffix(k)));
-                lemma_heads(tc, r, ex, t, 0, k);
+                lemma_heads(sk, bnd, tc, r, ex, t, 0, k);
             }
             assert(always(lift_state(p1)).satisfied_by(ex1.suffix(t)));
             assert(always(lift_state(p1)).implies(eventually(always(lift_state(q1)))).satisfied_by(ex1.suffix(t)));
             let d = choose |d: nat| #[trigger] always(lift_state(q1)).satisfied_by(ex1.suffix(t).suffix(d));
             assert forall |k: nat| #[trigger] lift_state(q2).satisfied_by(ex.suffix(t).suffix(d).suffix(k)) by {
                 assert(lift_state(q1).satisfied_by(ex1.suffix(t).suffix(d).suffix(k)));
-                lemma_heads(tc, r, ex, t, d, k);
+                lemma_heads(sk, bnd, tc, r, ex, t, d, k);
             }
             assert(always(lift_state(q2)).satisfied_by(ex.suffix(t).suffix(d)));
         }
@@ -1349,8 +1439,8 @@ proof fn lemma_pull_back_always_leads_to_always(tc: TwoCluster, r: Relabeling, e
 }
 
 // always (p2 and p2b) ~> always q2, the same with a two-part premise.
-proof fn lemma_pull_back_always_and_leads_to_always(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, p1b: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, p2b: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
-    requires
+proof fn lemma_pull_back_always_and_leads_to_always(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, p1b: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, p2b: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
         forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)),
         forall |i: nat| p1b(abs_at(tc, r, ex, i)) == p2b(#[trigger] state_at(ex, i)),
         forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)),
@@ -1362,14 +1452,14 @@ proof fn lemma_pull_back_always_and_leads_to_always(tc: TwoCluster, r: Relabelin
         if always(lift_state(p2).and(lift_state(p2b))).satisfied_by(ex.suffix(t)) {
             assert forall |k: nat| #[trigger] lift_state(p1).and(lift_state(p1b)).satisfied_by(ex1.suffix(t).suffix(k)) by {
                 assert(lift_state(p2).and(lift_state(p2b)).satisfied_by(ex.suffix(t).suffix(k)));
-                lemma_heads(tc, r, ex, t, 0, k);
+                lemma_heads(sk, bnd, tc, r, ex, t, 0, k);
             }
             assert(always(lift_state(p1).and(lift_state(p1b))).satisfied_by(ex1.suffix(t)));
             assert(always(lift_state(p1).and(lift_state(p1b))).implies(eventually(always(lift_state(q1)))).satisfied_by(ex1.suffix(t)));
             let d = choose |d: nat| #[trigger] always(lift_state(q1)).satisfied_by(ex1.suffix(t).suffix(d));
             assert forall |k: nat| #[trigger] lift_state(q2).satisfied_by(ex.suffix(t).suffix(d).suffix(k)) by {
                 assert(lift_state(q1).satisfied_by(ex1.suffix(t).suffix(d).suffix(k)));
-                lemma_heads(tc, r, ex, t, d, k);
+                lemma_heads(sk, bnd, tc, r, ex, t, d, k);
             }
             assert(always(lift_state(q2)).satisfied_by(ex.suffix(t).suffix(d)));
         }
@@ -1377,8 +1467,8 @@ proof fn lemma_pull_back_always_and_leads_to_always(tc: TwoCluster, r: Relabelin
 }
 
 // (always p2) and p2b ~> q2, the shape of R3.
-proof fn lemma_pull_back_always_and_now_leads_to(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, p1b: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, p2b: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
-    requires
+proof fn lemma_pull_back_always_and_now_leads_to(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, p1b: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, p2b: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
         forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)),
         forall |i: nat| p1b(abs_at(tc, r, ex, i)) == p2b(#[trigger] state_at(ex, i)),
         forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)),
@@ -1390,7 +1480,7 @@ proof fn lemma_pull_back_always_and_now_leads_to(tc: TwoCluster, r: Relabeling, 
         if always(lift_state(p2)).and(lift_state(p2b)).satisfied_by(ex.suffix(t)) {
             assert forall |k: nat| #[trigger] lift_state(p1).satisfied_by(ex1.suffix(t).suffix(k)) by {
                 assert(lift_state(p2).satisfied_by(ex.suffix(t).suffix(k)));
-                lemma_heads(tc, r, ex, t, 0, k);
+                lemma_heads(sk, bnd, tc, r, ex, t, 0, k);
             }
             assert(always(lift_state(p1)).satisfied_by(ex1.suffix(t)));
             assert(lift_state(p1b).satisfied_by(ex1.suffix(t))) by {
@@ -1399,15 +1489,15 @@ proof fn lemma_pull_back_always_and_now_leads_to(tc: TwoCluster, r: Relabeling, 
             }
             assert(always(lift_state(p1)).and(lift_state(p1b)).implies(eventually(lift_state(q1))).satisfied_by(ex1.suffix(t)));
             let d = choose |d: nat| #[trigger] lift_state(q1).satisfied_by(ex1.suffix(t).suffix(d));
-            lemma_heads(tc, r, ex, t, 0, d);
+            lemma_heads(sk, bnd, tc, r, ex, t, 0, d);
             assert(lift_state(q2).satisfied_by(ex.suffix(t).suffix(d)));
         }
     }
 }
 
 // p1 ~> q1 on the abstract execution from p2 ~> q2 on ex (the shape of D3).
-proof fn lemma_push_forward_leads_to(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
-    requires
+proof fn lemma_push_forward_leads_to(sk: SyncKind, bnd: Binding, tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p1: StatePred<ClusterState>, q1: StatePred<ClusterState>, p2: StatePred<TwoClusterState>, q2: StatePred<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
         forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)),
         forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)),
         lift_state(p2).leads_to(lift_state(q2)).satisfied_by(ex),
@@ -1421,7 +1511,7 @@ proof fn lemma_push_forward_leads_to(tc: TwoCluster, r: Relabeling, ex: Executio
             assert(lift_state(p2).satisfied_by(ex.suffix(t)));
             assert(lift_state(p2).implies(eventually(lift_state(q2))).satisfied_by(ex.suffix(t)));
             let d = choose |d: nat| #[trigger] lift_state(q2).satisfied_by(ex.suffix(t).suffix(d));
-            lemma_heads(tc, r, ex, t, 0, d);
+            lemma_heads(sk, bnd, tc, r, ex, t, 0, d);
             assert(lift_state(q1).satisfied_by(ex1.suffix(t).suffix(d)));
         }
     }
@@ -1432,41 +1522,41 @@ proof fn lemma_push_forward_leads_to(tc: TwoCluster, r: Relabeling, ex: Executio
 // ---------------------------------------------------------------------------
 
 // What the instantiation knows about an execution once it has been simulated.
-pub open spec fn widget_sim(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>) -> bool {
-    &&& simulation(widget_two_cluster(cluster), r, ex)
-    &&& widget_relabeling(cluster, r)
+pub open spec fn widget_sim(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>) -> bool {
+    &&& simulation(widget_two_cluster(sk, bnd, cluster), r, ex)
+    &&& widget_relabeling(r)
 }
 
-proof fn lemma_widget_sim_inv(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, i: nat)
-    requires widget_sim(cluster, r, ex),
+proof fn lemma_widget_sim_inv(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, i: nat)
+    requires widget_kinds_ok(sk, bnd), widget_sim(sk, bnd, cluster, r, ex),
     ensures
-        inv(widget_two_cluster(cluster), state_at(ex, i)),
-        abs_at(widget_two_cluster(cluster), r, ex, i) == abs(widget_two_cluster(cluster), r, state_at(ex, i), uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i))),
+        inv(widget_two_cluster(sk, bnd, cluster), state_at(ex, i)),
+        abs_at(widget_two_cluster(sk, bnd, cluster), r, ex, i) == abs(widget_two_cluster(sk, bnd, cluster), r, state_at(ex, i), uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i))),
 {
 }
 
 // An outer copy without a uid is never the desired state: stored objects have uids.
-proof fn lemma_outer_without_uid_not_stable_at(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, outer: OuterWidgetView, t: nat)
-    requires
-        widget_sim(cluster, r, ex),
+proof fn lemma_outer_without_uid_not_stable_at(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, outer: SyncedObjectView, t: nat)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
         outer.metadata.uid is None,
     ensures
-        !two_cluster_outer_spec_stable(outer)(state_at(ex, t)),
-        !two_cluster_outer_stable(outer)(state_at(ex, t)),
+        !two_cluster_outer_spec_stable(sk, bnd, outer)(state_at(ex, t)),
+        !two_cluster_outer_stable(sk, bnd, outer)(state_at(ex, t)),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sim_inv(cluster, r, ex, t);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sim_inv(sk, bnd, cluster, r, ex, t);
     let s = state_at(ex, t);
     let key = outer.object_ref();
     if s.primary.resources.contains_key(key) {
         assert(stored_object_ok(tc, s.primary.resources[key]));
     }
-    assert(!Cluster::desired_state_is(outer)(s.project(Side::Primary)));
+    assert(!Cluster::synced_desired_state_is(outer)(s.project(Side::Primary)));
 }
 
 // A leads-to whose premise never holds is vacuous.
-proof fn lemma_vacuous_from_never(ex: Execution<TwoClusterState>, sp: StatePred<TwoClusterState>, extra: TempPred<TwoClusterState>, q: TempPred<TwoClusterState>)
-    requires forall |t: nat| !sp(#[trigger] state_at(ex, t)),
+proof fn lemma_vacuous_from_never(sk: SyncKind, bnd: Binding, ex: Execution<TwoClusterState>, sp: StatePred<TwoClusterState>, extra: TempPred<TwoClusterState>, q: TempPred<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd), forall |t: nat| !sp(#[trigger] state_at(ex, t)),
     ensures
         always(lift_state(sp)).leads_to(q).satisfied_by(ex),
         always(lift_state(sp).and(extra)).leads_to(q).satisfied_by(ex),
@@ -1482,145 +1572,169 @@ proof fn lemma_vacuous_from_never(ex: Execution<TwoClusterState>, sp: StatePred<
     }
 }
 
-proof fn lemma_outer_without_uid_never_stable(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, outer: OuterWidgetView)
-    requires
-        widget_sim(cluster, r, ex),
+proof fn lemma_outer_without_uid_never_stable(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, outer: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
         outer.metadata.uid is None,
-    ensures always(lift_state(two_cluster_outer_spec_stable(outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex),
-        forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
-            .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex),
+    ensures always(lift_state(two_cluster_outer_spec_stable(sk, bnd, outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(sk, outer))))).satisfied_by(ex),
+        forall |mirrored: SyncedStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(sk, bnd, outer)).and(lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored)))))
+            .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored))))).satisfied_by(ex),
 {
-    let sp1 = two_cluster_outer_spec_stable(outer);
-    let sp = two_cluster_outer_stable(outer);
+    let sp1 = two_cluster_outer_spec_stable(sk, bnd, outer);
+    let sp = two_cluster_outer_stable(sk, bnd, outer);
     assert forall |t: nat| !sp1(#[trigger] state_at(ex, t)) && !sp(state_at(ex, t)) by {
-        lemma_outer_without_uid_not_stable_at(cluster, r, ex, outer, t);
+        lemma_outer_without_uid_not_stable_at(sk, bnd, cluster, r, ex, outer, t);
     }
-    lemma_vacuous_from_never(ex, sp1, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(outer)))));
-    assert forall |mirrored: WidgetStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(outer)).and(lift_state(on_side(Side::Remote, inner_settled(outer, mirrored)))))
-        .leads_to(always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored))))).satisfied_by(ex) by {
-        lemma_vacuous_from_never(ex, sp, lift_state(on_side(Side::Remote, inner_settled(outer, mirrored))), always(lift_state(on_side(Side::Primary, status_synced(outer, mirrored)))));
+    lemma_vacuous_from_never(sk, bnd, ex, sp1, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(sk, outer)))));
+    assert forall |mirrored: SyncedStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(sk, bnd, outer)).and(lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored)))))
+        .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored))))).satisfied_by(ex) by {
+        lemma_vacuous_from_never(sk, bnd, ex, sp, lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored))), always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored)))));
     }
 }
 
-pub proof fn lemma_r1_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_spec_eventually_synced().satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-    ensures two_cluster_spec_eventually_synced().satisfied_by(ex),
+// An outer copy of another kind, or one that names no cluster or another
+// binding, never satisfies the premise: outer_spec_stable carries those three
+// facts, and they do not depend on the state.
+proof fn lemma_off_binding_outer_never_stable(sk: SyncKind, bnd: Binding, ex: Execution<TwoClusterState>, outer: SyncedObjectView)
+    requires widget_kinds_ok(sk, bnd),
+        !(outer.kind == sk.outer_kind && cluster_of(sk.selector, outer) is Some && binding_of(sk, outer) == bnd),
+    ensures always(lift_state(two_cluster_outer_spec_stable(sk, bnd, outer))).leads_to(always(lift_state(on_side(Side::Remote, spec_synced(sk, outer))))).satisfied_by(ex),
+        forall |mirrored: SyncedStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(sk, bnd, outer)).and(lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored)))))
+            .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored))))).satisfied_by(ex),
 {
-    let tc = widget_two_cluster(cluster);
+    let sp1 = two_cluster_outer_spec_stable(sk, bnd, outer);
+    let sp = two_cluster_outer_stable(sk, bnd, outer);
+    assert forall |t: nat| !sp1(#[trigger] state_at(ex, t)) && !sp(state_at(ex, t)) by {}
+    lemma_vacuous_from_never(sk, bnd, ex, sp1, true_pred(), always(lift_state(on_side(Side::Remote, spec_synced(sk, outer)))));
+    assert forall |mirrored: SyncedStatusView| #[trigger] always(lift_state(two_cluster_outer_stable(sk, bnd, outer)).and(lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored)))))
+        .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored))))).satisfied_by(ex) by {
+        lemma_vacuous_from_never(sk, bnd, ex, sp, lift_state(on_side(Side::Remote, inner_settled(sk, outer, mirrored))), always(lift_state(on_side(Side::Primary, status_synced(sk, outer, mirrored)))));
+    }
+}
+
+pub proof fn lemma_r1_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_spec_eventually_synced(sk, bnd).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+    ensures two_cluster_spec_eventually_synced(sk, bnd).satisfied_by(ex),
+{
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |outer: OuterWidgetView| #[trigger] always(lift_state(two_cluster_outer_spec_stable(outer)))
-        .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(outer))))).satisfied_by(ex) by {
+    assert forall |outer: SyncedObjectView| #[trigger] always(lift_state(two_cluster_outer_spec_stable(sk, bnd, outer)))
+        .leads_to(always(lift_state(on_side(Side::Remote, spec_synced(sk, outer))))).satisfied_by(ex) by {
         if outer.metadata.uid is None {
-            lemma_outer_without_uid_never_stable(cluster, r, ex, outer);
+            lemma_outer_without_uid_never_stable(sk, bnd, cluster, r, ex, outer);
+        } else if !(outer.kind == sk.outer_kind && cluster_of(sk.selector, outer) is Some && binding_of(sk, outer) == bnd) {
+            lemma_off_binding_outer_never_stable(sk, bnd, ex, outer);
         } else {
-            let outer1 = relabel_outer(tc, r, outer);
-            let f = |outer: OuterWidgetView| widget_spec_eventually_synced_per_cr(outer);
+            let outer1 = relabel_synced(tc, r, outer);
+            let f = |outer: SyncedObjectView| widget_spec_eventually_synced_per_cr(sk, bnd, outer);
             assert(tla_forall(f).satisfied_by(ex1));
             assert(f(outer1).satisfied_by(ex1));
-            let p1 = outer_spec_stable(outer1);
-            let q1 = spec_synced(outer1);
-            let p2 = two_cluster_outer_spec_stable(outer);
-            let q2 = on_side(Side::Remote, spec_synced(outer));
+            let p1 = outer_spec_stable(sk, bnd, outer1);
+            let q1 = spec_synced(sk, outer1);
+            let p2 = two_cluster_outer_spec_stable(sk, bnd, outer);
+            let q2 = on_side(Side::Remote, spec_synced(sk, outer));
             assert forall |i: nat| p1(abs_at(tc, r, ex, i)) == p2(#[trigger] state_at(ex, i)) by {
-                lemma_widget_sim_inv(cluster, r, ex, i);
-                lemma_outer_spec_stable_pull_back(cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
+                lemma_widget_sim_inv(sk, bnd, cluster, r, ex, i);
+                lemma_outer_spec_stable_pull_back(sk, bnd, cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
             }
             assert forall |i: nat| q1(abs_at(tc, r, ex, i)) == q2(#[trigger] state_at(ex, i)) by {
-                lemma_widget_sim_inv(cluster, r, ex, i);
-                lemma_spec_synced_pull_back(cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
+                lemma_widget_sim_inv(sk, bnd, cluster, r, ex, i);
+                lemma_spec_synced_pull_back(sk, bnd, cluster, r, state_at(ex, i), outer, uid_sum(state_at(ex, i)), rv_sum(state_at(ex, i)));
             }
-            lemma_pull_back_always_leads_to_always(tc, r, ex, p1, q1, p2, q2);
+            lemma_pull_back_always_leads_to_always(sk, bnd, tc, r, ex, p1, q1, p2, q2);
         }
     }
 }
 
-pub proof fn lemma_r2_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_status_eventually_mirrored().satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-    ensures two_cluster_status_eventually_mirrored().satisfied_by(ex),
+pub proof fn lemma_r2_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_status_eventually_mirrored(sk, bnd).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+    ensures two_cluster_status_eventually_mirrored(sk, bnd).satisfied_by(ex),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: (OuterWidgetView, WidgetStatusView)| #[trigger] always(lift_state(two_cluster_outer_stable(i.0)).and(lift_state(on_side(Side::Remote, inner_settled(i.0, i.1)))))
-        .leads_to(always(lift_state(on_side(Side::Primary, status_synced(i.0, i.1))))).satisfied_by(ex) by {
+    assert forall |i: (SyncedObjectView, SyncedStatusView)| #[trigger] always(lift_state(two_cluster_outer_stable(sk, bnd, i.0)).and(lift_state(on_side(Side::Remote, inner_settled(sk, i.0, i.1)))))
+        .leads_to(always(lift_state(on_side(Side::Primary, status_synced(sk, i.0, i.1))))).satisfied_by(ex) by {
         let outer = i.0;
         let mirrored = i.1;
         if outer.metadata.uid is None {
-            lemma_outer_without_uid_never_stable(cluster, r, ex, outer);
+            lemma_outer_without_uid_never_stable(sk, bnd, cluster, r, ex, outer);
+        } else if !(outer.kind == sk.outer_kind && cluster_of(sk.selector, outer) is Some && binding_of(sk, outer) == bnd) {
+            lemma_off_binding_outer_never_stable(sk, bnd, ex, outer);
         } else {
-            let outer1 = relabel_outer(tc, r, outer);
+            let outer1 = relabel_synced(tc, r, outer);
             let j = (outer1, mirrored);
-            let f = |i: (OuterWidgetView, WidgetStatusView)| widget_status_eventually_mirrored_per_cr(i.0, i.1);
+            let f = |i: (SyncedObjectView, SyncedStatusView)| widget_status_eventually_mirrored_per_cr(sk, bnd, i.0, i.1);
             assert(tla_forall(f).satisfied_by(ex1));
             assert(f(j).satisfied_by(ex1));
-            let p1 = outer_stable(outer1);
-            let p1b = inner_settled(outer1, mirrored);
-            let q1 = status_synced(outer1, mirrored);
-            let p2 = two_cluster_outer_stable(outer);
-            let p2b = on_side(Side::Remote, inner_settled(outer, mirrored));
-            let q2 = on_side(Side::Primary, status_synced(outer, mirrored));
+            let p1 = outer_stable(sk, bnd, outer1);
+            let p1b = inner_settled(sk, outer1, mirrored);
+            let q1 = status_synced(sk, outer1, mirrored);
+            let p2 = two_cluster_outer_stable(sk, bnd, outer);
+            let p2b = on_side(Side::Remote, inner_settled(sk, outer, mirrored));
+            let q2 = on_side(Side::Primary, status_synced(sk, outer, mirrored));
             assert forall |k: nat| p1(abs_at(tc, r, ex, k)) == p2(#[trigger] state_at(ex, k)) by {
-                lemma_widget_sim_inv(cluster, r, ex, k);
-                lemma_outer_stable_pull_back(cluster, r, state_at(ex, k), outer, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+                lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+                lemma_outer_stable_pull_back(sk, bnd, cluster, r, state_at(ex, k), outer, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
             }
             assert forall |k: nat| p1b(abs_at(tc, r, ex, k)) == p2b(#[trigger] state_at(ex, k)) by {
-                lemma_widget_sim_inv(cluster, r, ex, k);
-                lemma_inner_settled_pull_back(cluster, r, state_at(ex, k), outer, mirrored, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+                lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+                lemma_inner_settled_pull_back(sk, bnd, cluster, r, state_at(ex, k), outer, mirrored, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
             }
             assert forall |k: nat| q1(abs_at(tc, r, ex, k)) == q2(#[trigger] state_at(ex, k)) by {
-                lemma_widget_sim_inv(cluster, r, ex, k);
-                lemma_status_synced_pull_back(cluster, r, state_at(ex, k), outer, mirrored, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+                lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+                lemma_status_synced_pull_back(sk, bnd, cluster, r, state_at(ex, k), outer, mirrored, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
             }
-            lemma_pull_back_always_and_leads_to_always(tc, r, ex, p1, p1b, q1, p2, p2b, q2);
+            lemma_pull_back_always_and_leads_to_always(sk, bnd, tc, r, ex, p1, p1b, q1, p2, p2b, q2);
         }
     }
 }
 
-pub proof fn lemma_r3s_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_mirrors_stably_collected().satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-    ensures two_cluster_mirrors_stably_collected(widget_two_cluster(cluster)).satisfied_by(ex),
+pub proof fn lemma_r3s_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_mirrors_stably_collected(sk, bnd).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+    ensures two_cluster_mirrors_stably_collected(sk, bnd, widget_two_cluster(sk, bnd, cluster)).satisfied_by(ex),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: (ObjectRef, Uid)| #[trigger] always(lift_state(on_side(Side::Primary, parent_absent(i.0, i.1))))
-        .leads_to(always(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_collected(i.0, i.1))))).satisfied_by(ex) by {
+    assert forall |i: (ObjectRef, Uid)| #[trigger] always(lift_state(on_side(Side::Primary, bound_parent_absent(sk, bnd, i.0, i.1))))
+        .leads_to(always(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_collected(inner_kind(sk, bnd), i.0, i.1))))).satisfied_by(ex) by {
         let key = i.0;
         let parent_uid = i.1;
         let parent1 = (r.uid)(Side::Primary, parent_uid);
         let j = (key, parent1);
-        let f = |i: (ObjectRef, Uid)| widget_mirror_stably_collected_per_key(i.0, i.1);
+        let f = |i: (ObjectRef, Uid)| widget_mirror_stably_collected_per_key(sk, bnd, i.0, i.1);
         assert(tla_forall(f).satisfied_by(ex1));
         assert(f(j).satisfied_by(ex1));
-        let p1 = parent_absent(key, parent1);
-        let q1 = mirror_collected(key, parent1);
-        let p2 = on_side(Side::Primary, parent_absent(key, parent_uid));
-        let q2 = on_side(tc.side_of_kind(key.kind), mirror_collected(key, parent_uid));
+        let p1 = bound_parent_absent(sk, bnd, key, parent1);
+        let q1 = mirror_collected(inner_kind(sk, bnd), key, parent1);
+        let p2 = on_side(Side::Primary, bound_parent_absent(sk, bnd, key, parent_uid));
+        let q2 = on_side(tc.side_of_kind(key.kind), mirror_collected(inner_kind(sk, bnd), key, parent_uid));
         assert forall |k: nat| p1(abs_at(tc, r, ex, k)) == p2(#[trigger] state_at(ex, k)) by {
-            lemma_widget_sim_inv(cluster, r, ex, k);
-            lemma_parent_absent_pull_back(cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+            lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+            lemma_parent_absent_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
         }
         assert forall |k: nat| q1(abs_at(tc, r, ex, k)) == q2(#[trigger] state_at(ex, k)) by {
-            lemma_widget_sim_inv(cluster, r, ex, k);
-            lemma_mirror_collected_pull_back(cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+            lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+            lemma_mirror_collected_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
         }
-        lemma_pull_back_always_leads_to_always(tc, r, ex, p1, q1, p2, q2);
+        lemma_pull_back_always_leads_to_always(sk, bnd, tc, r, ex, p1, q1, p2, q2);
     }
 }
 
-pub proof fn lemma_r3_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_mirrors_eventually_collected().satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-    ensures two_cluster_mirrors_eventually_collected(widget_two_cluster(cluster)).satisfied_by(ex),
+pub proof fn lemma_r3_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_mirrors_eventually_collected(sk, bnd).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+    ensures two_cluster_mirrors_eventually_collected(sk, bnd, widget_two_cluster(sk, bnd, cluster)).satisfied_by(ex),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: (ObjectRef, Uid, Uid)| #[trigger] always(lift_state(on_side(Side::Primary, parent_absent(i.0, i.1)))).and(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_object_is(i.0, i.1, i.2))))
+    assert forall |i: (ObjectRef, Uid, Uid)| #[trigger] always(lift_state(on_side(Side::Primary, parent_absent(sk, i.0, i.1)))).and(lift_state(on_side(tc.side_of_kind(i.0.kind), mirror_object_is(inner_kind(sk, bnd), i.0, i.1, i.2))))
         .leads_to(lift_state(on_side(tc.side_of_kind(i.0.kind), object_is_gone(i.0, i.2)))).satisfied_by(ex) by {
         let key = i.0;
         let parent_uid = i.1;
@@ -1629,82 +1743,82 @@ pub proof fn lemma_r3_pull_back(cluster: Cluster, r: Relabeling, ex: Execution<T
         let parent1 = (r.uid)(Side::Primary, parent_uid);
         let uid1 = (r.uid)(side, uid);
         let j = (key, parent1, uid1);
-        let f = |i: (ObjectRef, Uid, Uid)| widget_mirror_eventually_collected_per_object(i.0, i.1, i.2);
+        let f = |i: (ObjectRef, Uid, Uid)| widget_mirror_eventually_collected_per_object(sk, bnd, i.0, i.1, i.2);
         assert(tla_forall(f).satisfied_by(ex1));
         assert(f(j).satisfied_by(ex1));
-        let p1 = parent_absent(key, parent1);
-        let p1b = mirror_object_is(key, parent1, uid1);
+        let p1 = parent_absent(sk, key, parent1);
+        let p1b = mirror_object_is(inner_kind(sk, bnd), key, parent1, uid1);
         let q1 = object_is_gone(key, uid1);
-        let p2 = on_side(Side::Primary, parent_absent(key, parent_uid));
-        let p2b = on_side(side, mirror_object_is(key, parent_uid, uid));
+        let p2 = on_side(Side::Primary, parent_absent(sk, key, parent_uid));
+        let p2b = on_side(side, mirror_object_is(inner_kind(sk, bnd), key, parent_uid, uid));
         let q2 = on_side(side, object_is_gone(key, uid));
         assert forall |k: nat| p1(abs_at(tc, r, ex, k)) == p2(#[trigger] state_at(ex, k)) by {
-            lemma_widget_sim_inv(cluster, r, ex, k);
-            lemma_parent_absent_pull_back(cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+            lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+            lemma_parent_absent_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, parent_uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
         }
         assert forall |k: nat| p1b(abs_at(tc, r, ex, k)) == p2b(#[trigger] state_at(ex, k)) by {
-            lemma_widget_sim_inv(cluster, r, ex, k);
-            lemma_mirror_object_is_pull_back(cluster, r, state_at(ex, k), key, parent_uid, uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+            lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+            lemma_mirror_object_is_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, parent_uid, uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
         }
         assert forall |k: nat| q1(abs_at(tc, r, ex, k)) == q2(#[trigger] state_at(ex, k)) by {
-            lemma_widget_sim_inv(cluster, r, ex, k);
-            lemma_object_is_gone_pull_back(cluster, r, state_at(ex, k), key, uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+            lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+            lemma_object_is_gone_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, uid, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
         }
-        lemma_pull_back_always_and_now_leads_to(tc, r, ex, p1, p1b, q1, p2, p2b, q2);
+        lemma_pull_back_always_and_now_leads_to(sk, bnd, tc, r, ex, p1, p1b, q1, p2, p2b, q2);
     }
 }
 
 // D3 for one mirror with uid w on the two-store execution gives D3 for the
 // relabeled uid on the abstract one.
-proof fn lemma_d3_instance(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, key: ObjectRef, w: Uid)
-    requires
-        widget_sim(cluster, r, ex),
-        two_cluster_inner_releases_terminating_objects(widget_two_cluster(cluster)).satisfied_by(ex),
+proof fn lemma_d3_instance(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, key: ObjectRef, w: Uid)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        two_cluster_inner_releases_terminating_objects(sk, bnd, widget_two_cluster(sk, bnd, cluster)).satisfied_by(ex),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
-        lift_state(inner_terminating_object(key, (r.uid)(side, w))).leads_to(lift_state(object_is_gone(key, (r.uid)(side, w)))).satisfied_by(alpha(tc, r, ex))
+        lift_state(inner_terminating_object(sk, bnd, key, (r.uid)(side, w))).leads_to(lift_state(object_is_gone(key, (r.uid)(side, w)))).satisfied_by(alpha(tc, r, ex))
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let side = tc.side_of_kind(key.kind);
     let uid1 = (r.uid)(side, w);
-    let p1 = inner_terminating_object(key, uid1);
+    let p1 = inner_terminating_object(sk, bnd, key, uid1);
     let q1 = object_is_gone(key, uid1);
-    let f = |i: (ObjectRef, Uid)| lift_state(on_side(tc.side_of_kind(i.0.kind), inner_terminating_object(i.0, i.1))).leads_to(lift_state(on_side(tc.side_of_kind(i.0.kind), object_is_gone(i.0, i.1))));
+    let f = |i: (ObjectRef, Uid)| lift_state(on_side(tc.side_of_kind(i.0.kind), inner_terminating_object(sk, bnd, i.0, i.1))).leads_to(lift_state(on_side(tc.side_of_kind(i.0.kind), object_is_gone(i.0, i.1))));
     let j = (key, w);
     assert(tla_forall(f).satisfied_by(ex));
     assert(f(j).satisfied_by(ex));
-    let p2 = on_side(side, inner_terminating_object(key, w));
+    let p2 = on_side(side, inner_terminating_object(sk, bnd, key, w));
     let q2 = on_side(side, object_is_gone(key, w));
     assert forall |k: nat| p1(abs_at(tc, r, ex, k)) == p2(#[trigger] state_at(ex, k)) by {
-        lemma_widget_sim_inv(cluster, r, ex, k);
-        lemma_inner_terminating_pull_back(cluster, r, state_at(ex, k), key, w, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+        lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+        lemma_inner_terminating_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, w, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
     }
     assert forall |k: nat| q1(abs_at(tc, r, ex, k)) == q2(#[trigger] state_at(ex, k)) by {
-        lemma_widget_sim_inv(cluster, r, ex, k);
-        lemma_object_is_gone_pull_back(cluster, r, state_at(ex, k), key, w, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
+        lemma_widget_sim_inv(sk, bnd, cluster, r, ex, k);
+        lemma_object_is_gone_pull_back(sk, bnd, cluster, r, state_at(ex, k), key, w, uid_sum(state_at(ex, k)), rv_sum(state_at(ex, k)));
     }
-    lemma_push_forward_leads_to(tc, r, ex, p1, q1, p2, q2);
+    lemma_push_forward_leads_to(sk, bnd, tc, r, ex, p1, q1, p2, q2);
 }
 
 // A terminating object of the abstraction has, behind it, an object of the
 // key's side whose uid relabels to the abstract one.
-proof fn lemma_terminating_has_source(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, key: ObjectRef, uid1: Uid, t: nat)
-    requires
-        widget_sim(cluster, r, ex),
-        inner_terminating_object(key, uid1)(abs_at(widget_two_cluster(cluster), r, ex, t)),
+proof fn lemma_terminating_has_source(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, key: ObjectRef, uid1: Uid, t: nat)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        inner_terminating_object(sk, bnd, key, uid1)(abs_at(widget_two_cluster(sk, bnd, cluster), r, ex, t)),
     ensures ({
-        let tc = widget_two_cluster(cluster);
+        let tc = widget_two_cluster(sk, bnd, cluster);
         let side = tc.side_of_kind(key.kind);
         exists |w: Uid| uid1 == #[trigger] (r.uid)(side, w)
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let side = tc.side_of_kind(key.kind);
-    lemma_widget_sim_inv(cluster, r, ex, t);
+    lemma_widget_sim_inv(sk, bnd, cluster, r, ex, t);
     let s = state_at(ex, t);
-    lemma_abs_object(cluster, r, s, key, uid_sum(s), rv_sum(s));
+    lemma_abs_object(sk, bnd, cluster, r, s, key, uid_sum(s), rv_sum(s));
     let q = s.project(side);
     assert(q.resources().contains_key(key));
     let w = q.resources()[key].metadata.uid->0;
@@ -1712,26 +1826,26 @@ proof fn lemma_terminating_has_source(cluster: Cluster, r: Relabeling, ex: Execu
 }
 
 // D3 on the two-store execution gives D3 on the abstract one.
-pub proof fn lemma_d3_transfer(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
-    requires
-        widget_sim(cluster, r, ex),
-        two_cluster_inner_releases_terminating_objects(widget_two_cluster(cluster)).satisfied_by(ex),
-    ensures inner_releases_terminating_objects().satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
+pub proof fn lemma_d3_transfer(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        two_cluster_inner_releases_terminating_objects(sk, bnd, widget_two_cluster(sk, bnd, cluster)).satisfied_by(ex),
+    ensures inner_releases_terminating_objects(sk, bnd).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: (ObjectRef, Uid)| #[trigger] lift_state(inner_terminating_object(i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))).satisfied_by(ex1) by {
+    assert forall |i: (ObjectRef, Uid)| #[trigger] lift_state(inner_terminating_object(sk, bnd, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))).satisfied_by(ex1) by {
         let key = i.0;
         let uid1 = i.1;
         let side = tc.side_of_kind(key.kind);
-        let p1 = inner_terminating_object(key, uid1);
+        let p1 = inner_terminating_object(sk, bnd, key, uid1);
         let q1 = object_is_gone(key, uid1);
         assert forall |t: nat| #[trigger] lift_state(p1).implies(eventually(lift_state(q1))).satisfied_by(ex1.suffix(t)) by {
             if lift_state(p1).satisfied_by(ex1.suffix(t)) {
                 assert(ex1.suffix(t).head() == abs_at(tc, r, ex, t));
-                lemma_terminating_has_source(cluster, r, ex, key, uid1, t);
+                lemma_terminating_has_source(sk, bnd, cluster, r, ex, key, uid1, t);
                 let w = choose |w: Uid| uid1 == #[trigger] (r.uid)(side, w);
-                lemma_d3_instance(cluster, r, ex, key, w);
+                lemma_d3_instance(sk, bnd, cluster, r, ex, key, w);
                 assert(lift_state(p1).leads_to(lift_state(q1)).satisfied_by(ex1));
                 assert(lift_state(p1).implies(eventually(lift_state(q1))).satisfied_by(ex1.suffix(t)));
             }
@@ -1743,98 +1857,125 @@ pub proof fn lemma_d3_transfer(cluster: Cluster, r: Relabeling, ex: Execution<Tw
 // The one-store results for the pair, and the theorem.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_one_cluster_spec(cluster: Cluster, sync_id: int, janitor_id: int) -> TempPred<ClusterState> {
+pub open spec fn widget_one_cluster_spec(sk: SyncKind, bnd: Binding, cluster: Cluster, sync_id: int, janitor_id: int) -> TempPred<ClusterState> {
     lift_state(cluster.init())
     .and(sync_next_with_wf(cluster, sync_id))
     .and(janitor_next_with_wf(cluster, janitor_id))
-    .and(inner_releases_terminating_objects())
+    .and(inner_releases_terminating_objects(sk, bnd))
+}
+
+// The sync reconciler's rely, assembled from the facts widget_cluster_with_others
+// gives: the janitor of `bnd` satisfies its own guarantee, and every other
+// registered controller satisfies widget_sync_rely. It is the same statement
+// widget_sync_reconciler::sync_rely_facts_imply_lifted_condition assembles from a
+// map of janitor ids, proved here without one so that the theorem does not have
+// to name an id for every binding of `sk.bindings`: the janitors of the other
+// bindings are other controllers of this cluster, and their sync rely is what
+// is used of them.
+pub proof fn lemma_sync_rely_with_janitor_holds(sk: SyncKind, bnd: Binding, spec: TempPred<ClusterState>, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires
+        spec.entails(always(lift_state(widget_janitor_guarantee(sk, bnd, janitor_id)))),
+        forall |other_id: int| cluster.controller_models.contains_key(other_id) && other_id != sync_id && other_id != janitor_id
+            ==> spec.entails(always(lift_state(#[trigger] widget_sync_rely(sk, other_id)))),
+    ensures spec.entails(always(lift_state(sync_rely_with_janitor(sk, bnd, cluster, sync_id, janitor_id)))),
+{
+    assert forall |ex: Execution<ClusterState>, n: nat, other_id: int| #![auto]
+        spec.satisfied_by(ex)
+        && cluster.controller_models.remove(sync_id).contains_key(other_id)
+        implies (if other_id == janitor_id { widget_janitor_guarantee(sk, bnd, janitor_id)(ex.suffix(n).head()) } else { widget_sync_rely(sk, other_id)(ex.suffix(n).head()) }) by {
+        if other_id == janitor_id {
+            assert(spec.implies(always(lift_state(widget_janitor_guarantee(sk, bnd, janitor_id)))).satisfied_by(ex));
+            assert(lift_state(widget_janitor_guarantee(sk, bnd, janitor_id)).satisfied_by(ex.suffix(n)));
+        } else {
+            assert(cluster.controller_models.contains_key(other_id));
+            assert(spec.implies(always(lift_state(widget_sync_rely(sk, other_id)))).satisfied_by(ex));
+            assert(lift_state(widget_sync_rely(sk, other_id)).satisfied_by(ex.suffix(n)));
+        }
+    }
 }
 
 // R1, R2, R3s and the janitor's ESR, for a cluster running the pair beside
 // controllers the pair's relies hold of. The relies on the pair's members are
 // their guarantees; the relies on everyone else are the invariants
 // widget_relies_hold_of provides, stated under this very spec.
-pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
+pub proof fn lemma_one_cluster_esr(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_kinds_ok(sk, bnd), widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
     ensures ({
-        let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
-        &&& spec.entails(widget_spec_eventually_synced())
-        &&& spec.entails(widget_status_eventually_mirrored())
-        &&& spec.entails(widget_mirrors_stably_collected())
-        &&& spec.entails(widget_janitor_esr(janitor_id))
+        let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
+        &&& spec.entails(widget_spec_eventually_synced(sk, bnd))
+        &&& spec.entails(widget_status_eventually_mirrored(sk, bnd))
+        &&& spec.entails(widget_mirrors_stably_collected(sk, bnd))
+        &&& spec.entails(widget_janitor_esr(sk, bnd, janitor_id))
     }),
 {
-    let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
     assert(spec.entails(lift_state(cluster.init())));
     assert(spec.entails(sync_next_with_wf(cluster, sync_id)));
     assert(spec.entails(janitor_next_with_wf(cluster, janitor_id)));
-    assert(spec.entails(inner_releases_terminating_objects()));
+    assert(spec.entails(inner_releases_terminating_objects(sk, bnd)));
     assert(sync_next_with_wf(cluster, sync_id).entails(always(lift_action(cluster.next()))));
     entails_trans(spec, sync_next_with_wf(cluster, sync_id), always(lift_action(cluster.next())));
     entails_and(spec, lift_state(cluster.init()), always(lift_action(cluster.next())));
-    lemma_always_widget_sync_guarantee(spec, cluster, sync_id);
-    lemma_always_widget_janitor_guarantee(spec, cluster, janitor_id);
+    lemma_always_widget_sync_guarantee(spec, cluster, sk, spec_ok, sync_id);
+    lemma_always_widget_janitor_guarantee(spec, cluster, sk, bnd, spec_ok, janitor_id);
     // The janitor's rely: the sync reconciler's guarantee, and the invariants of the others.
     assert forall |other_id: int| cluster.controller_models.remove(janitor_id).contains_key(other_id)
-        implies spec.entails(always(lift_state(#[trigger] widget_janitor_rely(other_id)))) by {
+        implies spec.entails(always(lift_state(#[trigger] widget_janitor_rely(sk, other_id)))) by {
         if other_id == sync_id {
-            sync_guarantee_implies_janitor_rely(sync_id);
-            always_weaken(spec, lift_state(widget_sync_guarantee(sync_id)), lift_state(widget_janitor_rely(sync_id)));
+            sync_guarantee_implies_janitor_rely(sk, sync_id);
+            always_weaken(spec, lift_state(widget_sync_guarantee(sk, sync_id)), lift_state(widget_janitor_rely(sk, sync_id)));
         } else {
             assert(cluster.controller_models.contains_key(other_id));
-            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, other_id));
+            assert(widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, other_id));
         }
     }
-    janitor_rely_facts_imply_lifted_condition(spec, cluster, janitor_id);
-    janitor_satisfies_its_spec(spec, cluster, janitor_id);
-    // The sync reconciler's rely: the janitor's guarantee, and the invariants of the others.
-    assert forall |other_id: int| cluster.controller_models.remove(sync_id).contains_key(other_id)
-        implies spec.entails(#[trigger] widget_sync_partial_rely(janitor_id)(other_id)) by {
-        if other_id == janitor_id {
-        } else {
-            assert(cluster.controller_models.contains_key(other_id));
-            assert(widget_other_controller_ok(cluster, sync_id, janitor_id, other_id));
-            assert(widget_sync_partial_rely(janitor_id)(other_id) == always(lift_state(widget_sync_rely(other_id))));
-        }
+    janitor_rely_facts_imply_lifted_condition(sk, spec, cluster, janitor_id);
+    janitor_satisfies_its_spec(sk, bnd, spec_ok, spec, cluster, janitor_id);
+    // The sync reconciler's rely: the janitor of `bnd` satisfies its guarantee,
+    // and everyone else -- the janitors of the other bindings included, which
+    // enter as other controllers -- satisfies widget_sync_rely.
+    assert forall |other_id: int| cluster.controller_models.contains_key(other_id) && other_id != sync_id && other_id != janitor_id
+        implies spec.entails(always(lift_state(#[trigger] widget_sync_rely(sk, other_id)))) by {
+        assert(widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, other_id));
     }
-    sync_rely_facts_imply_lifted_condition(spec, cluster, sync_id, janitor_id);
-    sync_eventually_synced(spec, cluster, sync_id, janitor_id);
-    sync_eventually_mirrors_status(spec, cluster, sync_id, janitor_id);
-    sync_mirrors_stably_collected(spec, cluster, sync_id, janitor_id);
+    lemma_sync_rely_with_janitor_holds(sk, bnd, spec, cluster, sync_id, janitor_id);
+    sync_eventually_synced(sk, bnd, spec_ok, spec, cluster, sync_id, janitor_id);
+    sync_eventually_mirrors_status(sk, bnd, spec_ok, spec, cluster, sync_id, janitor_id);
+    sync_mirrors_stably_collected(sk, bnd, spec_ok, spec, cluster, sync_id, janitor_id);
 }
 
 // R1, R2, R3s and R3 hold of every execution of the two-store model that runs
 // the pair, whatever else runs beside it under widget_cluster_with_others. The
 // fairness assumed is the pair's alone.
-pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
+pub proof fn widget_two_cluster_theorem(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_kinds_ok(sk, bnd), widget_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id),
     ensures ({
-        let tc = widget_two_cluster(cluster);
-        widget_two_cluster_spec(cluster, sync_id, janitor_id).entails(
-            two_cluster_spec_eventually_synced()
-            .and(two_cluster_status_eventually_mirrored())
-            .and(two_cluster_mirrors_stably_collected(tc))
-            .and(two_cluster_mirrors_eventually_collected(tc))
-            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, janitor_id))))
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        widget_two_cluster_spec(sk, bnd, cluster, sync_id, janitor_id).entails(
+            two_cluster_spec_eventually_synced(sk, bnd)
+            .and(two_cluster_status_eventually_mirrored(sk, bnd))
+            .and(two_cluster_mirrors_stably_collected(sk, bnd, tc))
+            .and(two_cluster_mirrors_eventually_collected(sk, bnd, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, tc, janitor_id))))
         )
     }),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let hook = widget_hook();
-    let spec2 = widget_two_cluster_spec(cluster, sync_id, janitor_id);
-    let spec1 = widget_one_cluster_spec(cluster, sync_id, janitor_id);
-    lemma_widget_refinement_hyps(cluster, sync_id, janitor_id);
-    lemma_one_cluster_esr(cluster, sync_id, janitor_id);
+    let spec2 = widget_two_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
+    let spec1 = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
+    lemma_widget_refinement_hyps(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
+    lemma_one_cluster_esr(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
     assert forall |ex: Execution<TwoClusterState>| #[trigger] spec2.satisfied_by(ex) implies
-        two_cluster_spec_eventually_synced()
-        .and(two_cluster_status_eventually_mirrored())
-        .and(two_cluster_mirrors_stably_collected(tc))
-        .and(two_cluster_mirrors_eventually_collected(tc))
-        .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, janitor_id)))).satisfied_by(ex) by {
+        two_cluster_spec_eventually_synced(sk, bnd)
+        .and(two_cluster_status_eventually_mirrored(sk, bnd))
+        .and(two_cluster_mirrors_stably_collected(sk, bnd, tc))
+        .and(two_cluster_mirrors_eventually_collected(sk, bnd, tc))
+        .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, tc, janitor_id)))).satisfied_by(ex) by {
         assert(lift_state(tc.init()).satisfied_by(ex));
         assert(two_cluster_next_with_wf(tc, sync_id).satisfied_by(ex));
         assert(two_cluster_next_with_wf(tc, janitor_id).satisfied_by(ex));
-        assert(two_cluster_inner_releases_terminating_objects(tc).satisfied_by(ex));
+        assert(two_cluster_inner_releases_terminating_objects(sk, bnd, tc).satisfied_by(ex));
         assert(always(lift_action(tc.next())).satisfied_by(ex));
         assert forall |i: nat| tc.next()(#[trigger] state_at(ex, i), state_at(ex, i + 1)) by {
             assert(lift_action(tc.next()).satisfied_by(ex.suffix(i)));
@@ -1844,31 +1985,31 @@ pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_
         lemma_simulation(tc, hook, ex);
         let r = relabeling_of(ex, hook);
         let ex1 = alpha(tc, r, ex);
-        assert(widget_sim(cluster, r, ex));
+        assert(widget_sim(sk, bnd, cluster, r, ex));
         lemma_fair_sim(tc, r, ex);
-        lemma_next_with_wf_transfer(cluster, r, ex, sync_id);
-        lemma_next_with_wf_transfer(cluster, r, ex, janitor_id);
-        lemma_d3_transfer(cluster, r, ex);
+        lemma_next_with_wf_transfer(sk, bnd, cluster, r, ex, sync_id);
+        lemma_next_with_wf_transfer(sk, bnd, cluster, r, ex, janitor_id);
+        lemma_d3_transfer(sk, bnd, cluster, r, ex);
         assert(spec1.satisfied_by(ex1));
-        assert(widget_spec_eventually_synced().satisfied_by(ex1)) by {
-            assert(spec1.implies(widget_spec_eventually_synced()).satisfied_by(ex1));
+        assert(widget_spec_eventually_synced(sk, bnd).satisfied_by(ex1)) by {
+            assert(spec1.implies(widget_spec_eventually_synced(sk, bnd)).satisfied_by(ex1));
         }
-        assert(widget_status_eventually_mirrored().satisfied_by(ex1)) by {
-            assert(spec1.implies(widget_status_eventually_mirrored()).satisfied_by(ex1));
+        assert(widget_status_eventually_mirrored(sk, bnd).satisfied_by(ex1)) by {
+            assert(spec1.implies(widget_status_eventually_mirrored(sk, bnd)).satisfied_by(ex1));
         }
-        assert(widget_mirrors_stably_collected().satisfied_by(ex1)) by {
-            assert(spec1.implies(widget_mirrors_stably_collected()).satisfied_by(ex1));
+        assert(widget_mirrors_stably_collected(sk, bnd).satisfied_by(ex1)) by {
+            assert(spec1.implies(widget_mirrors_stably_collected(sk, bnd)).satisfied_by(ex1));
         }
-        assert(widget_janitor_esr(janitor_id).satisfied_by(ex1)) by {
-            assert(spec1.implies(widget_janitor_esr(janitor_id)).satisfied_by(ex1));
+        assert(widget_janitor_esr(sk, bnd, janitor_id).satisfied_by(ex1)) by {
+            assert(spec1.implies(widget_janitor_esr(sk, bnd, janitor_id)).satisfied_by(ex1));
         }
-        assert(widget_mirrors_eventually_collected().satisfied_by(ex1));
-        lemma_r1_pull_back(cluster, r, ex);
-        lemma_r2_pull_back(cluster, r, ex);
-        lemma_r3s_pull_back(cluster, r, ex);
-        lemma_r3_pull_back(cluster, r, ex);
-        assert(always(lift_state(janitor_deletes_are_sound(janitor_id))).satisfied_by(ex1));
-        lemma_janitor_sound_transfer(cluster, r, ex, janitor_id);
+        assert(widget_mirrors_eventually_collected(sk, bnd).satisfied_by(ex1));
+        lemma_r1_pull_back(sk, bnd, cluster, r, ex);
+        lemma_r2_pull_back(sk, bnd, cluster, r, ex);
+        lemma_r3s_pull_back(sk, bnd, cluster, r, ex);
+        lemma_r3_pull_back(sk, bnd, cluster, r, ex);
+        assert(always(lift_state(janitor_deletes_are_sound(sk, bnd, janitor_id))).satisfied_by(ex1));
+        lemma_janitor_sound_transfer(sk, bnd, spec_ok, cluster, r, ex, janitor_id);
     }
 }
 
@@ -1888,9 +2029,9 @@ pub open spec fn store_uids_issued(st: APIServerState) -> bool {
 }
 
 // A janitor Delete names, by uid precondition, a mirror the remote store has issued.
-pub open spec fn janitor_delete_uid_issued(msg: Message, s: TwoClusterState) -> bool {
+pub open spec fn janitor_delete_uid_issued(sk: SyncKind, bnd: Binding, msg: Message, s: TwoClusterState) -> bool {
     let req = msg.content.get_delete_request();
-    &&& req.key.kind == InnerWidgetView::kind()
+    &&& req.key.kind == inner_kind(sk, bnd)
     &&& req.preconditions is Some
     &&& req.preconditions->0.uid is Some
     &&& req.preconditions->0.uid->0 < s.remote.uid_counter
@@ -1899,7 +2040,7 @@ pub open spec fn janitor_delete_uid_issued(msg: Message, s: TwoClusterState) -> 
 // Both stores hold issued uids, and every object the janitor is scheduled for
 // or reconciling, and every Delete it has in flight, carries a uid the remote
 // store, where its kind lives, has issued.
-pub open spec fn janitor_uids_issued(janitor_id: int) -> StatePred<TwoClusterState> {
+pub open spec fn janitor_uids_issued(sk: SyncKind, bnd: Binding, janitor_id: int) -> StatePred<TwoClusterState> {
     |s: TwoClusterState| {
         let c = s.controller_and_externals[janitor_id].controller;
         &&& store_uids_issued(s.primary)
@@ -1915,11 +2056,12 @@ pub open spec fn janitor_uids_issued(janitor_id: int) -> StatePred<TwoClusterSta
             &&& msg.src.is_controller_id(janitor_id)
             &&& msg.content is APIRequest
             &&& msg.content.is_delete_request()
-        } ==> janitor_delete_uid_issued(msg, s)
+        } ==> janitor_delete_uid_issued(sk, bnd, msg, s)
     }
 }
 
-proof fn lemma_projection_roundtrip(s: TwoClusterState, side: Side, c: ClusterState)
+proof fn lemma_projection_roundtrip(sk: SyncKind, bnd: Binding, s: TwoClusterState, side: Side, c: ClusterState)
+    requires widget_kinds_ok(sk, bnd),
     ensures
         s.with_projection(side, c).project(side) == c,
         s.with_projection(side, c).store(side.other()) == s.store(side.other()),
@@ -1942,8 +2084,8 @@ pub open spec fn step_side(side: Side, step: Step) -> Side {
 
 // Every step of the two-store model is a step of the one-store model on the
 // projection it is taken on, and leaves the other store alone.
-proof fn lemma_step_projects(tc: TwoCluster, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
-    requires tc.next_step(s, s_prime, side, step),
+proof fn lemma_step_projects(sk: SyncKind, bnd: Binding, tc: TwoCluster, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
+    requires widget_kinds_ok(sk, bnd), tc.next_step(s, s_prime, side, step),
     ensures
         tc.cluster.next_step(s.project(step_side(side, step)), s_prime.project(step_side(side, step)), step),
         s_prime.store(step_side(side, step).other()) == s.store(step_side(side, step).other()),
@@ -1955,70 +2097,70 @@ proof fn lemma_step_projects(tc: TwoCluster, s: TwoClusterState, s_prime: TwoClu
         Step::APIServerStep(input) => {
             let c = (cluster.api_server_next().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::BuiltinControllersStep(input) => {
             let c = (cluster.builtin_controllers_next().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::ControllerStep(input) => {
             let c = (cluster.controller_next().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::ScheduleControllerReconcileStep(input) => {
             let c = (cluster.schedule_controller_reconcile().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::RestartControllerStep(input) => {
             let c = (cluster.restart_controller().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::DisableCrashStep(input) => {
             let c = (cluster.disable_crash().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::DropReqStep(input) => {
             let c = (cluster.drop_req().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::DisableReqDropStep => {
             let c = (cluster.disable_req_drop().transition)((), p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::PodMonkeyStep(input) => {
             let c = (cluster.pod_monkey_next().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::DisablePodMonkeyStep => {
             let c = (cluster.disable_pod_monkey().transition)((), p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::ExternalStep(input) => {
             let c = (cluster.external_next().transition)(input, p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
         Step::StutterStep => {
             let c = (cluster.stutter().transition)((), p).0;
             assert(s_prime == s.with_projection(x, c));
-            lemma_projection_roundtrip(s, x, c);
+            lemma_projection_roundtrip(sk, bnd, s, x, c);
         },
     }
 }
 
 // One request handled by a store keeps its uids issued, never lowers its uid
 // counter, and is answered by a response.
-proof fn lemma_etcd_step_keeps_uids(it: InstalledTypes, msg: Message, st: APIServerState)
-    requires
+proof fn lemma_etcd_step_keeps_uids(sk: SyncKind, bnd: Binding, it: InstalledTypes, msg: Message, st: APIServerState)
+    requires widget_kinds_ok(sk, bnd),
         msg.content is APIRequest,
         store_uids_issued(st),
     ensures
@@ -2041,11 +2183,11 @@ proof fn lemma_etcd_step_keeps_uids(it: InstalledTypes, msg: Message, st: APISer
     }
 }
 
-proof fn lemma_janitor_uids_issued_init(tc: TwoCluster, janitor_id: int, s: TwoClusterState)
-    requires
+proof fn lemma_janitor_uids_issued_init(sk: SyncKind, bnd: Binding, tc: TwoCluster, janitor_id: int, s: TwoClusterState)
+    requires widget_kinds_ok(sk, bnd),
         tc.cluster.controller_models.contains_key(janitor_id),
         tc.init()(s),
-    ensures janitor_uids_issued(janitor_id)(s),
+    ensures janitor_uids_issued(sk, bnd, janitor_id)(s),
 {
     broadcast use group_multiset_axioms;
     let p = s.project(Side::Primary);
@@ -2061,15 +2203,15 @@ proof fn lemma_janitor_uids_issued_init(tc: TwoCluster, janitor_id: int, s: TwoC
 
 // The API server of `side` handles a request: that store keeps its uids issued
 // and its counter does not go down; the answer is a response.
-proof fn lemma_janitor_uids_issued_api_server_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: Option<Message>)
-    requires
-        janitor_uids_issued(janitor_id)(s),
-        widget_two_cluster(cluster).api_server_next(side).forward(input)(s, s_prime),
-    ensures janitor_uids_issued(janitor_id)(s_prime),
+proof fn lemma_janitor_uids_issued_api_server_step(sk: SyncKind, bnd: Binding, cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: Option<Message>)
+    requires widget_kinds_ok(sk, bnd),
+        janitor_uids_issued(sk, bnd, janitor_id)(s),
+        widget_two_cluster(sk, bnd, cluster).api_server_next(side).forward(input)(s, s_prime),
+    ensures janitor_uids_issued(sk, bnd, janitor_id)(s_prime),
 {
     broadcast use group_multiset_axioms;
-    let tc = widget_two_cluster(cluster);
-    lemma_step_projects(tc, s, s_prime, side, Step::APIServerStep(input));
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_step_projects(sk, bnd, tc, s, s_prime, side, Step::APIServerStep(input));
     let p = s.project(side);
     let p_prime = s_prime.project(side);
     let msg = input->0;
@@ -2079,7 +2221,7 @@ proof fn lemma_janitor_uids_issued_api_server_step(cluster: Cluster, janitor_id:
     assert(p_prime.api_server == st1);
     assert(p_prime.network.in_flight == p.network.in_flight.remove(msg).insert(resp));
     assert(p_prime.controller_and_externals == p.controller_and_externals);
-    lemma_etcd_step_keeps_uids(it, msg, p.api_server);
+    lemma_etcd_step_keeps_uids(sk, bnd, it, msg, p.api_server);
     match side {
         Side::Primary => {
             assert(s_prime.primary == st1);
@@ -2096,7 +2238,7 @@ proof fn lemma_janitor_uids_issued_api_server_step(cluster: Cluster, janitor_id:
         &&& m.src.is_controller_id(janitor_id)
         &&& m.content is APIRequest
         &&& m.content.is_delete_request()
-    } implies janitor_delete_uid_issued(m, s_prime) by {
+    } implies janitor_delete_uid_issued(sk, bnd, m, s_prime) by {
         assert(m != resp);
         assert(s.in_flight().contains(m));
     }
@@ -2104,12 +2246,12 @@ proof fn lemma_janitor_uids_issued_api_server_step(cluster: Cluster, janitor_id:
 
 // A Delete the janitor sends while reconciling `key` names the uid of its
 // triggering object, which the remote store has issued.
-proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: TwoClusterState, key: ObjectRef, msg_o: Option<Message>, m: Message)
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
-        inv(widget_two_cluster(cluster), s),
-        janitor_uids_issued(janitor_id)(s),
+proof fn lemma_janitor_sends_issued_uid(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, janitor_id: int, s: TwoClusterState, key: ObjectRef, msg_o: Option<Message>, m: Message)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd)),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        janitor_uids_issued(sk, bnd, janitor_id)(s),
         ({
             let act = continue_reconcile(cluster.controller_models[janitor_id].reconcile_model, janitor_id);
             let c = s.controller_and_externals[janitor_id].controller;
@@ -2119,10 +2261,10 @@ proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: Tw
         }),
         m.content is APIRequest,
         m.content.is_delete_request(),
-    ensures janitor_delete_uid_issued(m, s),
+    ensures janitor_delete_uid_issued(sk, bnd, m, s),
 {
     broadcast use group_multiset_axioms;
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let model = cluster.controller_models[janitor_id].reconcile_model;
     let act = continue_reconcile(model, janitor_id);
     let c = s.controller_and_externals[janitor_id].controller;
@@ -2130,12 +2272,12 @@ proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: Tw
     let rs = c.ongoing_reconciles[key];
     assert(c.ongoing_reconciles.contains_key(key));
     assert(key.kind == model.kind);
-    assert(model.kind == InnerWidgetView::kind());
+    assert(model.kind == inner_kind(sk, bnd));
     assert(tc.cluster.controller_models.contains_key(janitor_id));
     assert(controller_crs_ok(tc, c));
     assert(rs.triggering_cr.kind == key.kind && stored_object_ok(tc, rs.triggering_cr));
-    lemma_inner_unmarshals(cluster, rs.triggering_cr);
-    let inner = InnerWidgetView::unmarshal(rs.triggering_cr)->Ok_0;
+    lemma_inner_unmarshals(sk, bnd, spec_ok, cluster, rs.triggering_cr);
+    let inner = unmarshal(inner_kind(sk, bnd), rs.triggering_cr)->Ok_0;
     assert(inner.metadata == rs.triggering_cr.metadata);
     let resp_c = if msg_o is Some {
         if msg_o->0.content is APIResponse {
@@ -2160,7 +2302,7 @@ proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: Tw
         }),
     };
     let state = janitor_reconciler::WidgetJanitorReconcileState::unmarshal(rs.local_state)->Ok_0;
-    let (state_prime, req_um) = janitor_reconciler::reconcile_core(inner, resp_um, state);
+    let (state_prime, req_um) = janitor_reconciler::reconcile_core(sk, bnd, inner, resp_um, state);
     assert(req_um is Some && req_um->0 is KRequest && req_um->0->KRequest_0 == req);
     match state.reconcile_step {
         WidgetJanitorStepView::AfterListOuter => {
@@ -2175,18 +2317,18 @@ proof fn lemma_janitor_sends_issued_uid(cluster: Cluster, janitor_id: int, s: Tw
 
 // One controller step: the janitor's own state keeps issued uids, and the one
 // request it may send, if a Delete, names one.
-proof fn lemma_janitor_uids_issued_controller_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, input: (int, Option<Message>, Option<ObjectRef>))
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
-        inv(widget_two_cluster(cluster), s),
-        janitor_uids_issued(janitor_id)(s),
-        widget_two_cluster(cluster).controller_next().forward(input)(s, s_prime),
-    ensures janitor_uids_issued(janitor_id)(s_prime),
+proof fn lemma_janitor_uids_issued_controller_step(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, input: (int, Option<Message>, Option<ObjectRef>))
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd)),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        janitor_uids_issued(sk, bnd, janitor_id)(s),
+        widget_two_cluster(sk, bnd, cluster).controller_next().forward(input)(s, s_prime),
+    ensures janitor_uids_issued(sk, bnd, janitor_id)(s_prime),
 {
     broadcast use group_multiset_axioms;
-    let tc = widget_two_cluster(cluster);
-    lemma_step_projects(tc, s, s_prime, Side::Primary, Step::ControllerStep(input));
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_step_projects(sk, bnd, tc, s, s_prime, Side::Primary, Step::ControllerStep(input));
     let p = s.project(Side::Primary);
     let p_prime = s_prime.project(Side::Primary);
     let (id, msg_o, key_o) = input;
@@ -2253,44 +2395,44 @@ proof fn lemma_janitor_uids_issued_controller_step(cluster: Cluster, janitor_id:
         &&& m.src.is_controller_id(janitor_id)
         &&& m.content is APIRequest
         &&& m.content.is_delete_request()
-    } implies janitor_delete_uid_issued(m, s_prime) by {
+    } implies janitor_delete_uid_issued(sk, bnd, m, s_prime) by {
         if s.in_flight().contains(m) {
-            assert(janitor_delete_uid_issued(m, s));
+            assert(janitor_delete_uid_issued(sk, bnd, m, s));
         } else {
             assert(sent.contains(m));
             assert(id == janitor_id);
             assert(st is ContinueReconcile);
             assert((sm.step_to_action)(st) == continue_reconcile(model, janitor_id));
-            lemma_janitor_sends_issued_uid(cluster, janitor_id, s, key, msg_o, m);
+            lemma_janitor_sends_issued_uid(sk, bnd, spec_ok, cluster, janitor_id, s, key, msg_o, m);
         }
     }
 }
 
 // janitor_uids_issued is kept by every step of the two-store model.
-proof fn lemma_janitor_uids_issued_step(cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
-        models_ok(widget_two_cluster(cluster)),
-        inv(widget_two_cluster(cluster), s),
-        janitor_uids_issued(janitor_id)(s),
-        widget_two_cluster(cluster).next_step(s, s_prime, side, step),
-    ensures janitor_uids_issued(janitor_id)(s_prime),
+proof fn lemma_janitor_uids_issued_step(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, janitor_id: int, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd)),
+        models_ok(widget_two_cluster(sk, bnd, cluster)),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        janitor_uids_issued(sk, bnd, janitor_id)(s),
+        widget_two_cluster(sk, bnd, cluster).next_step(s, s_prime, side, step),
+    ensures janitor_uids_issued(sk, bnd, janitor_id)(s_prime),
 {
     broadcast use group_multiset_axioms;
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
     let x = step_side(side, step);
-    lemma_step_projects(tc, s, s_prime, side, step);
+    lemma_step_projects(sk, bnd, tc, s, s_prime, side, step);
     let p = s.project(x);
     let p_prime = s_prime.project(x);
     let c = s.controller_and_externals[janitor_id].controller;
     match step {
         Step::APIServerStep(input) => {
-            lemma_janitor_uids_issued_api_server_step(cluster, janitor_id, s, s_prime, side, input);
+            lemma_janitor_uids_issued_api_server_step(sk, bnd, cluster, janitor_id, s, s_prime, side, input);
         },
         Step::ControllerStep(input) => {
-            lemma_janitor_uids_issued_controller_step(cluster, janitor_id, s, s_prime, input);
+            lemma_janitor_uids_issued_controller_step(sk, bnd, spec_ok, cluster, janitor_id, s, s_prime, input);
         },
         Step::ScheduleControllerReconcileStep(input) => {
             let (id, key) = input;
@@ -2299,7 +2441,7 @@ proof fn lemma_janitor_uids_issued_step(cluster: Cluster, janitor_id: int, s: Tw
             assert(s_prime.primary == s.primary);
             assert(s_prime.remote == s.remote);
             if id == janitor_id {
-                assert(key.kind == InnerWidgetView::kind());
+                assert(key.kind == inner_kind(sk, bnd));
                 assert(x == Side::Remote);
                 let c_prime = s_prime.controller_and_externals[janitor_id].controller;
                 assert(c_prime.scheduled_reconciles == c.scheduled_reconciles.insert(key, s.remote.resources[key]));
@@ -2336,7 +2478,7 @@ proof fn lemma_janitor_uids_issued_step(cluster: Cluster, janitor_id: int, s: Tw
                 &&& m.src.is_controller_id(janitor_id)
                 &&& m.content is APIRequest
                 &&& m.content.is_delete_request()
-            } implies janitor_delete_uid_issued(m, s_prime) by {
+            } implies janitor_delete_uid_issued(sk, bnd, m, s_prime) by {
                 assert(s.in_flight().contains(m));
             }
         },
@@ -2344,27 +2486,27 @@ proof fn lemma_janitor_uids_issued_step(cluster: Cluster, janitor_id: int, s: Tw
 }
 
 // janitor_uids_issued holds along every simulated execution from an initial state.
-proof fn lemma_janitor_uids_issued_at(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, janitor_id: int, i: nat)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_two_cluster(cluster).init()(state_at(ex, 0)),
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model()),
-    ensures janitor_uids_issued(janitor_id)(state_at(ex, i)),
+proof fn lemma_janitor_uids_issued_at(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, janitor_id: int, i: nat)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_two_cluster(sk, bnd, cluster).init()(state_at(ex, 0)),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model(sk, bnd)),
+    ensures janitor_uids_issued(sk, bnd, janitor_id)(state_at(ex, i)),
     decreases i,
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     if i == 0 {
-        lemma_janitor_uids_issued_init(tc, janitor_id, state_at(ex, 0));
+        lemma_janitor_uids_issued_init(sk, bnd, tc, janitor_id, state_at(ex, 0));
     } else {
         let j = (i - 1) as nat;
-        lemma_janitor_uids_issued_at(cluster, r, ex, janitor_id, j);
-        lemma_widget_sim_inv(cluster, r, ex, j);
+        lemma_janitor_uids_issued_at(sk, bnd, spec_ok, cluster, r, ex, janitor_id, j);
+        lemma_widget_sim_inv(sk, bnd, cluster, r, ex, j);
         let s = state_at(ex, j);
         let s_prime = state_at(ex, j + 1);
         assert(tc.next()(s, s_prime));
         let (side, step) = choose |side: Side, step: Step| tc.next_step(s, s_prime, side, step);
-        lemma_janitor_uids_issued_step(cluster, janitor_id, s, s_prime, side, step);
+        lemma_janitor_uids_issued_step(sk, bnd, spec_ok, cluster, janitor_id, s, s_prime, side, step);
         assert(j + 1 == i);
     }
 }
@@ -2383,7 +2525,7 @@ proof fn lemma_janitor_uids_issued_at(cluster: Cluster, r: Relabeling, ex: Execu
 // names the parent, is not stated: a primary uid the primary counter never
 // reaches relabels to a negative value, which no one-store fact rules out of an
 // annotation.
-pub open spec fn two_cluster_janitor_delete_is_sound(tc: TwoCluster, msg: Message, s: TwoClusterState) -> bool {
+pub open spec fn two_cluster_janitor_delete_is_sound(sk: SyncKind, bnd: Binding, tc: TwoCluster, msg: Message, s: TwoClusterState) -> bool {
     let req = msg.content.get_delete_request();
     let side = tc.side_of_kind(req.key.kind);
     let store = s.store(side).resources;
@@ -2391,182 +2533,231 @@ pub open spec fn two_cluster_janitor_delete_is_sound(tc: TwoCluster, msg: Messag
     &&& req.preconditions is Some
     &&& req.preconditions->0.uid is Some
     &&& req.preconditions->0.uid->0 < s.store(side).uid_counter
-    &&& (store.contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(obj))
-        ==> forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && s.primary.resources[k].metadata.uid is Some
-            ==> int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(obj)
+    &&& (store.contains_key(req.key) && obj.metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(inner_kind(sk, bnd), obj))
+        ==> forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && k.kind == sk.outer_kind
+            && s.primary.resources[k].metadata.uid is Some
+            && cluster_of_dynamic(sk.selector, s.primary.resources[k]) == Some(bnd.name)
+            ==> int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(inner_kind(sk, bnd), obj)
 }
 
-pub open spec fn two_cluster_janitor_deletes_are_sound(tc: TwoCluster, controller_id: int) -> StatePred<TwoClusterState> {
+pub open spec fn two_cluster_janitor_deletes_are_sound(sk: SyncKind, bnd: Binding, tc: TwoCluster, controller_id: int) -> StatePred<TwoClusterState> {
     |s: TwoClusterState| {
         forall |msg: Message| {
             &&& #[trigger] s.in_flight().contains(msg)
             &&& msg.src.is_controller_id(controller_id)
             &&& msg.content is APIRequest
             &&& msg.content.is_delete_request()
-        } ==> two_cluster_janitor_delete_is_sound(tc, msg, s)
+        } ==> two_cluster_janitor_delete_is_sound(sk, bnd, tc, msg, s)
     }
 }
 
 // The object clause comes from the abstract state, where janitor_delete_is_sound
 // holds; the counter clause from janitor_uids_issued.
-proof fn lemma_janitor_sound_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, controller_id: int, uid_next: Uid, rv_next: ResourceVersion)
-    requires
-        widget_relabeling(cluster, r),
-        inv(widget_two_cluster(cluster), s),
-        janitor_uids_issued(controller_id)(s),
-        janitor_deletes_are_sound(controller_id)(abs(widget_two_cluster(cluster), r, s, uid_next, rv_next)),
-    ensures two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id)(s),
+proof fn lemma_janitor_sound_pull_back(sk: SyncKind, bnd: Binding, cluster: Cluster, r: Relabeling, s: TwoClusterState, controller_id: int, uid_next: Uid, rv_next: ResourceVersion)
+    requires widget_kinds_ok(sk, bnd),
+        widget_relabeling(r),
+        inv(widget_two_cluster(sk, bnd, cluster), s),
+        janitor_uids_issued(sk, bnd, controller_id)(s),
+        janitor_deletes_are_sound(sk, bnd, controller_id)(abs(widget_two_cluster(sk, bnd, cluster), r, s, uid_next, rv_next)),
+    ensures two_cluster_janitor_deletes_are_sound(sk, bnd, widget_two_cluster(sk, bnd, cluster), controller_id)(s),
 {
-    let tc = widget_two_cluster(cluster);
-    lemma_widget_sides(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
+    lemma_widget_sides(sk, bnd, cluster);
     let a = abs(tc, r, s, uid_next, rv_next);
     assert forall |msg: Message| {
         &&& #[trigger] s.in_flight().contains(msg)
         &&& msg.src.is_controller_id(controller_id)
         &&& msg.content is APIRequest
         &&& msg.content.is_delete_request()
-    } implies two_cluster_janitor_delete_is_sound(tc, msg, s) by {
+    } implies two_cluster_janitor_delete_is_sound(sk, bnd, tc, msg, s) by {
         let m1 = relabel_msg(tc, r, msg);
         lemma_relabel_msgs_contains(tc, r, s.network.in_flight, msg);
         assert(a.in_flight().contains(m1));
-        assert(janitor_delete_is_sound(m1, a));
+        assert(janitor_delete_is_sound(sk, bnd, m1, a));
         let req = msg.content.get_delete_request();
         let side = tc.side_of_kind(req.key.kind);
         let store = s.store(side).resources;
-        assert(janitor_delete_uid_issued(msg, s));
+        assert(janitor_delete_uid_issued(sk, bnd, msg, s));
         assert(side == Side::Remote);
         assert(req.preconditions->0.uid->0 < s.store(side).uid_counter);
-        lemma_abs_object(cluster, r, s, req.key, uid_next, rv_next);
-        if store.contains_key(req.key) && store[req.key].metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(store[req.key]) {
+        lemma_abs_object(sk, bnd, cluster, r, s, req.key, uid_next, rv_next);
+        if store.contains_key(req.key) && store[req.key].metadata.uid == req.preconditions->0.uid && snapshot_is_mirror(inner_kind(sk, bnd), store[req.key]) {
             let obj = store[req.key];
             let obj1 = relabel_obj(tc, r, obj);
-            lemma_unmarshal_inner_relabel(tc, r, obj);
-            let inner = InnerWidgetView::unmarshal(obj)->Ok_0;
-            assert(InnerWidgetView::unmarshal(obj1)->Ok_0 == relabel_inner(tc, r, inner));
-            lemma_parent_annotation_relabel(cluster, r, inner);
-            assert(snapshot_is_mirror(obj1));
-            assert(snapshot_parent(obj1) == relabel_uid_string(r.uid, snapshot_parent(obj)));
+            lemma_unmarshal_inner_relabel(sk, bnd, tc, r, obj);
+            let inner = unmarshal(inner_kind(sk, bnd), obj)->Ok_0;
+            assert(unmarshal(inner_kind(sk, bnd), obj1)->Ok_0 == relabel_synced(tc, r, inner));
+            lemma_parent_annotation_relabel(sk, bnd, cluster, r, inner);
+            assert(snapshot_is_mirror(inner_kind(sk, bnd), obj1));
+            assert(snapshot_parent(inner_kind(sk, bnd), obj1) == relabel_uid_string(r.uid, snapshot_parent(inner_kind(sk, bnd), obj)));
             assert(a.resources()[req.key] == obj1);
             assert(obj1.metadata.uid == m1.content.get_delete_request().preconditions->0.uid);
-            assert(parent_absent_forever(snapshot_parent(obj1))(a));
-            assert forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && s.primary.resources[k].metadata.uid is Some
-                implies int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(obj) by {
-                lemma_abs_object(cluster, r, s, k, uid_next, rv_next);
+            assert(parent_absent_forever(sk, bnd, snapshot_parent(inner_kind(sk, bnd), obj1))(a));
+            assert forall |k: ObjectRef| #[trigger] s.primary.resources.contains_key(k) && k.kind == sk.outer_kind
+                && s.primary.resources[k].metadata.uid is Some
+                && cluster_of_dynamic(sk.selector, s.primary.resources[k]) == Some(bnd.name)
+                implies int_to_string_view(s.primary.resources[k].metadata.uid->0) != snapshot_parent(inner_kind(sk, bnd), obj) by {
+                lemma_abs_object(sk, bnd, cluster, r, s, k, uid_next, rv_next);
                 let w = s.primary.resources[k].metadata.uid->0;
                 assert(a.resources().contains_key(k));
                 assert(a.resources()[k].metadata.uid == Some((r.uid)(Side::Primary, w)));
-                assert(int_to_string_view((r.uid)(Side::Primary, w)) != snapshot_parent(obj1));
-                lemma_uid_string_eq(r.uid, snapshot_parent(obj), w);
+                assert(int_to_string_view((r.uid)(Side::Primary, w)) != snapshot_parent(inner_kind(sk, bnd), obj1));
+                lemma_uid_string_eq(r.uid, snapshot_parent(inner_kind(sk, bnd), obj), w);
             }
         }
     }
 }
 
-pub proof fn lemma_janitor_sound_transfer(cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, controller_id: int)
-    requires
-        widget_sim(cluster, r, ex),
-        widget_two_cluster(cluster).init()(state_at(ex, 0)),
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
-        always(lift_state(janitor_deletes_are_sound(controller_id))).satisfied_by(alpha(widget_two_cluster(cluster), r, ex)),
-    ensures always(lift_state(two_cluster_janitor_deletes_are_sound(widget_two_cluster(cluster), controller_id))).satisfied_by(ex),
+pub proof fn lemma_janitor_sound_transfer(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, r: Relabeling, ex: Execution<TwoClusterState>, controller_id: int)
+    requires widget_kinds_ok(sk, bnd),
+        widget_sim(sk, bnd, cluster, r, ex),
+        widget_two_cluster(sk, bnd, cluster).init()(state_at(ex, 0)),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(sk, bnd)),
+        always(lift_state(janitor_deletes_are_sound(sk, bnd, controller_id))).satisfied_by(alpha(widget_two_cluster(sk, bnd, cluster), r, ex)),
+    ensures always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, widget_two_cluster(sk, bnd, cluster), controller_id))).satisfied_by(ex),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let ex1 = alpha(tc, r, ex);
-    assert forall |i: nat| #[trigger] lift_state(two_cluster_janitor_deletes_are_sound(tc, controller_id)).satisfied_by(ex.suffix(i)) by {
-        assert(lift_state(janitor_deletes_are_sound(controller_id)).satisfied_by(ex1.suffix(i)));
+    assert forall |i: nat| #[trigger] lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, tc, controller_id)).satisfied_by(ex.suffix(i)) by {
+        assert(lift_state(janitor_deletes_are_sound(sk, bnd, controller_id)).satisfied_by(ex1.suffix(i)));
         assert(ex1.suffix(i).head() == abs_at(tc, r, ex, i));
         assert(ex.suffix(i).head() == state_at(ex, i));
-        lemma_widget_sim_inv(cluster, r, ex, i);
-        lemma_janitor_uids_issued_at(cluster, r, ex, controller_id, i);
+        lemma_widget_sim_inv(sk, bnd, cluster, r, ex, i);
+        lemma_janitor_uids_issued_at(sk, bnd, spec_ok, cluster, r, ex, controller_id, i);
         let s = state_at(ex, i);
-        lemma_janitor_sound_pull_back(cluster, r, s, controller_id, uid_sum(s), rv_sum(s));
+        lemma_janitor_sound_pull_back(sk, bnd, cluster, r, s, controller_id, uid_sum(s), rv_sum(s));
     }
 }
 
 // ---------------------------------------------------------------------------
-// The concrete cluster of the pair satisfies the hypotheses.
+// Closed statements, for any configuration.
 // ---------------------------------------------------------------------------
 
-// A cluster with the two Widget types installed and nothing else: both types
-// are installed, validation reads the spec only, and the default statuses
-// unmarshal. Shared by the concrete clusters of the pair and of the pair with
-// the disturber, whose installed types are the same map.
-pub proof fn lemma_widget_instance_types(cluster: Cluster)
-    requires cluster.installed_types == widget_cluster_instance().installed_types,
+// What the refinement needs of the kinds, for any configuration: the outer kind
+// is not the binding's mirror kind, which is lemma_outer_kind_is_not_inner under
+// sync_kind_ok -- the injectivity of model_kind, not the length of a name.
+pub proof fn lemma_widget_kinds_ok(sk: SyncKind, bnd: Binding)
+    requires sync_kind_ok(sk), sk.selector is Field,
+    ensures widget_kinds_ok(sk, bnd),
+{
+    lemma_outer_kind_is_not_inner(sk, bnd);
+}
+
+// The installed types of a configuration are ones the refinement can follow.
+// Every kind of the configuration carries the same synced_installed_type, whose
+// schema check reads the spec and whose transition check reads the selector field
+// of the spec, so neither reads metadata; and the default status it stamps on a
+// created object unmarshals, by the round trip of marshal_status.
+//
+// This is also where the mirror kinds are counted: the sync reconciler serves
+// `sk.bindings` and refuses every other binding before it sends a request
+// (spec_types::serves), so the mirror kinds the folded store must install are the
+// finitely many inner_kind(sk, b) for b in sk.bindings -- exactly the names
+// widget_installed_types holds.
+pub proof fn lemma_widget_types(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: Cluster)
+    requires
+        sync_kind_ok(sk),
+        // The refinement asks that the API server's validation not read metadata,
+        // and a `name` selector's immutability rule reads metadata.name
+        // (doc/widget_sync_fanout_design.md, section 5.2).
+        sk.selector is Field,
+        cluster.installed_types == widget_installed_types(sk, spec_ok),
     ensures
-        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
+        forall |b: Binding| #[trigger] sk.bindings.contains(b)
+            ==> cluster.synced_type_is_installed(inner_kind(sk, b), spec_ok, sk.selector),
+        all_inner_kinds_installed(sk, spec_ok, cluster),
         installed_types_ignore_metadata(cluster.installed_types),
         installed_types_coherent(cluster.installed_types),
 {
     let it = cluster.installed_types;
-    let outer_name = OuterWidgetView::kind()->CustomResourceKind_0;
-    let inner_name = InnerWidgetView::kind()->CustomResourceKind_0;
-    reveal_strlit("widget");
-    reveal_strlit("widget@inner");
-    assert(outer_name != inner_name) by { assert(outer_name.len() != inner_name.len()); }
-    assert(it.contains_key(outer_name) && it[outer_name] == Cluster::installed_type::<OuterWidgetView>());
-    assert(it.contains_key(inner_name) && it[inner_name] == Cluster::installed_type::<InnerWidgetView>());
-    // Validation reads the spec only; transition validation is trivial.
+    let ty = Cluster::synced_installed_type(spec_ok, sk.selector);
+    lemma_widget_types_installed(sk, spec_ok, cluster);
+    assert forall |b2: Binding| sk.bindings.contains(b2)
+        implies cluster.synced_type_is_installed(#[trigger] inner_kind(sk, b2), spec_ok, sk.selector) by {}
     assert forall |name: StringView, o: DynamicObjectView, m: ObjectMetaView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
         implies (#[trigger] (it[name].valid_object)(DynamicObjectView { metadata: m, ..o })) == (it[name].valid_object)(o) by {
-        let o1 = DynamicObjectView { metadata: m, ..o };
-        if name == outer_name {
-            assert(OuterWidgetView::unmarshal(o1) is Ok == OuterWidgetView::unmarshal(o) is Ok);
-            if OuterWidgetView::unmarshal(o) is Ok {
-                assert(OuterWidgetView::unmarshal(o1)->Ok_0.spec == OuterWidgetView::unmarshal(o)->Ok_0.spec);
-            }
-        } else {
-            assert(name == inner_name);
-            assert(InnerWidgetView::unmarshal(o1) is Ok == InnerWidgetView::unmarshal(o) is Ok);
-            if InnerWidgetView::unmarshal(o) is Ok {
-                assert(InnerWidgetView::unmarshal(o1)->Ok_0.spec == InnerWidgetView::unmarshal(o)->Ok_0.spec);
-            }
-        }
+        assert(it[name] == ty);
     }
     assert forall |name: StringView, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView|
         it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
         implies (#[trigger] (it[name].valid_transition)(DynamicObjectView { metadata: m, ..o }, DynamicObjectView { metadata: m_old, ..old }))
             == (it[name].valid_transition)(o, old) by {
-        if name == outer_name {} else { assert(name == inner_name); }
+        assert(it[name] == ty);
     }
     assert forall |name: StringView| #[trigger] it.contains_key(name) implies (it[name].unmarshallable_status)((it[name].marshalled_default_status)()) by {
-        if name == outer_name {
-            OuterWidgetView::marshal_status_preserves_integrity();
-        } else {
-            assert(name == inner_name);
-            InnerWidgetView::marshal_status_preserves_integrity();
-        }
+        assert(it[name] == ty);
+        marshal_status_preserves_integrity();
     }
 }
 
-pub proof fn lemma_widget_instance_is_pair_cluster()
-    ensures widget_pair_cluster(widget_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+// The cluster of composition::widget_sync_reconciler::widget_pair_cluster_for is
+// the pair's cluster: the sync reconciler of `sk` at `sync_id`, the janitor of
+// `bnd` at `janitor_id`, and nothing else.
+pub proof fn lemma_widget_is_pair_cluster(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
+    requires
+        sync_kind_ok(sk),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+    ensures widget_pair_cluster(sk, bnd, spec_ok, widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id), sync_id, janitor_id),
 {
-    let cluster = widget_cluster_instance();
-    lemma_widget_instance_types(cluster);
-    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(widget_sync_id()).insert(widget_janitor_id()));
+    let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_widget_types(sk, spec_ok, cluster);
+    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(sync_id).insert(janitor_id));
 }
 
-// The theorem for the concrete cluster: the sync reconciler at widget_sync_id()
-// and the janitor at widget_janitor_id(), with both Widget types installed.
-pub proof fn widget_instance_two_cluster_theorem()
+// The theorem for ANY configuration: R1, R2, R3, R3s and the janitor's delete
+// soundness, read on two-store executions of the pair, with the outer copies in
+// the primary store and the mirrors of `bnd` in the remote one. Nothing here is
+// specific to a kind name: `sync_kind_ok` and `binding_ok` are what the
+// distinctness of the model kinds is discharged from.
+pub proof fn widget_instance_two_cluster_theorem(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
     ensures ({
-        let cluster = widget_cluster_instance();
-        let tc = widget_two_cluster(cluster);
-        widget_two_cluster_spec(cluster, widget_sync_id(), widget_janitor_id()).entails(
-            two_cluster_spec_eventually_synced()
-            .and(two_cluster_status_eventually_mirrored())
-            .and(two_cluster_mirrors_stably_collected(tc))
-            .and(two_cluster_mirrors_eventually_collected(tc))
-            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, widget_janitor_id()))))
+        let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+        let bs = sk.bindings;
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        widget_two_cluster_spec(sk, bnd, cluster, sync_id, janitor_id).entails(
+            two_cluster_spec_eventually_synced(sk, bnd)
+            .and(two_cluster_status_eventually_mirrored(sk, bnd))
+            .and(two_cluster_mirrors_stably_collected(sk, bnd, tc))
+            .and(two_cluster_mirrors_eventually_collected(sk, bnd, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, tc, janitor_id))))
         )
     }),
 {
-    lemma_widget_instance_is_pair_cluster();
-    lemma_pair_cluster_is_cluster_with_others(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
-    widget_two_cluster_theorem(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
+    let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_is_pair_cluster(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_pair_cluster_is_cluster_with_others(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
+    widget_two_cluster_theorem(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
+}
+
+// The demo configuration is one application of it.
+pub proof fn widget_demo_two_cluster_theorem()
+    ensures ({
+        let cluster = widget_cluster_instance();
+        let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
+        let tc = widget_two_cluster(k, b, cluster);
+        widget_two_cluster_spec(k, b, cluster, widget_sync_id(), widget_janitor_id()).entails(
+            two_cluster_spec_eventually_synced(k, b)
+            .and(two_cluster_status_eventually_mirrored(k, b))
+            .and(two_cluster_mirrors_stably_collected(k, b, tc))
+            .and(two_cluster_mirrors_eventually_collected(k, b, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(k, b, tc, widget_janitor_id()))))
+        )
+    }),
+{
+    widget_demo_config_ok();
+    assert(widget_kind().bindings =~= widget_bindings());
+    widget_instance_two_cluster_theorem(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id());
 }
 
 // ---------------------------------------------------------------------------
@@ -2579,15 +2770,15 @@ pub proof fn widget_instance_two_cluster_theorem()
 // (composition/widget_disturber_reconciler.rs) gives its guarantee under the
 // model of a registry holding only the disturber, which declares no fairness,
 // and the guarantee implies both relies (proof/disturber.rs).
-pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, sync_id: int, janitor_id: int, id: int)
-    requires
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(id, widget_disturber_controller_model()),
-    ensures widget_other_controller_ok(cluster, sync_id, janitor_id, id),
+pub proof fn lemma_disturber_is_other_controller_ok(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, sync_id: int, janitor_id: int, id: int)
+    requires widget_kinds_ok(sk, bnd),
+        cluster.synced_type_is_installed(inner_kind(sk, bnd), spec_ok, sk.selector),
+        cluster.controller_models.contains_pair(id, widget_disturber_controller_model(inner_kind(sk, bnd))),
+    ensures widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id),
 {
-    let tc = widget_two_cluster(cluster);
+    let tc = widget_two_cluster(sk, bnd, cluster);
     let m = cluster.controller_models[id];
-    assert(m == widget_disturber_controller_model());
+    assert(m == widget_disturber_controller_model(inner_kind(sk, bnd)));
     assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
         let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
         req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
@@ -2602,18 +2793,18 @@ pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, sync_id: i
             }
         }
     }
-    assert forall |r: Relabeling| widget_relabeling(cluster, r) implies #[trigger] other_model_commutes(tc, r, m) by {
+    assert forall |r: Relabeling| widget_relabeling(r) implies #[trigger] other_model_commutes(tc, r, m) by {
         let rm = m.reconcile_model;
         let t = rm.transition;
         assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
             cr.kind == rm.kind && stored_object_ok(tc, cr)
             implies #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
                 == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1)) by {
-            lemma_disturber_model_commutes(cluster, r, cr, resp, ls);
+            lemma_disturber_model_commutes(sk, bnd, spec_ok, cluster, r, cr, resp, ls);
         }
     }
     // The relies, through Welder.
-    let cc = CoreCluster { cluster: cluster, registry: Map::<int, ControllerSpec>::empty().insert(id, widget_disturber_controller_spec(id)) };
+    let cc = CoreCluster { cluster: cluster, registry: Map::<int, ControllerSpec>::empty().insert(id, widget_disturber_controller_spec(sk, bnd, spec_ok, id)) };
     let cs = widget_disturber_core_set(id);
     assert(cs.members.contains(id));
     assert(well_formed(cc, cs)) by {
@@ -2621,51 +2812,95 @@ pub proof fn lemma_disturber_is_other_controller_ok(cluster: Cluster, sync_id: i
             assert(i == id);
         }
     }
-    widget_disturber_singleton_core_holds(cc, id);
-    lemma_core_member_guarantee(cc, cs, id);
+    widget_disturber_singleton_core_holds(sk, bnd, spec_ok, cc, id);
+    lemma_core_member_guarantee(sk, bnd, cc, cs, id);
     assert(cc.registry[id].safety_guarantee == always(lift_state(widget_disturber_guarantee(id))));
-    assert(pair_spec_covers(cluster, sync_id, janitor_id, cc)) by {
-        let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    assert(pair_spec_covers(sk, bnd, cluster, sync_id, janitor_id, cc)) by {
+        let spec = widget_one_cluster_spec(sk, bnd, cluster, sync_id, janitor_id);
         assert forall |i: int| #[trigger] cc.registry.contains_key(i) implies spec.entails((cc.registry[i].fairness)(cluster)) by {
             assert(i == id);
             assert((cc.registry[i].fairness)(cluster) == true_pred::<ClusterState>());
         }
     }
-    disturber_guarantee_implies_relies(id);
-    lemma_relies_hold_of_from_welder(cluster, sync_id, janitor_id, id, cc, widget_disturber_guarantee(id));
+    disturber_guarantee_implies_relies(sk, id);
+    lemma_relies_hold_of_from_welder(sk, bnd, cluster, sync_id, janitor_id, id, cc, widget_disturber_guarantee(id));
 }
 
-// The concrete three-controller cluster of composition/widget_disturber_reconciler.rs.
-pub proof fn lemma_widget_disturbed_instance_is_cluster_with_others()
-    ensures widget_cluster_with_others(widget_disturbed_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+
+// The three-controller cluster of composition/widget_disturber_reconciler.rs
+// meets the same hypotheses, for ANY configuration, with the disturber as the one
+// other controller.
+pub proof fn lemma_widget_disturbed_is_cluster_with_others(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+        sync_id != disturber_id,
+        janitor_id != disturber_id,
+    ensures widget_cluster_with_others(sk, bnd, spec_ok,
+        widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id), sync_id, janitor_id),
 {
-    let cluster = widget_disturbed_cluster_instance();
-    lemma_widget_instance_types(cluster);
-    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != widget_sync_id() && id != widget_janitor_id()
-        implies widget_other_controller_ok(cluster, widget_sync_id(), widget_janitor_id(), id) by {
-        assert(id == widget_disturber_id());
-        lemma_disturber_is_other_controller_ok(cluster, widget_sync_id(), widget_janitor_id(), id);
+    let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_types(sk, spec_ok, cluster);
+    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
+        implies widget_other_controller_ok(sk, bnd, cluster, sync_id, janitor_id, id) by {
+        assert(id == disturber_id);
+        lemma_disturber_is_other_controller_ok(sk, bnd, spec_ok, cluster, sync_id, janitor_id, id);
     }
 }
 
-// The M2 counterpart of widget_disturbed_core_holds: R1, R2, R3s, R3 and the
-// janitor's delete soundness on two stores, with the disturber editing and
-// deleting mirrors in the remote store. Only the pair's fairness is assumed.
-pub proof fn widget_disturbed_two_cluster_theorem()
+// The same theorem with the disturber beside the pair, for ANY configuration: an
+// out-of-band actor that patches and deletes mirrors in the remote store,
+// admitted by the pair's relies.
+pub proof fn widget_disturbed_two_cluster_theorem(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+        sync_id != disturber_id,
+        janitor_id != disturber_id,
     ensures ({
-        let cluster = widget_disturbed_cluster_instance();
-        let tc = widget_two_cluster(cluster);
-        widget_two_cluster_spec(cluster, widget_sync_id(), widget_janitor_id()).entails(
-            two_cluster_spec_eventually_synced()
-            .and(two_cluster_status_eventually_mirrored())
-            .and(two_cluster_mirrors_stably_collected(tc))
-            .and(two_cluster_mirrors_eventually_collected(tc))
-            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(tc, widget_janitor_id()))))
+        let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+        let bs = sk.bindings;
+        let tc = widget_two_cluster(sk, bnd, cluster);
+        widget_two_cluster_spec(sk, bnd, cluster, sync_id, janitor_id).entails(
+            two_cluster_spec_eventually_synced(sk, bnd)
+            .and(two_cluster_status_eventually_mirrored(sk, bnd))
+            .and(two_cluster_mirrors_stably_collected(sk, bnd, tc))
+            .and(two_cluster_mirrors_eventually_collected(sk, bnd, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, tc, janitor_id))))
         )
     }),
 {
-    lemma_widget_disturbed_instance_is_cluster_with_others();
-    widget_two_cluster_theorem(widget_disturbed_cluster_instance(), widget_sync_id(), widget_janitor_id());
+    let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_disturbed_is_cluster_with_others(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    widget_two_cluster_theorem(sk, bnd, spec_ok, cluster, sync_id, janitor_id);
+}
+
+// The demo configuration with the disturber is one application of it.
+pub proof fn widget_demo_disturbed_two_cluster_theorem()
+    ensures ({
+        let cluster = widget_disturbed_cluster_instance();
+        let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
+        let tc = widget_two_cluster(k, b, cluster);
+        widget_two_cluster_spec(k, b, cluster, widget_sync_id(), widget_janitor_id()).entails(
+            two_cluster_spec_eventually_synced(k, b)
+            .and(two_cluster_status_eventually_mirrored(k, b))
+            .and(two_cluster_mirrors_stably_collected(k, b, tc))
+            .and(two_cluster_mirrors_eventually_collected(k, b, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(k, b, tc, widget_janitor_id()))))
+        )
+    }),
+{
+    widget_demo_config_ok();
+    assert(widget_kind().bindings =~= widget_bindings());
+    widget_disturbed_two_cluster_theorem(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_disturber_id());
 }
 
 }

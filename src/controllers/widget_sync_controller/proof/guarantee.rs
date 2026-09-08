@@ -4,6 +4,7 @@
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::UnmarshalError;
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::proof::api_server::*;
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
@@ -14,7 +15,7 @@ use crate::kubernetes_cluster::spec::{
 use crate::reconciler::spec::io::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler, sync_reconciler::*},
+    model::{install::*, janitor_reconciler, sync_reconciler, sync_reconciler::WidgetSyncReconcileState},
     proof::{helper_invariants::*, predicate::*},
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
@@ -28,9 +29,9 @@ verus! {
 // snapshot of a well-formed outer copy whose uid is bound to its key.
 // ---------------------------------------------------------------------------
 
-pub open spec fn outer_snapshot_is_bound(cr: DynamicObjectView, key: ObjectRef) -> StatePred<ClusterState> {
+pub open spec fn outer_snapshot_is_bound(k: SyncKind, cr: DynamicObjectView, key: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& OuterWidgetView::unmarshal(cr) is Ok
+        &&& unmarshal(k.outer_kind, cr) is Ok
         &&& cr.object_ref() == key
         &&& cr.metadata.uid is Some
         &&& cr.metadata.generation is Some
@@ -38,43 +39,43 @@ pub open spec fn outer_snapshot_is_bound(cr: DynamicObjectView, key: ObjectRef) 
     }
 }
 
-pub open spec fn sync_scheduled_crs_are_bound(controller_id: int) -> StatePred<ClusterState> {
+pub open spec fn sync_scheduled_crs_are_bound(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |key: ObjectRef| #[trigger] s.scheduled_reconciles(controller_id).contains_key(key)
-            ==> outer_snapshot_is_bound(s.scheduled_reconciles(controller_id)[key], key)(s)
+            ==> outer_snapshot_is_bound(k, s.scheduled_reconciles(controller_id)[key], key)(s)
     }
 }
 
-pub open spec fn sync_triggering_crs_are_bound(controller_id: int) -> StatePred<ClusterState> {
+pub open spec fn sync_triggering_crs_are_bound(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |key: ObjectRef| #[trigger] s.ongoing_reconciles(controller_id).contains_key(key)
-            ==> outer_snapshot_is_bound(s.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s)
+            ==> outer_snapshot_is_bound(k, s.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s)
     }
 }
 
-pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
+pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
-        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model()),
+        cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
     ensures
-        spec.entails(always(lift_state(sync_scheduled_crs_are_bound(controller_id)))),
-        spec.entails(always(lift_state(sync_triggering_crs_are_bound(controller_id)))),
+        spec.entails(always(lift_state(sync_scheduled_crs_are_bound(k, controller_id)))),
+        spec.entails(always(lift_state(sync_triggering_crs_are_bound(k, controller_id)))),
 {
     let inv = |s: ClusterState| {
-        &&& sync_scheduled_crs_are_bound(controller_id)(s)
-        &&& sync_triggering_crs_are_bound(controller_id)(s)
+        &&& sync_scheduled_crs_are_bound(k, controller_id)(s)
+        &&& sync_triggering_crs_are_bound(k, controller_id)(s)
     };
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
-    cluster.lemma_always_each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>(spec);
+    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, k.outer_kind, spec_ok, k.selector);
     cluster.lemma_always_etcd_objects_have_unique_uids(spec);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
-        &&& cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()(s)
+        &&& cluster.each_synced_object_in_etcd_is_well_formed(k.outer_kind)(s)
         &&& Cluster::etcd_objects_have_unique_uids()(s)
     };
     combine_spec_entails_always_n!(
@@ -82,7 +83,7 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
         lift_action(cluster.next()),
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
-        lift_state(cluster.each_custom_object_in_etcd_is_well_formed::<OuterWidgetView>()),
+        lift_state(cluster.each_synced_object_in_etcd_is_well_formed(k.outer_kind)),
         lift_state(Cluster::etcd_objects_have_unique_uids())
     );
     assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
@@ -91,13 +92,13 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
             Step::APIServerStep(input) => {
                 lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, input->0);
                 assert forall |key: ObjectRef| #[trigger] s_prime.scheduled_reconciles(controller_id).contains_key(key)
-                implies outer_snapshot_is_bound(s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
+                implies outer_snapshot_is_bound(k, s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
                     assert(s.scheduled_reconciles(controller_id).contains_key(key));
                     let cr = s.scheduled_reconciles(controller_id)[key];
                     lemma_uid_stays_bound_to_key(cr.metadata.uid->0, key, s, s_prime);
                 }
                 assert forall |key: ObjectRef| #[trigger] s_prime.ongoing_reconciles(controller_id).contains_key(key)
-                implies outer_snapshot_is_bound(s_prime.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s_prime) by {
+                implies outer_snapshot_is_bound(k, s_prime.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s_prime) by {
                     assert(s.ongoing_reconciles(controller_id).contains_key(key));
                     let cr = s.ongoing_reconciles(controller_id)[key].triggering_cr;
                     lemma_uid_stays_bound_to_key(cr.metadata.uid->0, key, s, s_prime);
@@ -106,15 +107,15 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
             Step::ScheduleControllerReconcileStep(input) => {
                 assert(s_prime.api_server == s.api_server);
                 assert forall |key: ObjectRef| #[trigger] s_prime.scheduled_reconciles(controller_id).contains_key(key)
-                implies outer_snapshot_is_bound(s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
+                implies outer_snapshot_is_bound(k, s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
                     if input.0 == controller_id && input.1 == key {
                         // The snapshot is the stored outer copy.
                         let obj = s.resources()[key];
                         assert(s_prime.scheduled_reconciles(controller_id)[key] == obj);
-                        assert(key.kind == OuterWidgetView::kind());
+                        assert(key.kind == k.outer_kind);
                         assert(cluster.etcd_object_is_well_formed(key)(s));
                         assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
-                        assert(OuterWidgetView::unmarshal(obj) is Ok);
+                        assert(unmarshal(k.outer_kind, obj) is Ok);
                         assert forall |k: ObjectRef| #[trigger] s.resources().contains_key(k) && s.resources()[k].metadata.uid == obj.metadata.uid
                         implies k == key by {
                             if k != key {
@@ -131,7 +132,7 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
             Step::ControllerStep(input) => {
                 assert(s_prime.api_server == s.api_server);
                 assert forall |key: ObjectRef| #[trigger] s_prime.ongoing_reconciles(controller_id).contains_key(key)
-                implies outer_snapshot_is_bound(s_prime.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s_prime) by {
+                implies outer_snapshot_is_bound(k, s_prime.ongoing_reconciles(controller_id)[key].triggering_cr, key)(s_prime) by {
                     if s.ongoing_reconciles(controller_id).contains_key(key) {
                         assert(s_prime.ongoing_reconciles(controller_id)[key].triggering_cr == s.ongoing_reconciles(controller_id)[key].triggering_cr);
                     } else {
@@ -142,7 +143,7 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
                     }
                 }
                 assert forall |key: ObjectRef| #[trigger] s_prime.scheduled_reconciles(controller_id).contains_key(key)
-                implies outer_snapshot_is_bound(s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
+                implies outer_snapshot_is_bound(k, s_prime.scheduled_reconciles(controller_id)[key], key)(s_prime) by {
                     assert(s.scheduled_reconciles(controller_id).contains_key(key));
                     assert(s_prime.scheduled_reconciles(controller_id)[key] == s.scheduled_reconciles(controller_id)[key]);
                 }
@@ -165,8 +166,115 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
         }
     }
     init_invariant(spec, cluster.init(), stronger_next, inv);
-    always_weaken(spec, lift_state(inv), lift_state(sync_scheduled_crs_are_bound(controller_id)));
-    always_weaken(spec, lift_state(inv), lift_state(sync_triggering_crs_are_bound(controller_id)));
+    always_weaken(spec, lift_state(inv), lift_state(sync_scheduled_crs_are_bound(k, controller_id)));
+    always_weaken(spec, lift_state(inv), lift_state(sync_triggering_crs_are_bound(k, controller_id)));
+}
+
+// ---------------------------------------------------------------------------
+// A reconcile that has left Init for the mirror holds a snapshot that names an
+// inner cluster.
+// ---------------------------------------------------------------------------
+
+// The steps at which the sync reconciler is working on the mirror: the Get of the
+// mirror and the two writes that can follow it. The Init step reaches AfterGetInner
+// only when its snapshot's selector names a cluster (the other outcome of Init is
+// the status write that reports the rejection), and the snapshot of a reconcile
+// never changes, so at these three steps the selection is a name. This is what the
+// Create of a mirror needs: without it, an outer copy naming no cluster and one
+// naming the empty cluster name are indistinguishable, which is what binding_of
+// collapses them to.
+pub open spec fn sync_step_works_on_the_mirror(step: WidgetSyncStepView) -> bool {
+    ||| step is AfterGetInner
+    ||| step is AfterCreateInner
+    ||| step is AfterPatchInner
+}
+
+pub open spec fn sync_reconciles_at_the_mirror_select_a_cluster(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |key: ObjectRef| #[trigger] s.ongoing_reconciles(controller_id).contains_key(key)
+            && sync_step_works_on_the_mirror(WidgetSyncReconcileState::unmarshal(s.ongoing_reconciles(controller_id)[key].local_state)->Ok_0.reconcile_step)
+            ==> cluster_of(k.selector, unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[key].triggering_cr)->Ok_0) is Some
+    }
+}
+
+pub proof fn lemma_always_sync_reconciles_at_the_mirror_select_a_cluster(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, controller_id: int)
+    requires
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
+    ensures spec.entails(always(lift_state(sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)))),
+{
+    let inv = sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id);
+    cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
+    let stronger_next = |s: ClusterState, s_prime: ClusterState| {
+        &&& cluster.next()(s, s_prime)
+        &&& Cluster::there_is_the_controller_state(controller_id)(s)
+    };
+    combine_spec_entails_always_n!(
+        spec, lift_action(stronger_next),
+        lift_action(cluster.next()),
+        lift_state(Cluster::there_is_the_controller_state(controller_id))
+    );
+    assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
+        unmarshal_of_marshal();
+        WidgetSyncReconcileState::marshal_preserves_integrity();
+        assert forall |key: ObjectRef| #[trigger] s_prime.ongoing_reconciles(controller_id).contains_key(key)
+            && sync_step_works_on_the_mirror(WidgetSyncReconcileState::unmarshal(s_prime.ongoing_reconciles(controller_id)[key].local_state)->Ok_0.reconcile_step)
+        implies cluster_of(k.selector, unmarshal(k.outer_kind, s_prime.ongoing_reconciles(controller_id)[key].triggering_cr)->Ok_0) is Some by {
+            let step = choose |step| cluster.next_step(s, s_prime, step);
+            match step {
+                Step::ControllerStep(input) => {
+                    let (id, resp_msg_opt, cr_key_opt) = input;
+                    if id == controller_id && cr_key_opt == Some(key) && s.ongoing_reconciles(controller_id).contains_key(key)
+                        && s_prime.ongoing_reconciles(controller_id)[key] != s.ongoing_reconciles(controller_id)[key] {
+                        let reconcile = s.ongoing_reconciles(controller_id)[key];
+                        let reconcile_prime = s_prime.ongoing_reconciles(controller_id)[key];
+                        assert(reconcile_prime.triggering_cr == reconcile.triggering_cr);
+                        let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
+                        let state = WidgetSyncReconcileState::unmarshal(reconcile.local_state)->Ok_0;
+                        let resp_o = if resp_msg_opt is Some {
+                            if resp_msg_opt->0.content is APIResponse {
+                                Some(ResponseView::<VoidERespView>::KResponse(resp_msg_opt->0.content->APIResponse_0))
+                            } else {
+                                Some(ResponseView::<VoidERespView>::ExternalResponse(VoidERespView::unmarshal(resp_msg_opt->0.content->ExternalResponse_0)->Ok_0))
+                            }
+                        } else {
+                            None
+                        };
+                        let (state_prime, req_o) = sync_reconciler::reconcile_core(k, outer, resp_o, state);
+                        assert(reconcile_prime.local_state == state_prime.marshal());
+                        assert(WidgetSyncReconcileState::unmarshal(reconcile_prime.local_state)->Ok_0 == state_prime);
+                        match state.reconcile_step {
+                            // Init leaves for the Get of the mirror only when the snapshot names a cluster.
+                            WidgetSyncStepView::Init => {
+                                assert(cluster_of(k.selector, outer) is Some);
+                            },
+                            // Past Init the snapshot is the same one, and the invariant already holds of it.
+                            WidgetSyncStepView::AfterGetInner => {},
+                            WidgetSyncStepView::AfterCreateInner => {},
+                            WidgetSyncStepView::AfterPatchInner => {},
+                            // No other step leads to one that works on the mirror.
+                            _ => { assert(false); },
+                        }
+                    } else if s.ongoing_reconciles(controller_id).contains_key(key) {
+                        assert(s_prime.ongoing_reconciles(controller_id)[key] == s.ongoing_reconciles(controller_id)[key]);
+                    } else {
+                        // A reconcile that just started is at Init.
+                        assert(WidgetSyncReconcileState::unmarshal(s_prime.ongoing_reconciles(controller_id)[key].local_state)->Ok_0 == sync_reconciler::reconcile_init_state());
+                        assert(false);
+                    }
+                },
+                Step::RestartControllerStep(id) => {
+                    assert(id != controller_id);
+                    assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
+                },
+                _ => {
+                    assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
+                },
+            }
+        }
+    }
+    init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +282,7 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
 // Ready and Stalled, in that order.
 // ---------------------------------------------------------------------------
 
-pub open spec fn written_conditions_shape(status: WidgetStatusView) -> bool {
+pub open spec fn written_conditions_shape(status: SyncedStatusView) -> bool {
     &&& status.conditions is Some
     &&& status.conditions->0.len() == 3
     &&& status.conditions->0[0].type_ == synced_condition_type()
@@ -182,7 +290,7 @@ pub open spec fn written_conditions_shape(status: WidgetStatusView) -> bool {
     &&& status.conditions->0[2].type_ == stalled_condition_type()
 }
 
-pub proof fn lemma_conditions_of_written_status(status: WidgetStatusView)
+pub proof fn lemma_conditions_of_written_status(status: SyncedStatusView)
     requires written_conditions_shape(status),
     ensures
         status.synced_condition() == Some(status.conditions->0[0]),
@@ -192,14 +300,14 @@ pub proof fn lemma_conditions_of_written_status(status: WidgetStatusView)
     reveal_strlit("Synced");
     reveal_strlit("Ready");
     reveal_strlit("Stalled");
-    reveal_with_fuel(find_condition_from, 4);
+    reveal_with_fuel(find_synced_condition_from, 4);
     assert("Synced"@.len() != "Ready"@.len());
     assert("Synced"@.len() != "Stalled"@.len());
     assert("Ready"@.len() != "Stalled"@.len());
 }
 
 // Ready and Stalled are never both True in a status the sync reconciler writes.
-pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView)
+pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures
         !(ready_condition_for(generation, source, outcome).status == condition_true()
             && stalled_condition_for(generation, source, outcome).status == condition_true()),
@@ -213,52 +321,54 @@ pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: 
 // The sync guarantee.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
+pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
-        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model()),
-    ensures spec.entails(always(lift_state(widget_sync_guarantee(controller_id)))),
+        cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
+    ensures spec.entails(always(lift_state(widget_sync_guarantee(k, controller_id)))),
 {
-    let inv = widget_sync_guarantee(controller_id);
+    let inv = widget_sync_guarantee(k, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
-    lemma_always_sync_crs_are_bound(spec, cluster, controller_id);
+    lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, controller_id);
+    lemma_always_sync_reconciles_at_the_mirror_select_a_cluster(spec, cluster, k, controller_id);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
-        &&& sync_triggering_crs_are_bound(controller_id)(s)
+        &&& sync_triggering_crs_are_bound(k, controller_id)(s)
+        &&& sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
         lift_action(cluster.next()),
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
-        lift_state(sync_triggering_crs_are_bound(controller_id))
+        lift_state(sync_triggering_crs_are_bound(k, controller_id)),
+        lift_state(sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id))
     );
     assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
-        OuterWidgetView::marshal_preserves_integrity();
-        InnerWidgetView::marshal_preserves_integrity();
-        OuterWidgetView::marshal_status_preserves_integrity();
+        marshal_status_preserves_integrity();
+        unmarshal_of_marshal();
         WidgetSyncReconcileState::marshal_preserves_integrity();
         let step = choose |step| cluster.next_step(s, s_prime, step);
         assert forall |msg: Message| {
             &&& #[trigger] s_prime.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(controller_id)
-        } implies sync_request_is_guaranteed(msg, s_prime) by {
+        } implies sync_request_is_guaranteed(k, msg, s_prime) by {
             match step {
                 Step::APIServerStep(input) => {
                     // No new request from this controller; the store may have changed.
                     assert(s.in_flight().contains(msg));
-                    assert(sync_request_is_guaranteed(msg, s));
+                    assert(sync_request_is_guaranteed(k, msg, s));
                     lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, input->0);
-                    lemma_sync_request_guarantee_is_preserved(msg, s, s_prime);
+                    lemma_sync_request_guarantee_is_preserved(k, msg, s, s_prime);
                 },
                 Step::ControllerStep(input) => {
                     assert(s_prime.api_server == s.api_server);
                     if s.in_flight().contains(msg) {
-                        assert(sync_request_is_guaranteed(msg, s));
-                        lemma_sync_request_guarantee_is_preserved(msg, s, s_prime);
+                        assert(sync_request_is_guaranteed(k, msg, s));
+                        lemma_sync_request_guarantee_is_preserved(k, msg, s, s_prime);
                     } else {
                         // A request this controller just sent.
                         let (id, resp_msg_opt, cr_key_opt) = input;
@@ -267,14 +377,14 @@ pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cl
                         assert(s.ongoing_reconciles(controller_id).contains_key(cr_key));
                         assert(msg == s_prime.ongoing_reconciles(controller_id)[cr_key].pending_req_msg->0);
                         assert(msg.src == HostId::Controller(controller_id, cr_key));
-                        lemma_sync_new_request_is_guaranteed(cluster, controller_id, s, s_prime, input, msg);
+                        lemma_sync_new_request_is_guaranteed(cluster, k, controller_id, s, s_prime, input, msg);
                     }
                 },
                 _ => {
                     assert(s_prime.api_server == s.api_server);
                     assert(s.in_flight().contains(msg));
-                    assert(sync_request_is_guaranteed(msg, s));
-                    lemma_sync_request_guarantee_is_preserved(msg, s, s_prime);
+                    assert(sync_request_is_guaranteed(k, msg, s));
+                    lemma_sync_request_guarantee_is_preserved(k, msg, s, s_prime);
                 },
             }
         }
@@ -283,35 +393,41 @@ pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cl
 }
 
 // The body of widget_sync_guarantee for one message.
-pub open spec fn sync_request_is_guaranteed(msg: Message, s: ClusterState) -> bool {
+pub open spec fn sync_request_is_guaranteed(k: SyncKind, msg: Message, s: ClusterState) -> bool {
     let outer_key = msg.src->Controller_1;
     match msg.content->APIRequest_0 {
-        APIRequest::GetRequest(req) => req.key == inner_key_of(outer_key),
-        APIRequest::CreateRequest(req) => mirror_create_req(req, outer_key)(s),
+        APIRequest::GetRequest(req) => {
+            &&& is_inner_kind(k, req.key.kind)
+            &&& req.key.namespace == outer_key.namespace
+            &&& req.key.name == outer_key.name
+        },
+        APIRequest::CreateRequest(req) => mirror_create_req(k, req, outer_key)(s),
         APIRequest::PatchRequest(req) => {
-            &&& req.kind == InnerWidgetView::kind()
+            &&& is_inner_kind(k, req.kind)
             &&& req.namespace == outer_key.namespace
             &&& req.name == outer_key.name
         },
-        APIRequest::PatchStatusRequest(req) => sync_status_patch_req(req, outer_key),
+        APIRequest::PatchStatusRequest(req) => sync_status_patch_req(k, req, outer_key),
         _ => false,
     }
 }
 
-proof fn lemma_sync_request_guarantee_is_preserved(msg: Message, s: ClusterState, s_prime: ClusterState)
+proof fn lemma_sync_request_guarantee_is_preserved(k: SyncKind, msg: Message, s: ClusterState, s_prime: ClusterState)
     requires
-        sync_request_is_guaranteed(msg, s),
+        sync_request_is_guaranteed(k, msg, s),
         store_only_grows_by_fresh_uids(s, s_prime) || s_prime.api_server == s.api_server,
-    ensures sync_request_is_guaranteed(msg, s_prime),
+    ensures sync_request_is_guaranteed(k, msg, s_prime),
 {
     let outer_key = msg.src->Controller_1;
     match msg.content->APIRequest_0 {
         APIRequest::CreateRequest(req) => {
-            let outer = choose |outer: OuterWidgetView| {
+            let outer = choose |outer: SyncedObjectView| {
+                &&& outer.kind == k.outer_kind
                 &&& outer.object_ref() == outer_key
                 &&& outer.metadata.uid is Some
+                &&& cluster_of(k.selector, outer) is Some
                 &&& req.namespace == outer_key.namespace
-                &&& req.obj == #[trigger] make_inner(outer).marshal()
+                &&& req.obj == #[trigger] marshal(make_inner(k, outer))
                 &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
             };
             if s_prime.api_server == s.api_server {
@@ -319,21 +435,22 @@ proof fn lemma_sync_request_guarantee_is_preserved(msg: Message, s: ClusterState
             } else {
                 lemma_uid_stays_bound_to_key(outer.metadata.uid->0, outer_key, s, s_prime);
             }
-            assert(mirror_create_req(req, outer_key)(s_prime));
+            assert(mirror_create_req(k, req, outer_key)(s_prime));
         },
         _ => {},
     }
 }
 
 proof fn lemma_sync_new_request_is_guaranteed(
-    cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
+    cluster: Cluster, k: SyncKind, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message
 )
     requires
-        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
         cluster.next_step(s, s_prime, Step::ControllerStep(input)),
         Cluster::there_is_the_controller_state(controller_id)(s),
-        sync_triggering_crs_are_bound(controller_id)(s),
+        sync_triggering_crs_are_bound(k, controller_id)(s),
+        sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)(s),
         input.0 == controller_id,
         input.2 is Some,
         s.ongoing_reconciles(controller_id).contains_key(input.2->0),
@@ -342,20 +459,19 @@ proof fn lemma_sync_new_request_is_guaranteed(
         !s.in_flight().contains(msg),
         s_prime.in_flight().contains(msg),
         msg.content is APIRequest,
-    ensures sync_request_is_guaranteed(msg, s_prime),
+    ensures sync_request_is_guaranteed(k, msg, s_prime),
 {
-    OuterWidgetView::marshal_preserves_integrity();
-    InnerWidgetView::marshal_preserves_integrity();
-    OuterWidgetView::marshal_status_preserves_integrity();
+    marshal_status_preserves_integrity();
+    unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
     let cr_key = input.2->0;
     let reconcile = s.ongoing_reconciles(controller_id)[cr_key];
-    let outer = OuterWidgetView::unmarshal(reconcile.triggering_cr)->Ok_0;
-    assert forall |source: WidgetStatusView, outcome: SyncOutcomeView|
+    let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
+    assert forall |source: SyncedStatusView, outcome: SyncOutcomeView|
         written_status_shape(#[trigger] outer_status_for(outer.metadata.generation, source, outcome), outer.metadata.generation) by {
         lemma_outer_status_for_has_written_shape(outer.metadata.generation, source, outcome);
     }
-    assert(outer_snapshot_is_bound(reconcile.triggering_cr, cr_key)(s));
+    assert(outer_snapshot_is_bound(k, reconcile.triggering_cr, cr_key)(s));
     assert(outer.object_ref() == cr_key);
     assert(outer.metadata == reconcile.triggering_cr.metadata);
     assert(s_prime.api_server == s.api_server);
@@ -369,7 +485,7 @@ proof fn lemma_sync_new_request_is_guaranteed(
     } else {
         None
     };
-    let (state_prime, req_o) = reconcile_core(outer, resp_o, state);
+    let (state_prime, req_o) = sync_reconciler::reconcile_core(k, outer, resp_o, state);
     assert(req_o is Some);
     assert(req_o->0 is KRequest);
     let req = req_o->0->KRequest_0;
@@ -377,23 +493,38 @@ proof fn lemma_sync_new_request_is_guaranteed(
     assert(msg.src == HostId::Controller(controller_id, cr_key));
     match state.reconcile_step {
         WidgetSyncStepView::Init => {
-            assert(req == APIRequest::GetRequest(GetRequest { key: inner_key(outer) }));
-            assert(inner_key(outer) == inner_key_of(cr_key));
+            match req {
+                APIRequest::GetRequest(get_req) => {
+                    assert(get_req.key == inner_key(k, outer));
+                    assert(is_inner_kind(k, inner_key(k, outer).kind)) by {
+                        assert(inner_key(k, outer).kind == inner_kind(k, binding_of(k, outer)));
+                    }
+                },
+                APIRequest::PatchStatusRequest(patch_req) => {
+                    lemma_outer_status_patch_is_guaranteed(k, outer, patch_req, cr_key);
+                },
+                _ => { assert(false); },
+            }
         },
         WidgetSyncStepView::AfterGetInner => {
             match req {
                 APIRequest::CreateRequest(create_req) => {
-                    assert(create_req.obj == make_inner(outer).marshal());
+                    assert(create_req.obj == marshal(make_inner(k, outer)));
                     assert(create_req.namespace == cr_key.namespace);
-                    assert(mirror_create_req(create_req, cr_key)(s_prime));
+                    // The reconcile is at AfterGetInner, so its snapshot names a cluster.
+                    assert(sync_step_works_on_the_mirror(state.reconcile_step));
+                    assert(cluster_of(k.selector, outer) is Some);
+                    assert(mirror_create_req(k, create_req, cr_key)(s_prime));
                 },
                 APIRequest::PatchRequest(patch_req) => {
-                    assert(patch_req.kind == InnerWidgetView::kind());
+                    assert(is_inner_kind(k, patch_req.kind)) by {
+                        assert(patch_req.kind == inner_kind(k, binding_of(k, outer)));
+                    }
                     assert(patch_req.namespace == cr_key.namespace);
                     assert(patch_req.name == cr_key.name);
                 },
                 APIRequest::PatchStatusRequest(patch_req) => {
-                    lemma_outer_status_patch_is_guaranteed(outer, patch_req, cr_key);
+                    lemma_outer_status_patch_is_guaranteed(k, outer, patch_req, cr_key);
                 },
                 _ => { assert(false); },
             }
@@ -403,7 +534,7 @@ proof fn lemma_sync_new_request_is_guaranteed(
         WidgetSyncStepView::AfterCreateInner => {
             match req {
                 APIRequest::PatchStatusRequest(patch_req) => {
-                    lemma_outer_status_patch_is_guaranteed(outer, patch_req, cr_key);
+                    lemma_outer_status_patch_is_guaranteed(k, outer, patch_req, cr_key);
                 },
                 _ => { assert(false); },
             }
@@ -411,7 +542,7 @@ proof fn lemma_sync_new_request_is_guaranteed(
         WidgetSyncStepView::AfterPatchInner => {
             match req {
                 APIRequest::PatchStatusRequest(patch_req) => {
-                    lemma_outer_status_patch_is_guaranteed(outer, patch_req, cr_key);
+                    lemma_outer_status_patch_is_guaranteed(k, outer, patch_req, cr_key);
                 },
                 _ => { assert(false); },
             }
@@ -422,24 +553,25 @@ proof fn lemma_sync_new_request_is_guaranteed(
 
 // Every status patch the sync reconciler forms from a bound outer snapshot
 // satisfies sync_status_patch_req.
-proof fn lemma_outer_status_patch_is_guaranteed(outer: OuterWidgetView, req: PatchStatusRequest, outer_key: ObjectRef)
+proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObjectView, req: PatchStatusRequest, outer_key: ObjectRef)
     requires
+        outer.kind == k.outer_kind,
         outer.object_ref() == outer_key,
         outer.metadata.uid is Some,
         outer.metadata.generation is Some,
-        exists |status: WidgetStatusView| req == outer_status_patch(outer, status) && written_status_shape(status, outer.metadata.generation),
-    ensures sync_status_patch_req(req, outer_key),
+        exists |status: SyncedStatusView| req == sync_reconciler::outer_status_patch(k, outer, status) && written_status_shape(status, outer.metadata.generation),
+    ensures sync_status_patch_req(k, req, outer_key),
 {
-    OuterWidgetView::marshal_status_preserves_integrity();
-    let status = choose |status: WidgetStatusView| req == outer_status_patch(outer, status) && written_status_shape(status, outer.metadata.generation);
-    assert(req.status == OuterWidgetView::marshal_status(Some(status)));
-    assert(OuterWidgetView::unmarshal_status(req.status) == Ok::<Option<WidgetStatusView>, UnmarshalError>(Some(status)));
+    marshal_status_preserves_integrity();
+    let status = choose |status: SyncedStatusView| req == sync_reconciler::outer_status_patch(k, outer, status) && written_status_shape(status, outer.metadata.generation);
+    assert(req.status == marshal_status(Some(status)));
+    assert(unmarshal_status(req.status) == Ok::<Option<SyncedStatusView>, UnmarshalError>(Some(status)));
     lemma_conditions_of_written_status(status);
 }
 
 // The shape of every status the sync reconciler writes for a snapshot at
 // `generation`: the three conditions, each stamped with the generation.
-pub open spec fn written_status_shape(status: WidgetStatusView, generation: Option<int>) -> bool {
+pub open spec fn written_status_shape(status: SyncedStatusView, generation: Option<int>) -> bool {
     &&& status.observed_generation == generation
     &&& written_conditions_shape(status)
     &&& status.conditions->0[0].observed_generation == generation
@@ -447,7 +579,7 @@ pub open spec fn written_status_shape(status: WidgetStatusView, generation: Opti
     &&& status.conditions->0[2].observed_generation == generation
 }
 
-pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, source: WidgetStatusView, outcome: SyncOutcomeView)
+pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures written_status_shape(outer_status_for(generation, source, outcome), generation),
 {
 }
@@ -457,57 +589,60 @@ pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, s
 // ---------------------------------------------------------------------------
 
 // The body of widget_janitor_guarantee for one message.
-pub open spec fn janitor_request_is_guaranteed(msg: Message) -> bool {
+pub open spec fn janitor_request_is_guaranteed(k: SyncKind, b: Binding, msg: Message) -> bool {
     let inner_key = msg.src->Controller_1;
     match msg.content->APIRequest_0 {
         APIRequest::ListRequest(req) => {
-            &&& req.kind == OuterWidgetView::kind()
+            &&& req.kind == k.outer_kind
             &&& req.namespace == inner_key.namespace
         },
         APIRequest::DeleteRequest(req) => {
             &&& req.key == inner_key
-            &&& mirror_delete_req(req)
+            &&& mirror_delete_req(k, b, req)
         },
         _ => false,
     }
 }
 
-pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
+pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
-        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
-    ensures spec.entails(always(lift_state(widget_janitor_guarantee(controller_id)))),
+        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
+    ensures spec.entails(always(lift_state(widget_janitor_guarantee(k, b, controller_id)))),
 {
-    let inv = widget_janitor_guarantee(controller_id);
+    let inv = widget_janitor_guarantee(k, b, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_each_object_in_reconcile_has_consistent_key_and_valid_metadata(spec, controller_id);
-    cluster.lemma_always_cr_objects_in_reconcile_satisfy_state_validation::<InnerWidgetView>(spec, controller_id);
+    cluster.lemma_always_synced_objects_in_reconcile_are_valid(spec, inner_kind(k, b), spec_ok, k.selector, controller_id);
+    cluster.lemma_always_objects_in_reconcile_have_kind(spec, inner_kind(k, b), controller_id);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
         &&& Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s)
-        &&& Cluster::cr_objects_in_reconcile_satisfy_state_validation::<InnerWidgetView>(controller_id)(s)
+        &&& cluster.synced_objects_in_reconcile_are_valid(inner_kind(k, b), spec_ok, controller_id)(s)
+        &&& Cluster::objects_in_reconcile_have_kind(inner_kind(k, b), controller_id)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
         lift_action(cluster.next()),
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
         lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)),
-        lift_state(Cluster::cr_objects_in_reconcile_satisfy_state_validation::<InnerWidgetView>(controller_id))
+        lift_state(cluster.synced_objects_in_reconcile_are_valid(inner_kind(k, b), spec_ok, controller_id)),
+        lift_state(Cluster::objects_in_reconcile_have_kind(inner_kind(k, b), controller_id))
     );
     assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
-        InnerWidgetView::marshal_preserves_integrity();
+        unmarshal_of_marshal();
         janitor_reconciler::WidgetJanitorReconcileState::marshal_preserves_integrity();
         let step = choose |step| cluster.next_step(s, s_prime, step);
         assert forall |msg: Message| {
             &&& #[trigger] s_prime.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(controller_id)
-        } implies janitor_request_is_guaranteed(msg) by {
+        } implies janitor_request_is_guaranteed(k, b, msg) by {
             if s.in_flight().contains(msg) {
-                assert(janitor_request_is_guaranteed(msg));
+                assert(janitor_request_is_guaranteed(k, b, msg));
             } else {
                 match step {
                     Step::ControllerStep(input) => {
@@ -517,7 +652,7 @@ pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>,
                         assert(s.ongoing_reconciles(controller_id).contains_key(cr_key));
                         assert(msg == s_prime.ongoing_reconciles(controller_id)[cr_key].pending_req_msg->0);
                         assert(msg.src == HostId::Controller(controller_id, cr_key));
-                        lemma_janitor_new_request_is_guaranteed(cluster, controller_id, s, s_prime, input, msg);
+                        lemma_janitor_new_request_is_guaranteed(cluster, k, b, spec_ok, controller_id, s, s_prime, input, msg);
                     },
                     _ => { assert(false); },
                 }
@@ -528,15 +663,16 @@ pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>,
 }
 
 proof fn lemma_janitor_new_request_is_guaranteed(
-    cluster: Cluster, controller_id: int, s: ClusterState, s_prime: ClusterState,
+    cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, s: ClusterState, s_prime: ClusterState,
     input: (int, Option<Message>, Option<ObjectRef>), msg: Message
 )
     requires
-        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         cluster.next_step(s, s_prime, Step::ControllerStep(input)),
         Cluster::there_is_the_controller_state(controller_id)(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
-        Cluster::cr_objects_in_reconcile_satisfy_state_validation::<InnerWidgetView>(controller_id)(s),
+        cluster.synced_objects_in_reconcile_are_valid(inner_kind(k, b), spec_ok, controller_id)(s),
+        Cluster::objects_in_reconcile_have_kind(inner_kind(k, b), controller_id)(s),
         input.0 == controller_id,
         input.2 is Some,
         s.ongoing_reconciles(controller_id).contains_key(input.2->0),
@@ -545,15 +681,15 @@ proof fn lemma_janitor_new_request_is_guaranteed(
         !s.in_flight().contains(msg),
         s_prime.in_flight().contains(msg),
         msg.content is APIRequest,
-    ensures janitor_request_is_guaranteed(msg),
+    ensures janitor_request_is_guaranteed(k, b, msg),
 {
-    InnerWidgetView::marshal_preserves_integrity();
+    unmarshal_of_marshal();
     janitor_reconciler::WidgetJanitorReconcileState::marshal_preserves_integrity();
     let cr_key = input.2->0;
     let reconcile = s.ongoing_reconciles(controller_id)[cr_key];
-    assert(cr_key.kind == InnerWidgetView::kind());
-    assert(InnerWidgetView::unmarshal(reconcile.triggering_cr) is Ok);
-    let inner = InnerWidgetView::unmarshal(reconcile.triggering_cr)->Ok_0;
+    assert(cr_key.kind == inner_kind(k, b));
+    assert(unmarshal(inner_kind(k, b), reconcile.triggering_cr) is Ok);
+    let inner = unmarshal(inner_kind(k, b), reconcile.triggering_cr)->Ok_0;
     assert(inner.metadata == reconcile.triggering_cr.metadata);
     assert(reconcile.triggering_cr.object_ref() == cr_key);
     assert(inner.object_ref() == cr_key);
@@ -568,7 +704,7 @@ proof fn lemma_janitor_new_request_is_guaranteed(
     } else {
         None
     };
-    let (state_prime, req_o) = janitor_reconciler::reconcile_core(inner, resp_o, state);
+    let (state_prime, req_o) = janitor_reconciler::reconcile_core(k, b, inner, resp_o, state);
     assert(req_o is Some);
     assert(req_o->0 is KRequest);
     let req = req_o->0->KRequest_0;
@@ -577,7 +713,7 @@ proof fn lemma_janitor_new_request_is_guaranteed(
     match state.reconcile_step {
         WidgetJanitorStepView::Init => {
             assert(req == APIRequest::ListRequest(ListRequest {
-                kind: OuterWidgetView::kind(),
+                kind: k.outer_kind,
                 namespace: inner.metadata.namespace->0,
             }));
             assert(inner.metadata.namespace->0 == cr_key.namespace);
@@ -586,6 +722,7 @@ proof fn lemma_janitor_new_request_is_guaranteed(
             match req {
                 APIRequest::DeleteRequest(delete_req) => {
                     assert(delete_req.key == inner.object_ref());
+                    assert(delete_req.key.kind == inner_kind(k, b));
                     assert(delete_req.preconditions == Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)));
                     assert(delete_req.preconditions->0.uid == inner.metadata.uid);
                 },

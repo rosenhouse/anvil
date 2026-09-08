@@ -32,8 +32,13 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   annotation through it), an execution of the one-store model. R1, R2, R3,
   R3s and the janitor's delete soundness (less the clause that no uid the
   primary counter may still issue names the parent) are then stated on
-  two-store executions (`widget_two_cluster_theorem`; `widget_instance_two_cluster_theorem`
-  for the concrete cluster of the pair).
+  two-store executions (`widget_two_cluster_theorem`, for any cluster meeting
+  the refinement's hypotheses, and closed for the cluster of any configuration
+  that runs one binding's janitor, with and without the disturber:
+  `widget_instance_two_cluster_theorem`,
+  `widget_disturbed_two_cluster_theorem`). Reading the theorem for a cluster
+  where the other bindings' janitors also run waits on
+  `widget_other_controller_ok` of each of them, which nothing proves yet.
 
 ## 1. Design
 
@@ -216,16 +221,25 @@ status is, that is when `Synced` is `True`:
 ### 2.1 One store, two kinds, two controllers
 
 Anvil's model has one API server whose store is keyed by `(kind, namespace,
-name)`. The cluster is folded into the *model* kind at the exec boundary: the
-outer copy has kind `widget`, the mirror `widget@inner`. `OuterWidgetView` and
-`InnerWidgetView` are two view types with the same spec and status, differing
-only in `kind()`; on the exec side `OuterWidget` and `InnerWidget` wrap the
-same kube type and are bound to `ClusterId::Primary` and `ClusterId::Remote`.
-Both kinds are installed in one `Cluster`; the two reconcilers are two
-controller ids. `schedule_controller_reconcile` fires for a reconciler's own
-kind, so outer copies schedule the sync reconciler and inner copies the
-janitor. The inner implementation is an ordinary other controller under a rely
-condition.
+name)`. The cluster is folded into the *model* kind at the exec boundary:
+`model_kind(name, cluster)` names the copies of the CRD `name` in `cluster`,
+so the outer copy has kind `model_kind(name, Primary)` and the mirror in the
+binding `b` has kind `model_kind(name, Remote(b))`, written `name@ns/cluster`.
+Objects are `SyncedObjectView`, one view type whose `kind` is data
+(doc/widget_sync_fanout_design.md, section 2.3); a configured kind is a
+`SyncKind { outer_kind, name, selector }` and a binding is a `ClusterRefView`.
+The pair is parameterized by them: `k.outer_kind` is the outer kind and
+`inner_kind(k, b)` the mirror kind of the binding `b`. On the exec side one
+`SyncedObject` wrapper carries the kind it was unmarshalled with, and
+`SyncKindExec` (the registry entry plus the selector) is what ties a runtime
+kind and a cluster to a model kind.
+
+The outer kind and every inner kind are installed in one `Cluster`; the sync
+reconciler is one controller id per kind and the janitor one controller id per
+(kind, binding). `schedule_controller_reconcile` fires for a reconciler's own
+kind, so outer copies schedule the sync reconciler and the mirrors of a
+binding schedule that binding's janitor. The inner implementation is an
+ordinary other controller under a rely condition.
 
 ### 2.2 Two stores, and the refinement into one
 
@@ -236,7 +250,9 @@ and failures are shared. Every step is a step of the one-store model taken on
 one of the two projections. A request is handled by the API server of its
 kind, the garbage collector of a side reads only that side's store, and a
 reconcile is scheduled from the store of the controller's kind. For the Widget
-pair the remote kinds are `{widget@inner}`.
+pair at a binding `b` the remote kinds are `{inner_kind(k, b)}`; the
+refinement is applied one binding at a time
+(doc/widget_sync_fanout_design.md, section 5.2).
 
 `kubernetes_cluster/proof/two_cluster/` proves that every execution of
 `TwoCluster` maps to an execution of `Cluster`. The map unions the two stores
@@ -262,13 +278,31 @@ states R1, R2, R3 and R3s of every execution of the two-store model that runs
 the pair under its fairness assumptions and D3, each property read on the
 store its objects live in. It also states the janitor's delete soundness: a
 janitor Delete in flight names a uid below the uid counter of the store of its
-kind, and no outer copy in the primary store carries the parent uid of a mirror
-the Delete would remove. The first clause is an invariant of the two-store
+kind, and no outer copy of `k` in the primary store *whose selector names the
+binding's cluster* carries the parent uid of a mirror the Delete would remove.
+The counter clause is an invariant of the two-store
 model itself (the janitor deletes by the uid of a stored mirror), not a
 pull-back: a uid a store's counter never reaches relabels to a negative value,
 about which no one-store fact says anything, so the "never will" half of the
 one-store fact, that no uid at or above the counter names the parent, does not
 survive the relabeling.
+
+The cluster conjunct narrows the second clause from every stored outer copy to
+the outer copies of the binding the janitor serves, and it is what the janitor's
+own decision checks (`doc/widget_sync_fanout_design.md`, section 3.3): the
+janitor lists the outer copies of the mirror's namespace and keeps the mirror
+only if one of them has its parent uid *and* selects its cluster. The clause
+therefore says exactly what the janitor looked at before deleting, which is what
+makes it provable at all once a parent may name a cluster other than the
+janitor's. What it costs is the case the CEL immutability rule rules out: if a
+parent could move from cluster `c1` to `c2` while keeping its uid, an outer copy
+carrying that parent uid would still be stored, selecting `c2`, and the statement
+would not forbid `c1`'s janitor from collecting the mirror it left behind. Under
+the rule that case does not arise, because `cluster_of` is preserved across every
+update of an installed object
+(`Cluster::lemma_api_server_step_preserves_cluster_of`); without the rule the
+mirror `c1`'s janitor collects is one no parent points at any more, which is the
+right outcome operationally but is not the clause as stated.
 
 The cluster may run other controllers beside the pair
 (`widget_cluster_with_others`). Each other controller must meet hypotheses 1
@@ -283,10 +317,27 @@ init, next, the pair's fairness and D3 (`widget_relies_hold_of`);
 of the controller with the pair establishes, the controller's guarantee as an
 invariant under `cluster_model`, given that the guarantee implies the relies
 and that the pair's spec provides every fairness the Welder registry declares.
-No fairness of the other controllers is assumed. `widget_instance_two_cluster_theorem` discharges the
-hypotheses for the concrete cluster of the pair, the case with no other
-controller (`widget_pair_cluster`). `widget_disturbed_two_cluster_theorem`
-does the same for the cluster of the pair with the disturber (section 2.4).
+No fairness of the other controllers is assumed. `widget_pair_cluster` names the
+case with no other controller and `lemma_disturber_is_other_controller_ok`
+admits the disturber (section 2.4) as one. `widget_instance_two_cluster_theorem`
+and `widget_disturbed_two_cluster_theorem` close the statement for the clusters
+`composition/widget_sync_reconciler.rs` and
+`composition/widget_disturber_reconciler.rs` build from a configuration, for any
+configuration meeting `sync_kind_ok`, `binding_ok` and a field selector; the demo
+applies them in one line. Those instances are the witness that the hypotheses are
+satisfiable, because the sync reconciler serves a finite set of bindings
+(doc/widget_sync_fanout_design.md, sections 3.2 and 5.2).
+
+Those clusters register one janitor, the janitor of the binding the theorem is
+read for, so what is closed is the statement for a cluster running one binding's
+janitor -- whatever the configuration's other bindings are, and however many
+mirror kinds are installed for them. A cluster in which the other bindings'
+janitors run as well needs `widget_other_controller_ok` of each of them, and
+nothing proves that yet: they are the same reconciler, so their commutation lemma
+is the one the refinement asks for, but their guarantee has not been carried into
+the one-store model as an invariant the way `lemma_relies_hold_of_from_welder`
+does for the disturber. The multi-binding two-store reading waits on it
+(doc/widget_sync_fanout_design.md, section 5.2).
 
 The two-store statement thus quantifies over other controllers as the
 one-store theorems do, with hypotheses 1 to 3 added per controller: composing
@@ -360,7 +411,8 @@ reconcilers.
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt and reports `ForeignObject` with `Stalled=True` |
 | Stale mirror of an earlier incarnation of the outer copy | yes | reported as `StaleMirror` until the janitor removes it (R3); R1's settling argument covers the wait |
 | Error responses to the reconcile's requests | yes | `drop_req` answers any request with any `APIError`; the reconcile reports the mapped reason once and requeues; the report is one more step of the reconcile in the liveness proofs |
-| Two outer clusters feeding one inner cluster; many outer namespaces each with its own inner cluster | no | assumed away for the single pair; the fan-out and parent-cluster identity are follow-up work (issue #15) |
+| Two outer clusters feeding one inner cluster | no | assumed away, and enforced operationally by the claim (`doc/widget_sync_fanout_design.md`, section 1.3) |
+| Many outer namespaces, each with its own inner cluster | yes | a kind and a binding are data in the model, and the theorems are stated for both (`doc/widget_sync_fanout_design.md`, sections 3 and 5) |
 | Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
 | Two replicas of the controller | no | one replica assumed; a second is benign for safety (every write tests uid and generation or carries a uid precondition) but is outside the model, and costs status flapping and `AlreadyExists` noise |
 
@@ -377,13 +429,24 @@ rebuilt inner cluster looks like from the pair's side. Its guarantee
 (`proof/disturber.rs`: every request it has in flight is such a Patch or Delete
 of its own key) implies both reconcilers' relies, and
 `composition/widget_disturber_reconciler.rs` composes it with the pair through
-Welder: `widget_disturbed_core_holds` is the closed statement for a cluster
-running the janitor, the sync reconciler and the disturber.
-`widget_disturbed_two_cluster_theorem` (`proof/two_cluster.rs`) is the same
-statement on two stores, with the disturber acting in the remote store: its
+Welder: `widget_disturbed_core_holds_for` is the closed statement for a cluster
+running the janitor, the sync reconciler and the disturber, for any one-binding
+configuration, and `widget_disturbed_core_holds` is the demo's instance of it.
+`lemma_disturber_is_other_controller_ok` (`proof/two_cluster.rs`) admits it into
+the two-store statement, acting in the remote store: its
 model reads only the namespace, name and spec of its object and tests nothing,
 so it commutes with the relabeling by computation, and its guarantee gives the
 pair's relies in the form the two-store theorem asks for (section 2.2).
+
+The value it writes over the spec, `disturbed_spec`, is a closed definition
+(`model/disturber_reconciler.rs`): it appends one character to the value it
+found, so `disturbed_spec(v) != v` for every `v`
+(`disturbed_spec_changes_the_spec`, proved by length). Nothing the pair proves
+depends on which value it is beyond that; what the inequality rules out is a
+disturber that writes the spec back unchanged, which would be no disturbance at
+all -- the premise of R1 and R2, "no edit of the mirror's spec is in flight",
+would be met by a Patch that changes nothing. The disturber stands for a
+`kubectl edit` and has no exec twin.
 
 The disturber adds no assumption. What it buys is a witness that the relaxed
 sync rely (any Delete, any Patch) is satisfiable by something that deletes and
@@ -396,26 +459,43 @@ expresses.
 ## 3. Specification
 
 The trusted specification is `src/controllers/widget_sync_controller/trusted/`:
-`spec_types.rs` (views and the mirror relation), `rely_guarantee.rs`,
-`liveness_theorem.rs` (R1, R2, R3, R3s, D3), `step.rs` (the reconcilers' step
-types) and `exec_types.rs` (the exec wrappers, bound to `ClusterId::Primary`
-and `ClusterId::Remote`; this binding is the routing the model trusts, section
-2.2). `π` is `WidgetStatusView::mirrored()`.
+`spec_types.rs` (`SyncKind`, `Binding`, `inner_kind`, `inner_key`, the mirror
+relation and the status builders), `rely_guarantee.rs`, `liveness_theorem.rs`
+(R1, R2, R3, R3s, D3), `step.rs` (the reconcilers' step types) and
+`exec_types.rs` (`SyncKindExec` and the outcome types). Every one of them is
+stated for a kind `k` and, where the mirrors are concerned, a binding `b`; the
+routing the model trusts (section 5.3) is `RegistryEntry::api_resource`,
+which names the model kind of a configured kind in a cluster. `π` is
+`SyncedStatusView::mirrored()`.
 
-Trusted beyond the specification, all under `widget_sync_controller/`: the
-`external_body` accessors and constructors of `trusted/exec_types.rs`
-(`well_formed`, `spec`, `status`, `set_spec` and `set_status` of both
-wrappers; `count`, `message`, `observed_generation`, `ready` and
-`observed_count` of the status; `outer_status_for`, which builds the outer
-status, its three conditions included, by hand to match the spec's
-definition), and the three `Marshallable` instances of the
-reconcile states in `model/install.rs`. From the framework the pair relies on
-the wrapper macro's `unmarshal`, `marshal`, `api_resource` and `has_kind`
-postconditions, on `UidToken`, on the `PatchTests` and `Preconditions`
-setters, and on the shim's construction of the JSON `test` operations, which
-is where "patches test uid and generation" becomes real.
+Trusted beyond the specification, under `widget_sync_controller/`: one
+`external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
+which builds the outer status, its three conditions included, by hand to match
+the spec's definition — three `external_body` items in `model/install.rs`, the
+`Marshallable` instances of the reconcile states, whose `marshal` and
+`unmarshal` are the six uninterpreted spec functions the hygiene script pins
+there — and one more uninterpreted spec function, `default_status_rest()` in
+`trusted/spec_types.rs`, the mirrored remainder of a status that was never
+written.
+
+Everything the pair used to trust about its own wrappers is now the shape's,
+and lives in `kubernetes_api_objects`, where anything else generic over kinds
+shares it. That inventory, which
+`tools/check-widget-exec-hygiene.sh` pins file by file:
+
+| File | What is trusted there |
+|---|---|
+| `exec/synced_object.rs` | the wrappers of the shape: `SyncedObject`'s `unmarshal`, `marshal`, `has_kind`, `new` and accessors; `SyncedStatus`'s and `SyncedCondition`'s constructors and accessors, `SyncedStatus::rest` and `RawValue::empty_rest` (whose values satisfy `status_rest_ok`, the precondition of `SyncedStatus::new`); the free `marshal_status` and `cluster_of_dynamic`, the latter being the selector read off a stored object that a `List` response gives; and the two equalities `RawValue::eq` and `SyncedStatus::eq`, whose postconditions are *iffs* — `b == (self@ == other@)` — so each is trusted to decide equality of the view in both directions, which is what makes "the specs differ" and "the status differs" decisions of the reconcilers rather than approximations |
+| `exec/registry.rs` | `RegistryEntry::crd_name` and `RegistryEntry::api_resource`, the routing the model trusts (section 5.3): the model kind of a configured kind in a cluster |
+| `spec/synced_object.rs` | the uninterpreted `unmarshal_status`, `marshal_status`, `spec_field` and `status_rest_ok`, and the axiom `marshal_status_preserves_integrity` (`unmarshal_status(marshal_status(s)) == Ok(s)`). `unmarshal`, `marshal` and their lemmas are proved over these, not assumed |
+| `spec/model_kind.rs` | nothing: `model_kind` and its injectivity are proved. The hypotheses that injectivity rests on — no `@` in a kind name, none in a binding's parts and no `/` in its namespace — are checked on the exec side at boot (`crd_shape::check_kind_name`) and when a Secret is read (`bindings::binding_of_secret`) |
+
+From the framework the pair also relies on `UidToken`, on the `PatchTests` and
+`Preconditions` setters, and on the shim's construction of the JSON `test`
+operations, which is where "patches test uid and generation" becomes real.
 `tools/check-widget-exec-hygiene.sh` fails when an `external_body` appears
-anywhere else under `widget_sync_controller/`.
+anywhere else under `widget_sync_controller/`, and when the counts of the four
+files above change.
 
 ### 3.1 Guarantees
 
@@ -490,7 +570,7 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 | R2 | `∀outer, settled. □(outer_stable(outer) ∧ inner_settled(outer, settled)) ~> □status_synced(outer, settled)` | `proof/liveness/sync_status_proof.rs` |
 | R3 | `∀k, a, u. (□parent_absent(k, a) ∧ mirror_object_is(k, a, u)) ~> object_is_gone(k, u)` | `proof/liveness/janitor_proof.rs` |
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
-| D3 | `∀k, u. inner_terminating_object(k, u) ~> object_is_gone(k, u)` | assumed |
+| D3 | `∀key, u. inner_terminating_object(k, b, key, u) ~> object_is_gone(key, u)`, per binding `b` (the premise fixes `key.kind == inner_kind(k, b)`) | assumed |
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
 (spec constant, not being deleted, same uid), and whoever was editing the
@@ -536,27 +616,41 @@ the remote projection, where the mirror lives.
 Both reconcilers are Welder controller specs
 (`src/controllers/composition/widget_janitor_reconciler.rs`,
 `widget_sync_reconciler.rs`). The janitor's ESR slot carries R3 together with
-the safety fact `□janitor_deletes_are_sound`; its environment rely is D3. The sync
-reconciler's ESR is R1, R2 and R3s; its liveness dependency is the janitor's
-ESR; its partial rely names the janitor; its environment rely is D3.
-`compose_dep` composes the pair, and `widget_core_holds` proves `core` for a
-concrete cluster with the two controllers.
+the safety fact `□janitor_deletes_are_sound`; its environment rely is D3 of its
+own binding, `inner_releases_terminating_objects(k, b)`. The sync reconciler's
+ESR is R1, R2 and R3s; its liveness dependency is the janitor's ESR; its partial
+rely names the janitor; its environment rely is the conjunction of D3 over
+`k.bindings`, `inner_releases_terminating_objects_all(k)`, read at the binding at
+hand.
+`compose_dep` composes the pair, and `widget_core_holds` proves `core` for the
+cluster of any configuration -- the sync controller of a kind `k` and one janitor
+per binding of `k` -- of which `widget_demo_core_holds` is the demo instance
+(doc/widget_sync_fanout_design.md, section 5.1).
 
 Welder proves nothing new here. It gives the closed statement about the
 cluster running both controllers, with the janitor's ESR consumed rather than
 assumed, and a mechanical check that each guarantee implies the other's rely.
 
 The whole-repository composition (`src/controllers/composition/compose_all.rs`)
-adds the pair to the cluster running the VReplicaSet, VDeployment,
-VStatefulSet and RabbitMQ controllers: `core_holds` proves `core` for the
-six-controller cluster. The pair is composed first (`widget_pair_core_holds`),
-so its liveness dependency is discharged internally and the outer step is a
-plain `compose`. The cross compatibilities are kind disjointness: the pair
-only sends requests to the two Widget kinds (for the sync reconciler this
-follows from `mirror_create_req`, whose Create is `make_inner(outer).marshal()`),
-and the other four controllers only send requests to Pods, PVCs,
-VReplicaSets and the RabbitMQ-managed kinds. The one fact Verus does not find
-on its own is that the custom kind names differ (`kind_strings_distinct`).
+adds the Widget configurations to the cluster running the VReplicaSet,
+VDeployment, VStatefulSet and RabbitMQ controllers: `core_holds_for` proves
+`core` for the four controllers beside the sync controller and janitors of one
+configured kind, `framework_and_kinds_core_holds` for the four beside the
+controllers of a finite set of configured kinds, none of whose outer kinds is
+one of the four framework kinds, and `core_holds` is the demo's instance. The Widget
+controllers are composed first (`widget_fanout_core_holds` per kind, then
+`widget_kinds_core_holds` over the kinds), so their liveness dependency is
+discharged internally and the outer step is a plain `compose`. The
+cross compatibilities are kind disjointness: the Widget controllers only send
+requests to the model kinds of their own configuration (for the sync reconciler
+this follows from `mirror_create_req`, whose Create is
+`make_inner(outer).marshal()`), and the other four controllers only send requests
+to Pods, PVCs, VReplicaSets and the RabbitMQ-managed kinds. The facts Verus does
+not find on its own are that the four framework kind names differ and carry no
+`@` (`framework_kind_names_ok`), from which no mirror kind of any configuration
+is a framework kind (`widget_kinds_distinct_from_framework`); that each
+configured outer kind is none of the four is a hypothesis, discharged for the
+demo from its literals.
 
 The concrete instances exercise neither R2's premise nor D3: nothing in them
 writes inner status or finalizers. That is by decision: the inner controller is
@@ -579,16 +673,30 @@ disturber (section 2.4) as a third member with an empty ESR and no rely;
 
 ## 4. Deployment shape
 
-- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`.
-- Outer RBAC: `widgets` get, list, watch; `widgets/status` patch; a Role in
-  `default` for get and update of the crash-mode ConfigMap. Inner: a
-  ClusterRole on `widgets` with get, list, watch, create, patch, delete, bound
-  to a service account whose kubeconfig, with a token file the client
-  re-reads, is mounted from a Secret.
-- Watches: outer `Widget`s (sync primary), inner `Widget`s (janitor primary and
-  sync secondary, mapped by name).
-- Requeue: fixed intervals after `Done` and after an error; the remote client
-  has a short request timeout so a partition surfaces as a failed reconcile.
+The deployment is the one `doc/widget_sync_fanout_design.md` describes in its
+sections 1, 3.4 and 4; `deploy/widget_sync/README.md` has the manifests, the
+flags and the operating procedures. In outline:
+
+- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`,
+  given its kinds as `--kind` flags.
+- Outer RBAC: for each kind its plural (get, list, watch) and its status
+  subresource (patch); `secrets` (get, list, watch) for the binding Secrets;
+  `customresourcedefinitions` (get) for the shape check; `namespaces` (get) on
+  `kube-system` for the outer cluster id; a Role in `default` for the
+  crash-mode ConfigMap. Inner, per binding's credential: each kind's plural
+  (get, list, watch, create, patch, delete) and the claim ConfigMap in
+  `kube-system` (create; get by name).
+- Bindings: one client pair per `<clusterName>-kubeconfig` Secret of type
+  `cluster.x-k8s.io/secret`, validated before use, rebuilt when the Secret's
+  `value` changes, dropped when it goes away.
+- Watches: the outer objects of each kind (sync primary); per binding, the
+  mirrors of each kind (janitor primary, and a same-name trigger stream for
+  the sync controller).
+- Requeue: a fixed 60 seconds after a reconcile that did not fail, and a
+  per-object exponential backoff after one that did (10 seconds doubling to a
+  cap of 5 minutes, reset when that object next succeeds; `build.md`). The
+  remote clients have a short request timeout so a partition surfaces as a
+  failed reconcile.
 - The janitor pause gate: the ConfigMap `widget-sync-janitor` in the
   controller's namespace, shipped empty and mounted read-only at
   `/etc/widget-sync/janitor`; `JANITOR_PAUSE_FILE` points the binary at the
@@ -599,16 +707,18 @@ disturber (section 2.4) as a third member with an empty ESR and no rely;
 Of the operability and hardening work issues #9 and #10 listed, the branch
 has: a usage error instead of a silent exit, a field manager on every write,
 warn-level structured error logs that tell a failed patch `test` apart from
-other errors, token rotation through the token file, a startup access check
-against the inner cluster with a readiness marker, a non-root image, a
+other errors, credential rotation through the binding Secret, an access
+check per binding, a startup probe on the ready file, a non-root image, a
 security context and resources; and, decided later (#17), the error reasons
 in the `Synced` condition and the `Ready` and `Stalled` conditions of
-section 1.4. Declined for this branch, with the reasons on the issues:
-Events, per-object backoff, KEP-1623 condition fields (no
+section 1.4, and the per-object retry backoff of the shim's `error_policy`.
+Declined for this branch, with the reasons on the issues:
+Events, KEP-1623 condition fields (no
 `lastTransitionTime`), a name selector on the janitor's List,
 leader election (one replica with `Recreate` is not at-most-one; the deploy
 README says so), a deletion rate limit and dry-run mode. A cluster identity
-on mirrors moved to the fan-out follow-up (#15).
+on mirrors is not used: the claim object of the fan-out design (its section
+1.3) is what keeps two bindings off one inner cluster.
 
 ## 5. Framework additions
 
@@ -638,9 +748,14 @@ no-op patch.
 
 ### 5.3 Cluster tag and routing
 
-`ApiResource` and `DynamicObject` carry a `ClusterId`; a wrapper type is bound
-to one cluster (`ClusterBound`) and its view kind is the tagged kind. The shim
-holds one client per cluster, routes each request by the tag of its
+`ApiResource` and `DynamicObject` carry a `ClusterId`, `Primary` or
+`Remote(ClusterRef)` with the binding's namespace and cluster name as data;
+a wrapper type is bound to one cluster (`ClusterBound`) and its view kind is
+the tagged kind. The shim holds the primary client and a map from `ClusterRef`
+to a remote cluster's clients (`ClusterClients`), shared by every controller of
+the process and changed while they run; a request to a `ClusterRef` with no
+clients fails with `Timeout`, as one to an unreachable cluster does. It
+routes each request by the tag of its
 `ApiResource`, tags the objects it returns (and stamps list items, which carry
 no type metadata of their own, with the listed resource's), and derives a
 controller's primary watch cluster from its wrapper type. Two controllers can
@@ -700,6 +815,7 @@ two-cluster instantiation included, carry none.
 | Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
 | The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
+| Configured kinds composed with each other | `composition/widget_two_kinds.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
 | Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
 | R1 to R3s on two clusters, for the pair beside admitted other controllers; the instances of the pair and of the pair with the disturber | `widget_sync_controller/proof/two_cluster.rs` |
@@ -724,8 +840,10 @@ hard-coded owner-reference check) that composing against one would need; a
 spec projection for inner-owned fields (no spec field is owned by the inner
 side); and parent-cluster identity on mirrors for the single pair.
 
-Follow-ups after this branch: the fan-out to many outer namespaces, each with
-its own inner cluster, in the Cluster API shape of a management cluster and
-its workload clusters, together with parent identity on mirrors and tenancy
-(#15); and the pass that makes the branch reviewable for an upstream
-contribution (#16).
+The fan-out to many outer namespaces, each with its own inner cluster, in the
+Cluster API shape of a management cluster and its workload clusters (#15), and
+the controller generic over kinds given at boot (#20) are implemented; they are
+designed together in `doc/widget_sync_fanout_design.md`. Two follow-ups remain:
+the (n+1)-store refinement, which would give one theorem about the whole
+(n+1)-cluster system (that document, section 5.3), and the pass that makes the
+branch reviewable for an upstream contribution (#16).

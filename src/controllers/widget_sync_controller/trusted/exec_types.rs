@@ -1,140 +1,101 @@
-// Exec wrappers of the Widget custom resource for the two clusters.
+// Exec twins of what the shape does not provide: the configured kind and the
+// binding a reconciler is instantiated with, the outcome of one reconcile, and
+// the status the sync controller writes on an outer copy.
 //
-// OuterWidget and InnerWidget wrap the same kube type (crds::Widget). They are
-// bound to different clusters (ClusterId::Primary and ClusterId::Remote), so
-// their views have different kinds and the shim routes their requests to the
-// matching cluster. See kubernetes_api_objects::exec::api_resource::ClusterId.
-use crate::kubernetes_api_objects::error::UnmarshalError;
-use crate::kubernetes_api_objects::exec::{api_resource::*, prelude::*};
-use crate::kubernetes_api_objects::spec::resource::*;
+// The objects themselves are exec::synced_object::SyncedObject, whose accessors,
+// unmarshal, marshal, has_kind and api_resource are the trusted boundary of the
+// shape; the registry (exec::registry) is what ties a runtime kind and a cluster
+// to a model kind. What is left here is outer_status_for, which builds the outer
+// status, its three conditions included, by hand to match the spec's definition.
+use crate::kubernetes_api_objects::exec::{api_resource::*, registry::*, synced_object::*};
+use crate::kubernetes_api_objects::spec::api_resource::ClusterIdView;
+use crate::kubernetes_api_objects::spec::model_kind::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::spec_types;
-use kube::Resource;
 use vstd::prelude::*;
+use vstd::seq_lib::*;
 
 verus! {
 
-implement_object_wrapper_type!(
-    OuterWidget,
-    crate::crds::Widget,
-    spec_types::OuterWidgetView
-);
-
-implement_object_wrapper_type!(
-    InnerWidget,
-    crate::crds::Widget,
-    spec_types::InnerWidgetView,
-    ClusterId::Remote
-);
-
-implement_field_wrapper_type!(
-    WidgetSpec,
-    crate::crds::WidgetSpec,
-    spec_types::WidgetSpecView
-);
-
-implement_field_wrapper_type!(
-    WidgetStatus,
-    crate::crds::WidgetStatus,
-    spec_types::WidgetStatusView
-);
-
-implement_field_wrapper_type!(
-    WidgetCondition,
-    crate::crds::WidgetCondition,
-    spec_types::WidgetConditionView
-);
-
-implement_eq!(WidgetSpec);
-implement_eq!(WidgetStatus);
-
+// The set of bindings a Vec of cluster references stands for: the model's
+// `SyncKind::bindings`, read off the snapshot the reconciler was built with.
+pub open spec fn binding_set(v: Seq<ClusterRef>) -> Set<spec_types::Binding> {
+    v.map_values(|c: ClusterRef| c@).to_set()
 }
 
-macro_rules! implement_widget_object_methods {
-    ($t:ident) => {
-        verus! {
-
-        impl $t {
-            #[verifier(external_body)]
-            pub fn well_formed(&self) -> (b: bool)
-                ensures b == self@.well_formed(),
-            {
-                self.metadata().well_formed_for_namespaced()
-                && self.state_validation()
-            }
-
-            #[verifier(external_body)]
-            pub fn spec(&self) -> (spec: WidgetSpec)
-                ensures spec@ == self@.spec,
-            {
-                WidgetSpec { inner: self.inner.spec.clone() }
-            }
-
-            #[verifier(external_body)]
-            pub fn status(&self) -> (status: Option<WidgetStatus>)
-                ensures
-                    status is Some == self@.status is Some,
-                    status is Some ==> status->0@ == self@.status->0,
-            {
-                match &self.inner.status {
-                    Some(s) => Some(WidgetStatus { inner: s.clone() }),
-                    None => None,
-                }
-            }
-
-            #[verifier(external_body)]
-            pub fn set_spec(&mut self, spec: WidgetSpec)
-                ensures final(self)@ == old(self)@.with_spec(spec@),
-            {
-                self.inner.spec = spec.into_kube();
-            }
-
-            #[verifier(external_body)]
-            pub fn set_status(&mut self, status: WidgetStatus)
-                ensures final(self)@ == old(self)@.with_status(status@),
-            {
-                self.inner.status = Some(status.into_kube());
-            }
-
-            pub fn state_validation(&self) -> (res: bool)
-                ensures res == self@.state_validation(),
-            {
-                self.spec().count() >= 0
-            }
-        }
-
-        }
-    };
+// A configured kind, exec side: the registry entry that names it, the cluster
+// selector of its objects, and the bindings this reconciler knows -- the snapshot
+// of the process's bound clusters the runner built it with, one per reconcile
+// (doc/widget_sync_fanout_design.md, section 3.2). Its view is the model's
+// SyncKind, whose outer kind is the primary model kind of the entry (so
+// sync_kind_ok holds of it as soon as the CRD name is free of '@', which a DNS
+// name is) and whose binding set is the snapshot's.
+pub struct SyncKindExec {
+    pub entry: RegistryEntry,
+    pub selector: ClusterSelectorExec,
+    pub bindings: Vec<ClusterRef>,
 }
 
-implement_widget_object_methods!(OuterWidget);
-implement_widget_object_methods!(InnerWidget);
+impl View for SyncKindExec {
+    type V = spec_types::SyncKind;
 
-verus! {
+    open spec fn view(&self) -> spec_types::SyncKind {
+        spec_types::SyncKind {
+            outer_kind: model_kind(self.entry@, ClusterIdView::Primary),
+            name: self.entry@,
+            selector: self.selector@,
+            bindings: binding_set(self.bindings@),
+        }
+    }
+}
+
+impl SyncKindExec {
+    // Whether `b` is one of the bindings this reconciler knows: the exec twin of
+    // `k.bindings.contains(b)`, a scan of the snapshot.
+    pub fn knows(&self, b: &ClusterRef) -> (res: bool)
+        ensures res == self@.bindings.contains(b@),
+    {
+        broadcast use Seq::to_set_ensures;
+        let ghost views = self.bindings@.map_values(|c: ClusterRef| c@);
+        let mut i: usize = 0;
+        while i < self.bindings.len()
+            invariant
+                0 <= i <= self.bindings.len(),
+                views == self.bindings@.map_values(|c: ClusterRef| c@),
+                views.len() == self.bindings.len(),
+                forall |j: int| 0 <= j < i ==> #[trigger] views[j] != b@,
+            decreases self.bindings.len() - i,
+        {
+            if self.bindings[i].eq(b) {
+                assert(views[i as int] == b@);
+                assert(views.contains(b@));
+                return true;
+            }
+            i = i + 1;
+        }
+        assert(!views.contains(b@));
+        false
+    }
+
+    // The ApiResource of the outer copies of this kind.
+    pub fn outer_api_resource(&self) -> (res: ApiResource)
+        ensures res@.kind == self@.outer_kind,
+    {
+        self.entry.api_resource(&ClusterId::Primary)
+    }
+
+    // The ApiResource of the mirrors of this kind in the binding `b`.
+    pub fn inner_api_resource(&self, b: &ClusterRef) -> (res: ApiResource)
+        ensures res@.kind == spec_types::inner_kind(self@, b@),
+    {
+        self.entry.api_resource(&ClusterId::Remote(b.clone()))
+    }
+}
 
 // The view of an exec Option<i64> as the model's Option<int>; used to relate
 // metadata.generation and status.observedGeneration values across the boundary.
 pub open spec fn opt_i64_view(g: Option<i64>) -> Option<int> {
-    match g {
-        Some(x) => Some(x as int),
-        None => None,
-    }
-}
-
-impl WidgetSpec {
-    #[verifier(external_body)]
-    pub fn count(&self) -> (count: i32)
-        ensures count as int == self@.count,
-    {
-        self.inner.count
-    }
-
-    #[verifier(external_body)]
-    pub fn message(&self) -> (message: Option<String>)
-        ensures self@.message == message.deep_view(),
-    {
-        self.inner.message.clone()
-    }
+    opt_i64_as_int(g)
 }
 
 // The exec twin of spec_types::FailureReasonView.
@@ -234,109 +195,57 @@ impl SyncOutcome {
     }
 }
 
-impl WidgetStatus {
-    #[verifier(external_body)]
-    pub fn observed_generation(&self) -> (observed_generation: Option<i64>)
-        ensures
-            observed_generation is Some == self@.observed_generation is Some,
-            observed_generation is Some ==> observed_generation->0 as int == self@.observed_generation->0,
-    {
-        self.inner.observed_generation
-    }
-
-    #[verifier(external_body)]
-    pub fn ready(&self) -> (ready: Option<bool>)
-        ensures ready == self@.ready,
-    {
-        self.inner.ready
-    }
-
-    #[verifier(external_body)]
-    pub fn observed_count(&self) -> (observed_count: Option<i32>)
-        ensures
-            observed_count is Some == self@.observed_count is Some,
-            observed_count is Some ==> observed_count->0 as int == self@.observed_count->0,
-    {
-        self.inner.observed_count
-    }
-
-    // The status the sync controller writes on the outer copy, built by hand to
-    // match spec_types::outer_status_for: the first inner condition of each type is
-    // the one the spec's condition() names.
-    #[verifier(external_body)]
-    pub fn outer_status_for(outer_generation: Option<i64>, source: &WidgetStatus, outcome: &SyncOutcome) -> (status: WidgetStatus)
-        ensures status@ == spec_types::outer_status_for(
-            opt_i64_view(outer_generation),
-            source@, outcome@,
-        ),
-    {
-        let synced = outcome.synced();
-        let reason = outcome.reason();
-        let permanent = outcome.permanent();
-        let find = |type_: &str| -> Option<crate::crds::WidgetCondition> {
-            source.inner.conditions.as_ref().and_then(|conditions| conditions.iter().find(|c| c.type_ == type_).cloned())
-        };
-        let inner_ready = find("Ready");
-        let inner_stalled = find("Stalled");
-        let condition_status = |b: bool| if b { "True".to_string() } else { "False".to_string() };
-        let make = |type_: &str, status: String, reason: Option<String>, message: Option<String>| crate::crds::WidgetCondition {
-            type_: type_.to_string(),
-            status: status,
-            observed_generation: outer_generation,
-            reason: reason,
-            message: message,
-        };
-        let synced_condition = make("Synced", condition_status(synced), Some(reason.clone()), None);
-        let ready_condition = if !synced {
-            make("Ready", "False".to_string(), Some("NotSynced".to_string()), None)
-        } else if inner_stalled.as_ref().map_or(false, |c| c.status == "True") {
-            let c = inner_stalled.as_ref().unwrap();
-            make("Ready", "False".to_string(), c.reason.clone(), c.message.clone())
-        } else if let Some(c) = inner_ready.as_ref() {
-            make("Ready", condition_status(c.status == "True"), c.reason.clone(), c.message.clone())
-        } else {
-            make("Ready", "True".to_string(), Some("Synced".to_string()), None)
-        };
-        let stalled_condition = if permanent {
-            make("Stalled", "True".to_string(), Some(reason.clone()), None)
-        } else if synced && inner_stalled.is_some() {
-            let c = inner_stalled.as_ref().unwrap();
-            make("Stalled", condition_status(c.status == "True"), c.reason.clone(), c.message.clone())
-        } else {
-            make("Stalled", "False".to_string(), Some(reason.clone()), None)
-        };
-        WidgetStatus { inner: crate::crds::WidgetStatus {
-            observed_generation: outer_generation,
-            ready: source.inner.ready,
-            observed_count: source.inner.observed_count,
-            conditions: Some(vec![synced_condition, ready_condition, stalled_condition]),
-        } }
-    }
+// The status the sync controller writes on the outer copy, built by hand to
+// match spec_types::outer_status_for: the mirrored remainder of `source`, and the
+// three conditions, whose inner Ready and Stalled are the first of each type,
+// which is the one the spec's condition() names. `source` absent is the status
+// the outer copy has never carried, whose remainder is default_status_rest().
+#[verifier(external_body)]
+pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedStatus>, outcome: &SyncOutcome) -> (status: SyncedStatus)
+    ensures status@ == spec_types::outer_status_for(
+        opt_i64_view(outer_generation),
+        spec_types::status_or_default(source.deep_view()),
+        outcome@,
+    ),
+{
+    let synced = outcome.synced();
+    let reason = outcome.reason();
+    let permanent = outcome.permanent();
+    let conditions: Vec<SyncedCondition> = source.as_ref().and_then(|s| s.conditions()).unwrap_or_default();
+    let find = |type_: &str| -> Option<SyncedCondition> {
+        conditions.iter().find(|c| c.type_() == type_).cloned()
+    };
+    let inner_ready = find("Ready");
+    let inner_stalled = find("Stalled");
+    let condition_status = |b: bool| if b { "True".to_string() } else { "False".to_string() };
+    let make = |type_: &str, status: String, reason: Option<String>, message: Option<String>|
+        SyncedCondition::new(type_.to_string(), status, outer_generation, reason, message);
+    let synced_condition = make("Synced", condition_status(synced), Some(reason.clone()), None);
+    let ready_condition = if !synced {
+        make("Ready", "False".to_string(), Some("NotSynced".to_string()), None)
+    } else if inner_stalled.as_ref().map_or(false, |c| c.status() == "True") {
+        let c = inner_stalled.as_ref().unwrap();
+        make("Ready", "False".to_string(), c.reason(), c.message())
+    } else if let Some(c) = inner_ready.as_ref() {
+        make("Ready", condition_status(c.status() == "True"), c.reason(), c.message())
+    } else {
+        make("Ready", "True".to_string(), Some("Synced".to_string()), None)
+    };
+    let stalled_condition = if permanent {
+        make("Stalled", "True".to_string(), Some(reason.clone()), None)
+    } else if synced && inner_stalled.is_some() {
+        let c = inner_stalled.as_ref().unwrap();
+        make("Stalled", condition_status(c.status() == "True"), c.reason(), c.message())
+    } else {
+        make("Stalled", "False".to_string(), Some(reason.clone()), None)
+    };
+    let rest = match source {
+        Some(s) => s.rest(),
+        // The mirrored remainder of a status that was never written: the model's
+        // default_status_rest().
+        None => RawValue::from_json(serde_json::Value::Object(serde_json::Map::new())),
+    };
+    SyncedStatus::new(outer_generation, Some(vec![synced_condition, ready_condition, stalled_condition]), rest)
 }
 
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kubernetes_api_objects::exec::dynamic::DynamicObject;
-
-    fn widget(kind: Option<&str>, cluster: ClusterId) -> DynamicObject {
-        let mut obj = kube::api::DynamicObject::new("w", &kube::api::ApiResource::erase::<crate::crds::Widget>(&()));
-        obj.types = kind.map(|k| kube::api::TypeMeta { api_version: "anvil.dev/v1".to_string(), kind: k.to_string() });
-        DynamicObject::from_kube_in(obj, cluster)
-    }
-
-    // The kind test follows the cluster tag and the kube kind, never the model
-    // kind string, and does not panic on a list item without type metadata.
-    #[test]
-    fn has_kind_follows_tag_and_kube_kind() {
-        assert!(OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
-        assert!(!OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
-        assert!(InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
-        assert!(!InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
-        assert!(!OuterWidget::has_kind(&widget(Some("widget"), ClusterId::Primary)));
-        assert!(!OuterWidget::has_kind(&widget(Some("Pod"), ClusterId::Primary)));
-        assert!(!OuterWidget::has_kind(&widget(None, ClusterId::Primary)));
-    }
 }

@@ -8,7 +8,7 @@ use crate::kubernetes_cluster::spec::{
     message::*,
 };
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler::*, sync_reconciler::*},
+    model::{install::*, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState},
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
 };
 use verus_temporal_logic::{defs::*, rules::*};
@@ -18,17 +18,17 @@ verus! {
 
 // The rely conditions of every other controller, as one state predicate each.
 
-pub open spec fn lifted_sync_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
+pub open spec fn lifted_sync_rely_condition(k: SyncKind, cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
     lift_state(|s| {
         forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
-            ==> #[trigger] widget_sync_rely(other_id)(s)
+            ==> #[trigger] widget_sync_rely(k, other_id)(s)
     })
 }
 
-pub open spec fn lifted_janitor_rely_condition(cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
+pub open spec fn lifted_janitor_rely_condition(k: SyncKind, cluster: Cluster, controller_id: int) -> TempPred<ClusterState> {
     lift_state(|s| {
         forall |other_id| cluster.controller_models.remove(controller_id).contains_key(other_id)
-            ==> #[trigger] widget_janitor_rely(other_id)(s)
+            ==> #[trigger] widget_janitor_rely(k, other_id)(s)
     })
 }
 
@@ -41,6 +41,23 @@ pub open spec fn at_sync_step_closure(step: WidgetSyncStepView) -> spec_fn(Recon
 pub open spec fn sync_step_is_terminal() -> spec_fn(ReconcileLocalState) -> bool {
     |s: ReconcileLocalState| {
         let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
+    }
+}
+
+// Every step the sync reconciler can be at right after its first transition: the
+// Get of the mirror; when the outer copy names no inner cluster, the status write
+// that reports the rejection (or Done, when that status is already there); and,
+// when it names a binding the reconciler does not serve, the status write that
+// reports the inner cluster as unreachable (or Error, when that status is already
+// there).
+pub open spec fn sync_step_after_init() -> spec_fn(ReconcileLocalState) -> bool {
+    |s: ReconcileLocalState| {
+        let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::AfterGetInner
+        ||| step == WidgetSyncStepView::AfterPatchOuterStatus
+        ||| step == WidgetSyncStepView::AfterReportError
         ||| step == WidgetSyncStepView::Done
         ||| step == WidgetSyncStepView::Error
     }

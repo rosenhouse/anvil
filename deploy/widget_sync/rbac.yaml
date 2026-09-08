@@ -1,7 +1,21 @@
 # RBAC for the widget sync controller in the outer (primary) cluster.
-# The controller reads Widgets and writes only their status subresource here;
-# its access to the inner cluster comes from the kubeconfig in the
-# widget-sync-remote-kubeconfig Secret (see rbac_inner.yaml).
+# One pair of rules per configured kind (deploy_local.yaml's --kind flags):
+# `<plural>` get, list, watch and `<plural>/status` patch, as
+# doc/widget_sync_fanout_design.md, section 4, prescribes. The demo configures
+# Widget and Gadget.
+# The controller reads them and writes only their status subresource here; its
+# access to an inner cluster comes from the kubeconfig in that binding's Secret
+# `<clusterName>-kubeconfig` (see rbac_inner.yaml for what the credential in it
+# must be allowed to do).
+# Beyond the configured kinds it reads:
+#   - secrets, in every namespace: the binding manager watches the ones named
+#     `*-kubeconfig` and builds a binding's clients from them
+#     (doc/widget_sync_fanout_design.md, sections 1.2 and 4). This is a wide
+#     grant, and it is the point: bindings live in any namespace.
+#   - customresourcedefinitions, get: the boot shape check of each configured
+#     kind (section 2.2);
+#   - namespaces, get on kube-system only: its uid is the outer cluster id the
+#     claim of each inner cluster records (section 1.3).
 # The Role in namespace default at the end is what the crash-testing mode
 # (`controller crash`, src/shim_layer/fault_injection.rs) needs: it gets and
 # replaces the one ConfigMap default/fault-injection-config through the primary
@@ -29,10 +43,12 @@ metadata:
     app.kubernetes.io/name: widget-sync-controller
   name: widget-sync-controller-role
 rules:
+  # One pair of rules per configured kind.
   - apiGroups:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list
@@ -41,8 +57,36 @@ rules:
       - anvil.dev
     resources:
       - widgets/status
+      - gadgets/status
     verbs:
       - patch
+  # The bindings: the manager watches every namespace for `*-kubeconfig`.
+  - apiGroups:
+      - ""
+    resources:
+      - secrets
+    verbs:
+      - get
+      - list
+      - watch
+  # The boot shape check reads each configured kind's CRD
+  # (doc/widget_sync_fanout_design.md, sections 2.2 and 4). Read-only, and only
+  # get: the CRDs are fetched by name, never listed or watched.
+  - apiGroups:
+      - apiextensions.k8s.io
+    resources:
+      - customresourcedefinitions
+    verbs:
+      - get
+  # The outer cluster id: the uid of this one namespace, nothing else.
+  - apiGroups:
+      - ""
+    resources:
+      - namespaces
+    resourceNames:
+      - kube-system
+    verbs:
+      - get
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

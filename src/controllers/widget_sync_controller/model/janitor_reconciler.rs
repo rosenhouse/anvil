@@ -1,42 +1,29 @@
-// Model of the janitor reconciler: reconciles a mirror (inner Widget) by deleting
-// it once its parent no longer exists in the outer cluster.
+// Model of the janitor reconciler of a kind `k` and a binding `b`: reconciles a
+// mirror in `b`'s inner cluster by deleting it once its parent no longer exists in
+// the outer cluster. One controller per (kind, binding)
+// (doc/widget_sync_fanout_design.md, section 3.3).
 //
 // Absence of the parent is established only by a successful List of the outer
 // copies in the mirror's namespace that contains no object with the mirror's
-// parent uid. A Get answering NotFound is never taken as absence: the model's
-// fault injection can produce that answer for an existing object, and in reality
-// a CRD reinstall window or a misrouted kubeconfig answers NotFound for every key.
+// parent uid whose selector names `b`. A Get answering NotFound is never taken as
+// absence: the model's fault injection can produce that answer for an existing
+// object, and in reality a CRD reinstall window or a misrouted kubeconfig answers
+// NotFound for every key. The cluster conjunct is what keeps the janitor of one
+// binding from collecting the mirror of a parent that moved to another; under the
+// selector field's immutability rule it is redundant, and the proofs do not
+// depend on that rule.
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::reconciler::spec::{io::*, reconciler::*};
+use crate::kubernetes_api_objects::spec::synced_object::*;
+use crate::reconciler::spec::io::*;
 use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::{spec_types::*, step::*};
 use vstd::prelude::*;
 
 verus! {
 
-pub struct WidgetJanitorReconciler {}
-
 pub struct WidgetJanitorReconcileState {
     pub reconcile_step: WidgetJanitorStepView,
-}
-
-impl Reconciler<WidgetJanitorReconcileState, InnerWidgetView, VoidEReqView, VoidERespView> for WidgetJanitorReconciler {
-    open spec fn reconcile_init_state() -> WidgetJanitorReconcileState {
-        reconcile_init_state()
-    }
-
-    open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetJanitorReconcileState) -> (WidgetJanitorReconcileState, Option<RequestView<VoidEReqView>>) {
-        reconcile_core(inner, resp_o, state)
-    }
-
-    open spec fn reconcile_done(state: WidgetJanitorReconcileState) -> bool {
-        reconcile_done(state)
-    }
-
-    open spec fn reconcile_error(state: WidgetJanitorReconcileState) -> bool {
-        reconcile_error(state)
-    }
 }
 
 pub open spec fn reconcile_init_state() -> WidgetJanitorReconcileState {
@@ -58,16 +45,18 @@ pub open spec fn at_step(step: WidgetJanitorStepView) -> WidgetJanitorReconcileS
 }
 
 // The listed outer copies contain the mirror's parent: some outer copy's uid, as
-// a string, equals the parent-uid annotation. Uids are compared for equality
-// only, and only outer copies are looked at.
-pub open spec fn parent_listed(objs: Seq<DynamicObjectView>, parent_uid: StringView) -> bool {
+// a string, equals the parent-uid annotation, and that copy's selector names this
+// binding's inner cluster. Uids are compared for equality only, and only outer
+// copies are looked at.
+pub open spec fn parent_listed(k: SyncKind, b: Binding, objs: Seq<DynamicObjectView>, parent_uid: StringView) -> bool {
     exists |i: int| 0 <= i < objs.len()
-        && (#[trigger] objs[i]).kind == OuterWidgetView::kind()
+        && (#[trigger] objs[i]).kind == k.outer_kind
         && objs[i].metadata.uid is Some
         && int_to_string_view(objs[i].metadata.uid->0) == parent_uid
+        && cluster_of_dynamic(k.selector, objs[i]) == Some(b.name)
 }
 
-pub open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetJanitorReconcileState) -> (WidgetJanitorReconcileState, Option<RequestView<VoidEReqView>>) {
+pub open spec fn reconcile_core(k: SyncKind, b: Binding, inner: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetJanitorReconcileState) -> (WidgetJanitorReconcileState, Option<RequestView<VoidEReqView>>) {
     let error = (at_step(WidgetJanitorStepView::Error), None::<RequestView<VoidEReqView>>);
     let done = (at_step(WidgetJanitorStepView::Done), None::<RequestView<VoidEReqView>>);
     match state.reconcile_step {
@@ -76,7 +65,7 @@ pub open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseV
                 done
             } else {
                 let req = APIRequest::ListRequest(ListRequest {
-                    kind: OuterWidgetView::kind(),
+                    kind: k.outer_kind,
                     namespace: inner.metadata.namespace->0,
                 });
                 (at_step(WidgetJanitorStepView::AfterListOuter), Some(RequestView::KRequest(req)))
@@ -92,7 +81,7 @@ pub open spec fn reconcile_core(inner: InnerWidgetView, resp_o: Option<ResponseV
                 error
             } else {
                 let objs = extract_some_k_list_resp_view(resp_o)->Ok_0;
-                if parent_listed(objs, parent_uid_annotation(inner)) {
+                if parent_listed(k, b, objs, parent_uid_annotation(inner)) {
                     done
                 } else {
                     let req = APIRequest::DeleteRequest(DeleteRequest {

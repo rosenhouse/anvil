@@ -4,6 +4,7 @@
 // chain of the cluster's generic step lemmas.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::spec::prelude::*;
+use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::proof::temporal_rules::*;
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
@@ -12,7 +13,7 @@ use crate::kubernetes_cluster::spec::{
     message::*,
 };
 use crate::widget_sync_controller::{
-    model::{install::*, janitor_reconciler::*, sync_reconciler::*},
+    model::{install::*, janitor_reconciler, sync_reconciler, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState},
     proof::predicate::*,
     trusted::{liveness_theorem::*, spec_types::*, step::*},
 };
@@ -25,12 +26,13 @@ verus! {
 // The sync reconciler.
 // ---------------------------------------------------------------------------
 
-pub proof fn sync_reconcile_eventually_terminates(
+pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int
 )
     requires
+        k.bindings.contains(b),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
         spec.entails(tla_forall(|i: (Option<Message>, Option<ObjectRef>)| cluster.controller_next().weak_fairness((controller_id, i.0, i.1)))),
         spec.entails(tla_forall(|i| cluster.api_server_next().weak_fairness(i))),
         spec.entails(tla_forall(|i| cluster.external_next().weak_fairness((controller_id, i)))),
@@ -39,7 +41,7 @@ pub proof fn sync_reconcile_eventually_terminates(
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
         spec.entails(always(lift_state(Cluster::req_drop_disabled()))),
         spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_unique_id()))),
-        spec.entails(always(lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<OuterWidgetView>(controller_id)))),
+        spec.entails(always(lift_state(Cluster::objects_in_reconcile_have_kind(k.outer_kind, controller_id)))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner)))))),
@@ -59,13 +61,13 @@ pub proof fn sync_reconcile_eventually_terminates(
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))), key);
-        if key.kind == OuterWidgetView::kind() {
-            sync_reconcile_eventually_terminates_on_key(spec, cluster, controller_id, key);
+        if key.kind == k.outer_kind {
+            sync_reconcile_eventually_terminates_on_key(k, b, spec, cluster, controller_id, key);
         } else {
             // The sync reconciler only ever reconciles keys of its own kind.
             always_weaken(
                 spec,
-                lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<OuterWidgetView>(controller_id)),
+                lift_state(Cluster::objects_in_reconcile_have_kind(k.outer_kind, controller_id)),
                 lift_state(Cluster::reconcile_idle(controller_id, key))
             );
             always_to_true_leads_to(spec, lift_state(Cluster::reconcile_idle(controller_id, key)));
@@ -74,13 +76,14 @@ pub proof fn sync_reconcile_eventually_terminates(
     spec_entails_tla_forall(spec, post);
 }
 
-pub proof fn sync_reconcile_eventually_terminates_on_key(
+pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef
 )
     requires
-        key.kind == OuterWidgetView::kind(),
+        k.bindings.contains(b),
+        key.kind == k.outer_kind,
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
         spec.entails(tla_forall(|i: (Option<Message>, Option<ObjectRef>)| cluster.controller_next().weak_fairness((controller_id, i.0, i.1)))),
         spec.entails(tla_forall(|i| cluster.api_server_next().weak_fairness(i))),
         spec.entails(tla_forall(|i| cluster.external_next().weak_fairness((controller_id, i)))),
@@ -101,7 +104,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
 {
     let idle = lift_state(Cluster::reconcile_idle(controller_id, key));
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    OuterWidgetView::marshal_preserves_integrity();
+    unmarshal_of_marshal();
 
     // Done and Error end the reconcile.
     cluster.lemma_reconcile_done_leads_to_reconcile_idle(spec, controller_id, key);
@@ -150,12 +153,23 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
     );
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner), sync_step_after_get_inner());
 
-    // Init sends the Get.
-    cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init), at_sync_step_closure(WidgetSyncStepView::AfterGetInner));
+    // Init sends the Get; for an outer copy that names no inner cluster it writes
+    // the rejection into the status and ends; for one whose binding this
+    // reconciler does not serve it writes InnerUnreachable and ends in Error.
+    or_leads_to_combine_and_equality!(
+        spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_init())),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
+        idle
+    );
+    cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init), sync_step_after_init());
 
     // Every state is idle or at one of the steps.
     entails_implies_leads_to(spec, idle, idle);
-    lemma_true_equal_to_sync_idle_or_at_any_step(controller_id, key);
+    lemma_true_equal_to_sync_idle_or_at_any_step(k, b, controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),
         idle,
@@ -171,7 +185,9 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(
     );
 }
 
-proof fn lemma_true_equal_to_sync_idle_or_at_any_step(controller_id: int, key: ObjectRef)
+proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef)
+    requires
+        k.bindings.contains(b),
     ensures
         true_pred::<ClusterState>() == lift_state(Cluster::reconcile_idle(controller_id, key))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Init)))
@@ -215,12 +231,13 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(controller_id: int, key: O
 // The janitor reconciler.
 // ---------------------------------------------------------------------------
 
-pub proof fn janitor_reconcile_eventually_terminates(
+pub proof fn janitor_reconcile_eventually_terminates(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int
 )
     requires
+        k.bindings.contains(b),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(tla_forall(|i: (Option<Message>, Option<ObjectRef>)| cluster.controller_next().weak_fairness((controller_id, i.0, i.1)))),
         spec.entails(tla_forall(|i| cluster.api_server_next().weak_fairness(i))),
         spec.entails(tla_forall(|i| cluster.external_next().weak_fairness((controller_id, i)))),
@@ -229,7 +246,7 @@ pub proof fn janitor_reconcile_eventually_terminates(
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
         spec.entails(always(lift_state(Cluster::req_drop_disabled()))),
         spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_unique_id()))),
-        spec.entails(always(lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<InnerWidgetView>(controller_id)))),
+        spec.entails(always(lift_state(Cluster::objects_in_reconcile_have_kind(inner_kind(k, b), controller_id)))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::Init)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::AfterListOuter)))))),
@@ -243,12 +260,12 @@ pub proof fn janitor_reconcile_eventually_terminates(
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::Init))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::AfterListOuter))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::AfterDeleteInner))), key);
-        if key.kind == InnerWidgetView::kind() {
-            janitor_reconcile_eventually_terminates_on_key(spec, cluster, controller_id, key);
+        if key.kind == inner_kind(k, b) {
+            janitor_reconcile_eventually_terminates_on_key(k, b, spec, cluster, controller_id, key);
         } else {
             always_weaken(
                 spec,
-                lift_state(Cluster::cr_objects_in_reconcile_have_correct_kind::<InnerWidgetView>(controller_id)),
+                lift_state(Cluster::objects_in_reconcile_have_kind(inner_kind(k, b), controller_id)),
                 lift_state(Cluster::reconcile_idle(controller_id, key))
             );
             always_to_true_leads_to(spec, lift_state(Cluster::reconcile_idle(controller_id, key)));
@@ -257,13 +274,14 @@ pub proof fn janitor_reconcile_eventually_terminates(
     spec_entails_tla_forall(spec, post);
 }
 
-pub proof fn janitor_reconcile_eventually_terminates_on_key(
+pub proof fn janitor_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef
 )
     requires
-        key.kind == InnerWidgetView::kind(),
+        k.bindings.contains(b),
+        key.kind == inner_kind(k, b),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model()),
+        cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(tla_forall(|i: (Option<Message>, Option<ObjectRef>)| cluster.controller_next().weak_fairness((controller_id, i.0, i.1)))),
         spec.entails(tla_forall(|i| cluster.api_server_next().weak_fairness(i))),
         spec.entails(tla_forall(|i| cluster.external_next().weak_fairness((controller_id, i)))),
@@ -281,7 +299,7 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(
 {
     let idle = lift_state(Cluster::reconcile_idle(controller_id, key));
     WidgetJanitorReconcileState::marshal_preserves_integrity();
-    InnerWidgetView::marshal_preserves_integrity();
+    unmarshal_of_marshal();
 
     cluster.lemma_reconcile_done_leads_to_reconcile_idle(spec, controller_id, key);
     cluster.lemma_reconcile_error_leads_to_reconcile_idle(spec, controller_id, key);
@@ -321,7 +339,7 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(
     cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::Init), janitor_step_after_init());
 
     entails_implies_leads_to(spec, idle, idle);
-    lemma_true_equal_to_janitor_idle_or_at_any_step(controller_id, key);
+    lemma_true_equal_to_janitor_idle_or_at_any_step(k, b, controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),
         idle,
@@ -334,7 +352,9 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(
     );
 }
 
-proof fn lemma_true_equal_to_janitor_idle_or_at_any_step(controller_id: int, key: ObjectRef)
+proof fn lemma_true_equal_to_janitor_idle_or_at_any_step(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef)
+    requires
+        k.bindings.contains(b),
     ensures
         true_pred::<ClusterState>() == lift_state(Cluster::reconcile_idle(controller_id, key))
             .or(lift_state(at_janitor_step(controller_id, key, WidgetJanitorStepView::Init)))

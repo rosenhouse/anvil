@@ -3,16 +3,40 @@
 ## Fetch, build, and wire up Verus for this repo.
 ##
 ## VERUS_DIR: existing checkout to build, or where to clone one. Default: <repo>/.verus
+## VERUS_REV: Verus commit to build. Default: the revision pinned in <repo>/verus.sha
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 VERUS_DIR="${VERUS_DIR:-$PROJECT_DIR/.verus}"
+VERUS_REV="${VERUS_REV:-$(cat "$PROJECT_DIR/verus.sha")}"
 
+# A blobless clone rather than the --depth 1 one this used to make: a shallow
+# clone of main cannot check out a pinned revision behind it, while a blobless
+# clone carries every commit and downloads file contents only for the revision
+# actually checked out. --no-checkout because that revision is checked out below.
 if [ ! -d "$VERUS_DIR/.git" ]; then
-    git clone --depth 1 --recurse-submodules --shallow-submodules \
+    git clone --no-checkout --filter=blob:none \
         https://github.com/verus-lang/verus "$VERUS_DIR"
+fi
+
+# Move an existing checkout onto the pinned revision too, so a cached or
+# hand-made $VERUS_DIR never builds something other than what is pinned. The
+# fetch is the fallback for a checkout that does not already carry the commit,
+# such as one a previous --depth 1 clone left behind.
+if ! git -C "$VERUS_DIR" cat-file -e "$VERUS_REV^{commit}" 2>/dev/null; then
+    git -C "$VERUS_DIR" fetch --depth 1 origin "$VERUS_REV"
+fi
+git -C "$VERUS_DIR" checkout --force --detach "$VERUS_REV"
+git -C "$VERUS_DIR" submodule update --init --recursive
+
+# Cargo.lock pins the vstd dependency by revision; it must be the one built here.
+LOCK_VSTD_REV="$(grep -A2 '^name = "vstd"' "$PROJECT_DIR/Cargo.lock" | sed -nE 's/^source = .*#([0-9a-f]+)"$/\1/p')"
+if [ "$LOCK_VSTD_REV" != "$VERUS_REV" ]; then
+    echo "Cargo.lock pins vstd at '$LOCK_VSTD_REV' but verus.sha pins Verus at '$VERUS_REV'" >&2
+    echo "run: cargo update -p vstd --precise $VERUS_REV" >&2
+    exit 1
 fi
 
 cd "$VERUS_DIR/source"
