@@ -188,20 +188,27 @@ flight twice and that in-flight ids are below the allocator.
 `widget_sync_controller/proof/two_cluster.rs` instantiates the refinement.
 Both reconcilers commute with the relabeling, and `widget_two_cluster_theorem`
 states R1, R2, R3, R3s and the janitor's delete soundness of every execution
-of the two-store model that runs exactly the pair under its fairness
-assumptions and D3, each property read on the store its objects live in;
-`widget_instance_two_cluster_theorem` discharges the hypotheses for the
-concrete cluster of the pair.
+of the two-store model that runs the pair under its fairness assumptions and
+D3, each property read on the store its objects live in. The cluster may run
+other controllers beside the pair (`widget_cluster_with_others`): each must
+meet hypotheses 1 and 3 below for its own model (`other_model_ok`,
+`other_model_commutes`), and the pair's relies of section 3.2 must hold of it
+as invariants of the one-store model from init and next
+(`widget_relies_hold_of`), which is what a Welder composition of that
+controller with the pair establishes from its guarantee. No fairness of the
+other controllers is assumed. `widget_instance_two_cluster_theorem` discharges
+the hypotheses for the concrete cluster of the pair, the case with no other
+controller (`widget_pair_cluster`), and `widget_disturbed_two_cluster_theorem`
+for the cluster of the pair with the disturber (section 2.4).
 
-The two-store statement is narrower than the one-store theorems in one
-respect: the one-store theorems quantify over other controllers under the
-relies of section 3.2, while the two-store cluster holds exactly the pair.
-Every controller of a two-store cluster must meet hypotheses 1 and 3 below, so
+The two-store statement thus quantifies over other controllers as the
+one-store theorems do, with hypotheses 1 and 3 added per controller:
 composing the pair with a verified inner implementation on two stores needs
-that implementation's own commutation lemma. A kind lives on exactly one side;
-with `{widget@inner}` remote, every built-in kind is primary, so an inner
-implementation that creates Pods or ConfigMaps in the inner cluster is not
-expressible in this two-store cluster.
+that implementation's own commutation lemma and its guarantee proved as an
+invariant. What remains narrower is the kind partition. A kind lives on
+exactly one side; with `{widget@inner}` remote, every built-in kind is
+primary, so an inner implementation that creates Pods or ConfigMaps in the
+inner cluster is not expressible in this two-store cluster.
 
 The refinement holds under hypotheses, all met by the Widget pair:
 
@@ -251,10 +258,10 @@ reconcilers.
 | Write executed, client sees a timeout | by projection | executed plus `restart_controller`; every write is replay-safe (patches test uid and generation, deletes carry uids); a delayed `Create` is collected by the janitor |
 | Late delivery of a stale request | yes | the network reorders; the tests reject it |
 | Spurious `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | the janitor deletes only after a successful `List` lacking the parent |
-| Inner implementation writing status, timestamps or annotations on every reconcile | one-store theorems only | the spec patch tests generation, not resource version; the two-store cluster holds exactly the pair (2.2) |
-| Inner implementation adding finalizers | one-store theorems only | rely allows it; R3 needs D3 |
-| Out-of-band edit of a mirror's spec, or of its other labels and annotations (a `kubectl edit` in the inner cluster) | one-store theorems only, as another controller's write | the rely permits it; the reconciler overwrites a spec edit and never copies a status computed for it; R1 and R2 hold once such edits stop (`mirror_spec_undisturbed`) |
-| Out-of-band delete of a mirror; inner cluster rebuilt | one-store theorems only, as another controller's delete | the rely permits any Delete; the reconciler recovers (NotFound → Create); R1 and R2 hold once such deletes stop landing on the live mirror (`mirror_undeleted`); R3 and R3s hold throughout. The disturber (section 2.4) is a controller model doing exactly this |
+| Inner implementation writing status, timestamps or annotations on every reconcile | yes, as another controller under the rely | the spec patch tests generation, not resource version; on two stores the implementation must also meet hypotheses 1 and 3 of 2.2 |
+| Inner implementation adding finalizers | yes, as another controller under the rely | rely allows it; R3 needs D3; on two stores also hypotheses 1 and 3 of 2.2 |
+| Out-of-band edit of a mirror's spec, or of its other labels and annotations (a `kubectl edit` in the inner cluster) | yes, as another controller's write | the rely permits it; the reconciler overwrites a spec edit and never copies a status computed for it; R1 and R2 hold once such edits stop (`mirror_spec_undisturbed`). The disturber (section 2.4) is a controller model doing this, on one store and on two |
+| Out-of-band delete of a mirror; inner cluster rebuilt | yes, as another controller's delete | the rely permits any Delete; the reconciler recovers (NotFound → Create); R1 and R2 hold once such deletes stop landing on the live mirror (`mirror_undeleted`); R3 and R3s hold throughout. The disturber (section 2.4) is a controller model doing exactly this, on one store and on two |
 | Out-of-band edit that removes the mirror's label or `parent-uid` annotation | excluded by the rely | the object becomes foreign to both reconcilers, which refuse to adopt; no recovery is possible without adoption (section 1.1) |
 | A kind present in both clusters (Pods, ConfigMaps) | no | the two-store model assigns each kind to one side |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
@@ -277,6 +284,11 @@ of its own key) implies both reconcilers' relies, and
 `composition/widget_disturber_reconciler.rs` composes it with the pair through
 Welder: `widget_disturbed_core_holds` is the closed statement for a cluster
 running the janitor, the sync reconciler and the disturber.
+`widget_disturbed_two_cluster_theorem` (`proof/two_cluster.rs`) is the same
+statement on two stores, with the disturber acting in the remote store: its
+model reads only the namespace, name and spec of its object and tests nothing,
+so it commutes with the relabeling by computation, and its guarantee gives the
+pair's relies in the form the two-store theorem asks for (section 2.2).
 
 The disturber adds no assumption. What it buys is a witness that the relaxed
 sync rely (any Delete, any Patch) is satisfiable by something that deletes and
@@ -536,7 +548,7 @@ status without an owner reference, which composing against one requires.
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
 | Refinement into the one-store model | `kubernetes_cluster/proof/two_cluster/` |
-| R1 to R3s on two clusters | `widget_sync_controller/proof/two_cluster.rs` |
+| R1 to R3s on two clusters, for the pair beside admitted other controllers; the instances of the pair and of the pair with the disturber | `widget_sync_controller/proof/two_cluster.rs` |
 | Binaries, manifests, testbed, e2e | `src/bin/`, `deploy/widget_sync/`, `tools/two-cluster-test.sh`, `e2e/src/widget_sync_e2e.rs` |
 
 Full-repository verification (`cargo verus verify --lib`) passes.
