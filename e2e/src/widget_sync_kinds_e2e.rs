@@ -53,10 +53,11 @@ use crate::widget_sync_e2e::{
 // name.
 const BOUND_CLUSTER: &str = "a";
 // A cluster name no binding of this process has: no Secret `elsewhere-kubeconfig`
-// exists in the namespace. The shim answers every request tagged with an unbound
-// cluster with a Timeout, without a network round trip
-// (controller_runtime::ClusterUnavailable), which the sync reconciler reports
-// as InnerUnreachable (doc/widget_sync_fanout_design.md, section 1.2).
+// exists in the namespace. The binding is not in the snapshot the reconcile was
+// built with, so the sync reconciler reports InnerUnreachable and ends without
+// addressing the inner side at all; the shim's Timeout for an unbound cluster
+// (controller_runtime::ClusterUnavailable) is the fallback behind it and reads
+// the same way (doc/widget_sync_fanout_design.md, sections 1.2 and 3.2).
 const UNBOUND_CLUSTER: &str = "elsewhere";
 // The Widget of check 4; a name of its own so the test does not collide with
 // widget_sync_e2e's objects.
@@ -282,12 +283,12 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
     }
     info!("outer Gadget status fields: {:?}", names);
 
-    // 3. A Gadget whose name is no binding of this process: the shim answers
-    //    every request for it with a Timeout, so the outer copy reports
-    //    InnerUnreachable and no mirror is ever created. The first reconcile
-    //    fails without a network round trip, so the status is written as soon as
-    //    the outer watch has delivered the create; ONE_RECONCILE bounds it even
-    //    if the very first attempt is lost.
+    // 3. A Gadget whose name is no binding of this process: the reconciler does
+    //    not serve that binding, so the outer copy reports InnerUnreachable and
+    //    no mirror is ever created. The first reconcile ends without a network
+    //    round trip, so the status is written as soon as the outer watch has
+    //    delivered the create; ONE_RECONCILE bounds it even if the very first
+    //    attempt is lost.
     outer
         .api
         .create(&PostParams::default(), &gadget(UNBOUND_CLUSTER, 5))

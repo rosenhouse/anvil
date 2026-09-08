@@ -95,12 +95,19 @@ away drops the binding, its janitors included. The `tokenFile` mechanism of
 the single-pair deployment is not used: a Cluster API kubeconfig is inline
 and rotation is the Secret changing.
 
-A parent whose binding has no Secret, or whose Secret does not parse, is
-answered by the shim as if the inner cluster were unreachable: every
-request to the binding fails with `Timeout`, so the outer status reads
-`Synced=False/InnerUnreachable`. The model already covers this as
-`drop_req`. The deploy README says that a missing kubeconfig Secret reads
-as `InnerUnreachable`.
+A parent whose binding has no Secret, or whose Secret does not parse, has no
+entry in the process's client map, so it is not one of the bindings a reconcile
+serves: the sync reconciler reports `Synced=False/InnerUnreachable` and ends
+without addressing the inner side at all (section 3.2). The shim's answer for a
+request to an unbound cluster, `Timeout`, which the reconciler reports the same
+way, stays as the fallback for anything that does reach it -- a binding dropped
+between the snapshot and the request, and every janitor request, since a janitor
+does not consult the binding set. The model covers the fallback as `drop_req`.
+A **refused** binding (section 1.3) is bound, so it *is* in the set a reconcile
+serves: its requests are sent and the shim answers them `Forbidden`, which is
+what makes its parents report `Forbidden` with `Stalled=True` rather than
+`InnerUnreachable`. The deploy README says that a missing kubeconfig Secret
+reads as `InnerUnreachable`.
 
 ### 1.3 The claim
 
@@ -317,9 +324,30 @@ reconcile is the one of the main design, section 1.2, with two changes:
 - At `Init`, `cluster_of(outer)` is read. `None` (the selector field is
   missing, which the boot check rules out for stored objects) is reported
   as `Synced=False/Rejected`, a permanent outcome, and the reconcile ends.
+- Still at `Init`, the binding `binding_of(k, outer)` is looked up in the
+  finite set `k.bindings` the reconciler was built with. A binding outside the
+  set is reported as `Synced=False/InnerUnreachable` -- the failure-reporting
+  path of any other failed request: `outer_status_for(g, outer.status,
+  Failed(InnerUnreachable))`, a PatchStatus testing the outer copy's uid and
+  generation, then `Error`, so the shim requeues -- and no request is sent to
+  the inner side. This is what bounds the mirror kinds the model can write
+  (section 5.2). A refused (claimed) binding stays in the set, because it is
+  bound: its requests are sent and the shim answers them `Forbidden`.
+  The one branch that would write a mirror, the Create after a `NotFound`, is
+  guarded by the same test; that guard is unreachable at run time (Init already
+  refused) and is there so that every Create the model emits names a mirror kind
+  of `k.bindings` for *any* triggering object, which is what `models_ok` of the
+  two-store refinement asks (section 5.2).
 - The mirror key is `inner_key(k, outer) = (inner_kind(k, cluster_of(outer)), ns, name)`;
   the Get, Create and Patch of the mirror carry that kind, and the shim
   routes them to the binding `(ns, cluster_of(outer))`.
+
+Exec side, `k.bindings` is a snapshot: the dynamic runners hold a *factory*
+(`shim_layer::controller_runtime::ReconcilerFactory`) rather than a reconciler
+value, and build the reconciler at the start of each reconcile from
+`ClusterClients::remote_refs()`, the bound clusters of the moment, refused ones
+included. The reconciler value, and so the model it conforms to, is then fixed
+for the whole of that reconcile; no time-varying view enters the proofs.
 
 The spec written on the mirror is the outer `spec` value; the outer status
 is `outer_status_for(g, inner status, outcome)` as today, with `rest`
@@ -396,9 +424,13 @@ fault-injection hook are unchanged; both act per process.
 
 The statements of the main design, section 3.3, with parameters:
 
-- R1, R2: `∀ k: SyncKind, outer: SyncedObjectView` with `outer.kind == k.outer_kind`,
-  under the sync controller for `k` and the janitors for `k` and every
-  binding of the outer's namespace and `cluster_of(outer)`.
+- R1, R2: `∀ k: SyncKind, outer: SyncedObjectView` with `outer.kind == k.outer_kind`
+  and `binding_of(k, outer) ∈ k.bindings` (an outer copy of a binding the
+  reconciler does not serve is refused, section 3.2), under the sync controller
+  for `k` and the janitors for `k` and every binding of the outer's namespace
+  and `cluster_of(outer)`. The premise is carried by the ESR's own guard: the
+  per-binding conjuncts of `widget_sync_esr(k, bs)` are stated for `b ∈ bs`, and
+  `sync_membership` ties `bs` to `k.bindings`.
 - R3, R3s: `∀ k, b, key, parent uid`, under the janitor for `(k, b)`.
 - The janitor's delete soundness, per `(k, b)`.
 - Composition: for one kind `k` and a finite set of bindings `B`, the
@@ -422,7 +454,10 @@ The statements of the main design, section 3.3, with parameters:
   members of the union, are exactly `janitors_esr(k, B, ids)`, and recovering
   the binding of a member's id is where the injectivity of `ids` is used.
   `widget_pair_core_holds` remains the singleton case, which is what
-  `compose_all` puts beside the four other controllers.
+  `compose_all` puts beside the four other controllers, and
+  `widget_fanout_instance_core_holds` is a closed two-binding instance: one kind,
+  the bindings `default/inner` and `default/second`, a janitor for each, and the
+  three model kinds they need installed.
 
 Hypotheses added to the theorems, in place of the lemmas that today prove
 them from the literal strings:
@@ -448,18 +483,19 @@ with the data as parameters). R1 to R3s and the delete soundness are then
 read on two-store executions per binding, as today.
 
 Three hypotheses the fixed pair did not need appear here. First, the folded
-one-store cluster installs the mirror kind of *every* binding of `k`, not
-only of `b`: the sync controller of `k` serves every binding, so a Create it
-sends for an outer copy of another binding must still name a known kind
-(`TwoCluster::request_ok`). The mirrors of the other bindings then live on
-the primary side, which is what the paragraph above says. Second, the
-selector of `k` must be a *field* of the spec, not `metadata.name`: the
-refinement asks that the API server's validation not read metadata
-(`installed_types_ignore_metadata`), and the immutability rule of a `name`
-selector reads `metadata.name`. Third, the binding set the theorem is read
-for is the singleton `{b}`: the ESRs it consumes and the D3 it assumes are
-`b`'s, and the janitors of the other bindings enter as other controllers,
-which is what "per binding" means.
+one-store cluster installs the mirror kind of every binding of `k.bindings`,
+not only of `b`: the sync controller of `k` serves all of them, so a Create it
+sends for an outer copy of another *served* binding must still name a known kind
+(`TwoCluster::request_ok`, which `models_ok` asks of the reconcile model as a
+function, for every object it could be triggered by, not only the stored ones).
+The mirrors of the other served bindings then live on the primary side, which is
+what the paragraph above says. Second, the selector of `k` must be a *field* of
+the spec, not `metadata.name`: the refinement asks that the API server's
+validation not read metadata (`installed_types_ignore_metadata`), and the
+immutability rule of a `name` selector reads `metadata.name`. Third, the theorem
+is read for one binding `b ∈ k.bindings` at a time: the ESRs it consumes and the
+D3 it assumes are `b`'s, only `b`'s mirrors are remote, and the janitors of the
+other bindings enter as other controllers, which is what "per binding" means.
 
 `widget_two_cluster_theorem` (`widget_sync_controller/proof/two_cluster.rs`)
 is that statement, for any cluster meeting the hypotheses, and it is proved.
@@ -469,29 +505,45 @@ with the conjuncts `parent_absent_forever` has since the port (the parent is
 an outer copy of `k` that selects `b`'s cluster), not over every stored
 object.
 
-**OPEN.** What the fan-out shape has no counterpart of is the fixed pair's
-*closed* statement for a concrete cluster (`widget_instance_two_cluster_theorem`
-and the same with the disturber). The obstacle is the first hypothesis above.
-A mirror kind is `model_kind(k.name, Remote(ns, clusterName))`, so the mirror
-kinds of all bindings are as many as the pairs (namespace, cluster name),
-infinitely many; `InstalledTypes` is vstd's `Map`, whose domain is a finite
-`Set`. No concrete `Cluster` value therefore satisfies "every binding's mirror
-kind installed", and the general theorem cannot be instantiated. Narrowing the
-hypothesis to a finite set of bindings does not help by itself: `models_ok`
-quantifies over every object a reconcile could be triggered by, not only the
-stored ones, and even restricted to stored objects the namespace of an outer
-copy is unbounded and the type validation may not read it
-(`installed_types_ignore_metadata`), so the cluster name a schema could pin
-does not bound the mirror kind. Closing it takes one of: an `InstalledTypes`
-with an infinite domain (vstd's `IMap`), which changes `Cluster` and every
-controller's concrete cluster; a `TwoCluster` whose `request_ok` tolerates a
-Create of an uninstalled kind, which needs `installed_types_ignore_metadata`
-and `installed_types_coherent` for every name rather than every installed one
-(a `Map` says nothing about indexes outside its domain, so a concrete map
-cannot provide that either); or a sync reconciler model that refuses a binding
-outside a configured finite set, which changes the model and its exec
-conformance. The obligation is recorded at the same place in
-`proof/two_cluster.rs`.
+**Closed, and it was vacuous before.** The first hypothesis above used to
+quantify over *every* binding: `all_inner_kinds_installed` asked that
+`model_kind(k.name, Remote(ns, clusterName))` be installed for every pair
+(namespace, cluster name). Those kinds are infinitely many -- `remote_kind_name`
+is injective in the cluster name -- and `InstalledTypes` is vstd's `Map`, whose
+domain is a finite `Set`, so no `Cluster` value satisfied the hypothesis. Between
+the fan-out port (commit `7eebc12`) and this change, every statement of
+`proof/two_cluster.rs` was therefore vacuous rather than merely missing an
+instance, and the fixed pair's closed statements
+(`widget_instance_two_cluster_theorem`, `widget_disturbed_two_cluster_theorem`)
+could not be restated.
+
+The remedy is the finite binding set of section 3.2. The sync reconciler's model
+is parameterized by `k.bindings`; an outer copy whose binding is outside the set
+is refused at `Init` with `Failed(InnerUnreachable)`, before any request, and the
+Create of a mirror carries the same guard, so the mirror kinds the model can
+write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many as the
+bindings, and `Set` is finite. `all_inner_kinds_installed` is now that finite
+conjunction, `widget_cluster_with_others` and `widget_pair_cluster` take `bnd ∈
+bs` (rather than pinning `bs` to `{bnd}`) with `k.bindings == bs` carried by
+`sync_membership`, and the closed statements are back:
+`lemma_widget_instance_is_pair_cluster` and `widget_instance_two_cluster_theorem`
+for the cluster of `composition/widget_sync_reconciler.rs`, and
+`lemma_widget_disturbed_instance_is_cluster_with_others` and
+`widget_disturbed_two_cluster_theorem` for the one with the disturber. Those
+concrete clusters install exactly `k.outer_kind` and `inner_kind(k, b)` for the
+one binding they serve, and they are the satisfiability witness for every
+hypothesis of the general theorem.
+
+The three alternatives this rules out, recorded because they were the other ways
+to close it: an `InstalledTypes` with an infinite domain (vstd's `IMap`), which
+changes `Cluster` and every controller's concrete cluster; a `TwoCluster` whose
+`request_ok` tolerates a Create of an uninstalled kind, which needs
+`installed_types_ignore_metadata` and `installed_types_coherent` for every name
+rather than every installed one (a `Map` says nothing about indexes outside its
+domain, so a concrete map cannot provide that either); or narrowing the
+hypothesis to a finite set of bindings without changing the model, which does not
+work by itself, since `models_ok` quantifies over every object a reconcile could
+be triggered by and the namespace of an outer copy is unbounded.
 
 ### 5.3 What that leaves unstated
 

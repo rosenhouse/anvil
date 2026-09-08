@@ -33,8 +33,9 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   R3s and the janitor's delete soundness (less the clause that no uid the
   primary counter may still issue names the parent) are then stated on
   two-store executions (`widget_two_cluster_theorem`, for any cluster meeting
-  the refinement's hypotheses; the closed statement for a concrete cluster is
-  open, see doc/widget_sync_fanout_design.md, section 5.2).
+  the refinement's hypotheses, and closed for the concrete clusters of the pair
+  and of the pair with the disturber: `widget_instance_two_cluster_theorem`,
+  `widget_disturbed_two_cluster_theorem`).
 
 ## 1. Design
 
@@ -297,13 +298,17 @@ invariant under `cluster_model`, given that the guarantee implies the relies
 and that the pair's spec provides every fairness the Welder registry declares.
 No fairness of the other controllers is assumed. `widget_pair_cluster` names the
 case with no other controller and `lemma_disturber_is_other_controller_ok`
-admits the disturber (section 2.4) as one. What the fan-out shape does not yet
-have is the *closed* statement for a concrete cluster the fixed pair had
-(`widget_instance_two_cluster_theorem`): the folded store would have to install
-the mirror kind of every binding, of which there are infinitely many, and
-`InstalledTypes` is a finite map. That is the open piece of
-doc/widget_sync_fanout_design.md, section 5.2, which records the exact
-obligation.
+admits the disturber (section 2.4) as one. `widget_instance_two_cluster_theorem`
+and `widget_disturbed_two_cluster_theorem` close the statement for the concrete
+clusters of `composition/widget_sync_reconciler.rs` and
+`composition/widget_disturber_reconciler.rs`. Those instances are also what
+makes the hypotheses satisfiable: between the fan-out port and this change the
+folded store had to install the mirror kind of *every* binding, of which there
+are infinitely many, so `all_inner_kinds_installed` was unsatisfiable against a
+finite `InstalledTypes` and every two-store statement was vacuous. The sync
+reconciler model now serves a finite set of bindings and refuses the rest
+(doc/widget_sync_fanout_design.md, sections 3.2 and 5.2), so the hypothesis is a
+finite conjunction a concrete cluster meets.
 
 The two-store statement thus quantifies over other controllers as the
 one-store theorems do, with hypotheses 1 to 3 added per controller: composing

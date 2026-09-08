@@ -67,7 +67,7 @@ The reasons of a `False` `Synced` condition:
 | `StaleMirror` | the object at the mirror's name is a mirror of a previous incarnation of this copy (label present, other `parent-uid`) | no | the janitor removes it |
 | `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | yes | the object is removed in the inner cluster |
 | `Forbidden` | the inner cluster refused a request for lack of authorization | yes | the credential's RBAC is fixed |
-| `InnerUnreachable` | a request timed out or failed server-side; the inner cluster is not answering | no | the inner cluster answers again |
+| `InnerUnreachable` | the object's binding has no bound inner cluster (no kubeconfig Secret, or one that does not parse), or a request to it timed out or failed server-side; the inner cluster is not answering | no | the inner cluster answers again, or its Secret appears |
 | `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | no | the namespace is created |
 | `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | yes | the schema or the object is fixed |
 | `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | no | the next reconcile |
@@ -223,7 +223,7 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 
 | The binding's Secret | What its objects report | What the controller does |
 |---|---|---|
-| missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
+| missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: the binding is not bound, so the reconciler does not address it at all -- it reports the status and requeues, without a round trip. Its janitors do not run, so its mirrors are left alone |
 | present but not a parseable kubeconfig | `Synced=False/InnerUnreachable` | the same, plus one warn line; it is retried when the Secret changes |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
 | present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
