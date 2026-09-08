@@ -570,7 +570,7 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 | R2 | `∀outer, settled. □(outer_stable(outer) ∧ inner_settled(outer, settled)) ~> □status_synced(outer, settled)` | `proof/liveness/sync_status_proof.rs` |
 | R3 | `∀k, a, u. (□parent_absent(k, a) ∧ mirror_object_is(k, a, u)) ~> object_is_gone(k, u)` | `proof/liveness/janitor_proof.rs` |
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
-| D3 | `∀k, u. inner_terminating_object(k, u) ~> object_is_gone(k, u)` | assumed |
+| D3 | `∀key, u. inner_terminating_object(k, b, key, u) ~> object_is_gone(key, u)`, per binding `b` (the premise fixes `key.kind == inner_kind(k, b)`) | assumed |
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
 (spec constant, not being deleted, same uid), and whoever was editing the
@@ -616,9 +616,12 @@ the remote projection, where the mirror lives.
 Both reconcilers are Welder controller specs
 (`src/controllers/composition/widget_janitor_reconciler.rs`,
 `widget_sync_reconciler.rs`). The janitor's ESR slot carries R3 together with
-the safety fact `□janitor_deletes_are_sound`; its environment rely is D3. The sync
-reconciler's ESR is R1, R2 and R3s; its liveness dependency is the janitor's
-ESR; its partial rely names the janitor; its environment rely is D3.
+the safety fact `□janitor_deletes_are_sound`; its environment rely is D3 of its
+own binding, `inner_releases_terminating_objects(k, b)`. The sync reconciler's
+ESR is R1, R2 and R3s; its liveness dependency is the janitor's ESR; its partial
+rely names the janitor; its environment rely is the conjunction of D3 over
+`k.bindings`, `inner_releases_terminating_objects_all(k)`, read at the binding at
+hand.
 `compose_dep` composes the pair, and `widget_core_holds` proves `core` for the
 cluster of any configuration -- the sync controller of a kind `k` and one janitor
 per binding of `k` -- of which `widget_demo_core_holds` is the demo instance

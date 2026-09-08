@@ -510,8 +510,8 @@ The statements of the main design, section 3.3, with parameters:
   reconciler does not serve is refused, section 3.2), under the sync controller
   for `k` and the janitors for `k` and every binding of the outer's namespace
   and `cluster_of(outer)`. The premise is carried by the ESR's own guard: the
-  per-binding conjuncts of `widget_sync_esr(k, bs)` are stated for `b ∈ bs`, and
-  `sync_membership` ties `bs` to `k.bindings`.
+  per-binding conjuncts of `widget_sync_esr(k)` are stated for `b ∈ k.bindings`,
+  and `sync_membership` requires `k.bindings.contains(b)`.
 - R3, R3s: `∀ k, b, key, parent uid`, under the janitor for `(k, b)`.
 - The janitor's delete soundness, per `(k, b)`.
 - Composition: for one kind `k` and a finite set of bindings `B`, the
@@ -548,9 +548,13 @@ The statements of the main design, section 3.3, with parameters:
 
   Kinds compose with each other, and with the four other controllers of the
   repository, by kind disjointness. `widget_kinds_core_holds` is the statement
-  for the kinds: a finite set of configured kinds, `sync_kind_ok` of each and
-  their outer kinds pairwise distinct, composes into one `core`, by induction on
-  the set. Every step is plain `compose` -- no member has a liveness dependency
+  for the kinds: a deployment, `Map<SyncKind, KindSetup>` (each kind's schema,
+  sync id and janitor ids), composes into one `core` under `kinds_registered`
+  (each kind well formed with `ids_ok`, its sync spec and janitors registered,
+  its membership) and `kinds_separate` (distinct kinds have distinct outer kinds
+  and disjoint ids), by induction on the map's domain; the members set is a fold
+  over that domain, so finiteness costs no hypothesis. `widget_two_kind_core_holds`
+  is its two-element instance. Every step is plain `compose` -- no member has a liveness dependency
   left, the sync controller's having been discharged against its own janitors --
   and the compatibility of each step is one fact, that a configuration's
   controllers address only the model kinds of that configuration: a sync
@@ -629,7 +633,7 @@ request, and the Create of a mirror carries the same guard, so the mirror kinds
 the model can write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many
 as the bindings, and `Set` is finite. `all_inner_kinds_installed` is that finite
 conjunction, and `widget_cluster_with_others` and `widget_pair_cluster` take
-`bnd ∈ bs` with `k.bindings == bs` carried by `sync_membership`. The closed
+`bnd ∈ k.bindings`. The closed
 statements are therefore closed for *any* configuration, not only the demo's.
 `lemma_widget_is_pair_cluster` and `widget_instance_two_cluster_theorem`
 take `k`, `bnd ∈ k.bindings`, two ids and
