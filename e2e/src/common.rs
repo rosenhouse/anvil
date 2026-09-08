@@ -89,6 +89,9 @@ pub enum Error {
 
     #[error("Widget sync across the two clusters failed!")]
     WidgetSyncFailed,
+
+    #[error("Looking up a Widget failed with something other than NotFound: {0}")]
+    WidgetLookupFailed(#[source] kube::Error),
 }
 
 pub async fn apply_file(
