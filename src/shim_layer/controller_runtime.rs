@@ -52,14 +52,15 @@ type KubeApiResource = kube::api::ApiResource;
 // `primary`.
 //
 // The remote clients are a map from the binding (ClusterRef) to its pair of
-// clients, shared by every controller of the process: a binding manager binds,
-// rebinds and unbinds clusters while the controllers run. A request to a
-// binding that is not in the map fails as if the cluster were unreachable
-// (see unbound_cluster_error).
+// clients and its status, shared by every controller of the process: the
+// binding manager (shim_layer::bindings) binds, rebinds, refuses and unbinds
+// clusters while the controllers run. A request to a binding that is not in the
+// map fails as if the cluster were unreachable, one to a refused binding as if
+// the cluster had denied it (see ClusterUnavailable).
 #[derive(Clone)]
 pub struct ClusterClients {
     pub primary: Client,
-    remotes: Arc<RwLock<HashMap<ClusterRef, RemoteClients>>>,
+    remotes: Arc<RwLock<HashMap<ClusterRef, RemoteBinding>>>,
 }
 
 // The two clients of a remote cluster: `requests` for reconcile requests, built
@@ -72,6 +73,65 @@ pub struct RemoteClients {
     pub watch: Client,
 }
 
+// Whether a bound cluster takes the process's requests. A binding is Refused
+// when its inner cluster is claimed by another binding or its credential was
+// denied a verb it needs (doc/widget_sync_fanout_design.md, sections 1.3 and
+// 1.4): the clients are kept, so that the claim can be re-checked through them,
+// but no request of a reconciler is sent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BindingStatus {
+    Ready,
+    Refused,
+}
+
+// A bound cluster: its clients and whether they may be used.
+#[derive(Clone)]
+struct RemoteBinding {
+    clients: RemoteClients,
+    status: BindingStatus,
+}
+
+// Why a request to a cluster cannot be sent, and the answer the reconciler gets
+// for it. Unbound is the answer of an unreachable cluster (the model's
+// `drop_req` fault, which the sync controller reports as InnerUnreachable): the
+// binding's kubeconfig Secret is missing or does not parse, its inner cluster
+// did not answer the access check, or the wrapper names a cluster this process
+// never registered. Refused is the answer of a cluster that refused this
+// controller, which the sync controller reports as Forbidden with Stalled=True;
+// the shim gives it without asking the cluster, on behalf of the claim
+// (doc/widget_sync_fanout_design.md, sections 1.3 and 1.4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ClusterUnavailable {
+    #[error("no client bound for the cluster")]
+    Unbound,
+    #[error("the binding is refused: its inner cluster is claimed by another binding, or its credential was denied")]
+    Refused,
+}
+
+impl ClusterUnavailable {
+    // The answer the reconciler sees for a request that was never sent.
+    pub fn api_error(&self) -> APIError {
+        match self {
+            ClusterUnavailable::Unbound => APIError::Timeout,
+            ClusterUnavailable::Refused => APIError::Forbidden,
+        }
+    }
+
+    // The `cause` field of the log line of a request that was not sent.
+    pub fn cause(&self) -> &'static str {
+        match self {
+            ClusterUnavailable::Unbound => "cluster not bound",
+            ClusterUnavailable::Refused => "binding refused",
+        }
+    }
+}
+
+impl From<ClusterUnavailable> for Error {
+    fn from(e: ClusterUnavailable) -> Error {
+        Error::ShimLayerError(e.to_string())
+    }
+}
+
 impl ClusterClients {
     // new starts with the primary client and no bound remote cluster.
     pub fn new(primary: Client) -> Self {
@@ -82,34 +142,47 @@ impl ClusterClients {
         Self::new(primary)
     }
 
-    // with_remote is new plus one binding, for a process configured with a fixed
-    // remote cluster.
+    // with_remote is new plus one ready binding, for a process configured with a
+    // fixed remote cluster.
     pub async fn with_remote(primary: Client, cluster: ClusterRef, clients: RemoteClients) -> Self {
         let clusters = Self::new(primary);
-        clusters.insert_remote(cluster, clients).await;
+        clusters.insert_remote(cluster, clients, BindingStatus::Ready).await;
         clusters
     }
 
-    // insert_remote binds `cluster` to `clients`, replacing and returning the
-    // previous clients if the binding existed.
-    pub async fn insert_remote(&self, cluster: ClusterRef, clients: RemoteClients) -> Option<RemoteClients> {
-        self.remotes.write().await.insert(cluster, clients)
+    // insert_remote binds `cluster` to `clients` with `status`, replacing and
+    // returning the previous clients if the binding existed.
+    pub async fn insert_remote(&self, cluster: ClusterRef, clients: RemoteClients, status: BindingStatus) -> Option<RemoteClients> {
+        self.remotes.write().await.insert(cluster, RemoteBinding { clients, status }).map(|b| b.clients)
     }
 
     // replace_remote rebuilds the clients of a bound cluster in place (a rotated
-    // credential) and returns the previous ones; it binds nothing new, so an
-    // unbound cluster is left unbound and `clients` is handed back as the error.
+    // credential) and returns the previous ones, keeping the binding's status; it
+    // binds nothing new, so an unbound cluster is left unbound and `clients` is
+    // handed back as the error.
     pub async fn replace_remote(&self, cluster: &ClusterRef, clients: RemoteClients) -> std::result::Result<RemoteClients, RemoteClients> {
         let mut remotes = self.remotes.write().await;
         match remotes.get_mut(cluster) {
-            Some(slot) => Ok(std::mem::replace(slot, clients)),
+            Some(slot) => Ok(std::mem::replace(&mut slot.clients, clients)),
             None => Err(clients),
         }
     }
 
     // remove_remote unbinds `cluster`; requests to it fail from now on.
     pub async fn remove_remote(&self, cluster: &ClusterRef) -> Option<RemoteClients> {
-        self.remotes.write().await.remove(cluster)
+        self.remotes.write().await.remove(cluster).map(|b| b.clients)
+    }
+
+    // set_status refuses or re-admits a bound cluster and returns its previous
+    // status, None if it is not bound. The caller logs the transition (the
+    // binding manager logs a refusal once, at warn).
+    pub async fn set_status(&self, cluster: &ClusterRef, status: BindingStatus) -> Option<BindingStatus> {
+        let mut remotes = self.remotes.write().await;
+        remotes.get_mut(cluster).map(|b| std::mem::replace(&mut b.status, status))
+    }
+
+    pub async fn status_of(&self, cluster: &ClusterRef) -> Option<BindingStatus> {
+        self.remotes.read().await.get(cluster).map(|b| b.status)
     }
 
     pub async fn has_remote(&self, cluster: &ClusterRef) -> bool {
@@ -120,50 +193,47 @@ impl ClusterClients {
         self.remotes.read().await.keys().cloned().collect()
     }
 
+    // remote_of returns the clients of a bound cluster whatever its status; the
+    // binding manager talks to a refused cluster through them to re-check its claim.
+    pub async fn remote_of(&self, cluster: &ClusterRef) -> Option<RemoteClients> {
+        self.remotes.read().await.get(cluster).map(|b| b.clients.clone())
+    }
+
     // client_of returns the client that handles reconcile requests for `cluster`.
-    // A request for a remote cluster that is not bound is reported as a request
-    // failure rather than a panic (see unbound_cluster_error), so the reconciler
+    // A request for a remote cluster that is not bound, or one that is refused,
+    // is reported as a request failure rather than a panic, so the reconciler
     // ends in its error state and the controller keeps running.
-    pub async fn client_of(&self, cluster: &ClusterId) -> Result<Client, Error> {
+    pub async fn client_of(&self, cluster: &ClusterId) -> std::result::Result<Client, ClusterUnavailable> {
         match cluster {
             ClusterId::Primary => Ok(self.primary.clone()),
-            ClusterId::Remote(r) => self
-                .remotes
-                .read()
-                .await
-                .get(r)
-                .map(|c| c.requests.clone())
-                .ok_or_else(|| unbound_cluster_error(cluster)),
+            ClusterId::Remote(r) => match self.remotes.read().await.get(r) {
+                None => Err(ClusterUnavailable::Unbound),
+                Some(b) => match b.status {
+                    BindingStatus::Ready => Ok(b.clients.requests.clone()),
+                    BindingStatus::Refused => Err(ClusterUnavailable::Refused),
+                },
+            },
         }
     }
 
-    pub async fn client_for(&self, api_resource: &ApiResource) -> Result<Client, Error> {
+    pub async fn client_for(&self, api_resource: &ApiResource) -> std::result::Result<Client, ClusterUnavailable> {
         self.client_of(&api_resource.cluster()).await
     }
 
     // watch_client_of returns the client to build a watch stream on for `cluster`.
-    pub async fn watch_client_of(&self, cluster: &ClusterId) -> Result<Client, Error> {
+    // A refused binding has no watch stream of ours: its runners are never started.
+    pub async fn watch_client_of(&self, cluster: &ClusterId) -> std::result::Result<Client, ClusterUnavailable> {
         match cluster {
             ClusterId::Primary => Ok(self.primary.clone()),
-            ClusterId::Remote(r) => self
-                .remotes
-                .read()
-                .await
-                .get(r)
-                .map(|c| c.watch.clone())
-                .ok_or_else(|| unbound_cluster_error(cluster)),
+            ClusterId::Remote(r) => match self.remotes.read().await.get(r) {
+                None => Err(ClusterUnavailable::Unbound),
+                Some(b) => match b.status {
+                    BindingStatus::Ready => Ok(b.clients.watch.clone()),
+                    BindingStatus::Refused => Err(ClusterUnavailable::Refused),
+                },
+            },
         }
     }
-}
-
-// unbound_cluster_error is the error of a request to a cluster with no bound
-// client: a binding whose kubeconfig Secret is missing or does not parse, or a
-// wrapper bound to a cluster the process never registered. The reconciler is
-// answered with Timeout (reconcile_with), the answer of an unreachable cluster,
-// which the model covers as the `drop_req` fault and the sync controller
-// reports as InnerUnreachable (doc/widget_sync_fanout_design.md, section 1.2).
-pub fn unbound_cluster_error(cluster: &ClusterId) -> Error {
-    Error::ShimLayerError(format!("no client bound for cluster {:?}", cluster))
 }
 
 // remote_clients_from_kubeconfig builds the pair of clients for another cluster
@@ -503,6 +573,67 @@ where
     Ok(())
 }
 
+// run_dyn_controller_with_triggers is run_dyn_controller plus a stream of
+// objects to reconcile on top of the kind's own watch. It is how the sync
+// runner of a kind, which starts at boot and outlives every binding, gets the
+// same-name trigger of each binding's mirrors: the binding manager watches the
+// mirrors of a bound cluster and sends the outer object of each changed mirror
+// into `triggers` (shim_layer::bindings::SameNameTriggers). A trigger for an
+// object that does not exist is harmless: the reconcile reads it, finds
+// NotFound and ends.
+//
+// The stream is the only way a running kube-runtime controller takes work from
+// outside its own watches; it needs kube's `unstable-runtime-reconcile-on`
+// feature (enabled in Cargo.toml). The triggers are a latency optimization
+// only: liveness rests on the periodic requeue, so a dropped trigger costs at
+// most one requeue interval.
+pub async fn run_dyn_controller_with_triggers<R, E>(
+    clusters: ClusterClients,
+    reconciler: R,
+    entry: RegistryEntry,
+    cr_cluster: ClusterId,
+    triggers: impl futures::Stream<Item = ObjectRef<KubeDynamicObject>> + Send + 'static,
+    field_manager: Option<String>,
+    delete_pause_file: Option<String>,
+    fault_injection: bool,
+    shutdown: impl Future<Output = ()> + Send + Sync + 'static,
+) -> Result<()>
+where
+    R: DynReconciler<K = SyncedObject> + Send + Sync + 'static,
+    R::S: Send,
+    R::EReq: Send,
+    R::EResp: Send,
+    E: ExternalShimLayer<R::EReq, R::EResp>,
+{
+    let api_resource = entry.kube_api_resource().clone();
+    let crs = Api::<KubeDynamicObject>::all_with(clusters.watch_client_of(&cr_cluster).await?, &api_resource);
+    let reconciler = Arc::new(reconciler);
+    let entry = Arc::new(entry);
+    let reconcile = move |cr: Arc<KubeDynamicObject>, ctx: Arc<Data>| {
+        let reconciler = reconciler.clone();
+        let entry = entry.clone();
+        async move { reconcile_dyn_with::<R, E>(cr, ctx, reconciler, entry, fault_injection).await }
+    };
+
+    info!(
+        "starting controller for {} (custom resource in {:?} cluster, triggered by the bindings' mirrors)",
+        api_resource.kind, cr_cluster
+    );
+    Controller::new_with(crs, watcher::Config::default(), api_resource.clone())
+        .reconcile_on(triggers)
+        .graceful_shutdown_on(shutdown)
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .for_each(|res| async move {
+            match res {
+                Ok(o) => info!("reconciled {:?}", o),
+                Err(e) => info!("reconcile failed: {}", e),
+            }
+        })
+        .await;
+    info!("controller for {} terminated", api_resource.kind);
+    Ok(())
+}
+
 // run_dyn_controller_with_same_name_watch is run_dyn_controller plus a
 // secondary watch on objects of the kind `watched_entry` in `watched_cluster`:
 // a change to one of them triggers a reconcile of the object of the same
@@ -763,24 +894,26 @@ where
 // api_of builds the API handle a request goes through: the namespaced handle of
 // the request's resource on the client bound for the resource's cluster. An
 // unbound cluster is the error of client_of.
-async fn api_of(ctx: &Data, api_resource: &ApiResource, namespace: &str) -> Result<Api<KubeDynamicObject>, Error> {
+async fn api_of(ctx: &Data, api_resource: &ApiResource, namespace: &str) -> std::result::Result<Api<KubeDynamicObject>, ClusterUnavailable> {
     let client = ctx.clusters.client_for(api_resource).await?;
     Ok(Api::<KubeDynamicObject>::namespaced_with(client, namespace, api_resource.as_kube_ref()))
 }
 
-// unbound_as_timeout logs a request that could not be sent for want of a bound
-// client and gives the answer the reconciler sees, Timeout (unbound_cluster_error).
-fn unbound_as_timeout(log_header: &str, request: &'static str, cluster: &ClusterId, key: &str, err: &Error) -> APIError {
+// unavailable_answer logs a request that was not sent, for want of a bound
+// client or because the binding is refused, and gives the answer the reconciler
+// sees for it (ClusterUnavailable::api_error: Timeout or Forbidden).
+fn unavailable_answer(log_header: &str, request: &'static str, cluster: &ClusterId, key: &str, err: ClusterUnavailable) -> APIError {
+    let answer = err.api_error();
     warn!(
         object = %key,
         request = request,
         cluster = ?cluster,
-        cause = "cluster not bound",
+        cause = err.cause(),
         error = %err,
-        "{} {} {} not sent: {}, answered with Timeout",
-        log_header, request, key, err
+        "{} {} {} not sent: {}, answered with {:?}",
+        log_header, request, key, err, answer
     );
-    APIError::Timeout
+    answer
 }
 
 // run_reconcile is the reconcile loop shared by reconcile_with and
@@ -831,7 +964,7 @@ where
                             let cluster = get_req.api_resource.cluster();
                             let key = get_req.key();
                             let res = match api_of(ctx, &get_req.api_resource, &get_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "Get", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "Get", &cluster, &key, e)),
                                 Ok(api) => match api.get(&get_req.name).await {
                                     Err(err) => {
                                         log_request_failure(log_header, "Get", &cluster, &key, &err);
@@ -849,7 +982,7 @@ where
                             let cluster = list_req.api_resource.cluster();
                             let key = list_req.key();
                             let res = match api_of(ctx, &list_req.api_resource, &list_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "List", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "List", &cluster, &key, e)),
                                 Ok(api) => match api.list(&ListParams::default()).await {
                                     Err(err) => {
                                         log_request_failure(log_header, "List", &cluster, &key, &err);
@@ -882,7 +1015,7 @@ where
                             let cluster = create_req.api_resource.cluster();
                             let key = create_req.key();
                             let res = match api_of(ctx, &create_req.api_resource, &create_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "Create", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "Create", &cluster, &key, e)),
                                 Ok(api) => match api.create(&post_params, &create_req.obj.into_kube()).await {
                                     Err(err) => {
                                         log_request_failure(log_header, "Create", &cluster, &key, &err);
@@ -926,7 +1059,7 @@ where
                                 Err(APIError::Timeout)
                             } else {
                                 match api_of(ctx, &delete_req.api_resource, &delete_req.namespace).await {
-                                    Err(e) => Err(unbound_as_timeout(log_header, "Delete", &cluster, &key, &e)),
+                                    Err(e) => Err(unavailable_answer(log_header, "Delete", &cluster, &key, e)),
                                     Ok(api) => match api.delete(&delete_req.name, &dp).await {
                                         Err(err) => {
                                             log_request_failure(log_header, "Delete", &cluster, &key, &err);
@@ -946,7 +1079,7 @@ where
                             let cluster = update_req.api_resource.cluster();
                             let key = update_req.key();
                             let res = match api_of(ctx, &update_req.api_resource, &update_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "Update", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "Update", &cluster, &key, e)),
                                 Ok(api) => match api.replace(&update_req.name, &post_params, &update_req.obj.into_kube()).await {
                                     Err(err) => {
                                         log_request_failure(log_header, "Update", &cluster, &key, &err);
@@ -965,7 +1098,7 @@ where
                             let cluster = update_status_req.api_resource.cluster();
                             let key = update_status_req.key();
                             let res = match api_of(ctx, &update_status_req.api_resource, &update_status_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "UpdateStatus", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "UpdateStatus", &cluster, &key, e)),
                                 // Here we assume serde_json always succeed
                                 Ok(api) => match api
                                     .replace_status(
@@ -992,7 +1125,7 @@ where
                             let cluster = patch_req.api_resource.cluster();
                             let key = patch_req.key();
                             let res = match api_of(ctx, &patch_req.api_resource, &patch_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "Patch", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "Patch", &cluster, &key, e)),
                                 Ok(api) => {
                                     let spec = patch_req
                                         .obj
@@ -1021,7 +1154,7 @@ where
                             let cluster = patch_status_req.api_resource.cluster();
                             let key = patch_status_req.key();
                             let res = match api_of(ctx, &patch_status_req.api_resource, &patch_status_req.namespace).await {
-                                Err(e) => Err(unbound_as_timeout(log_header, "PatchStatus", &cluster, &key, &e)),
+                                Err(e) => Err(unavailable_answer(log_header, "PatchStatus", &cluster, &key, e)),
                                 Ok(api) => {
                                     let status = patch_status_req
                                         .obj
@@ -1050,7 +1183,7 @@ where
                             let cluster = req.api_resource.cluster();
                             let key = req.key();
                             kube_resp = KubeAPIResponse::GetThenDeleteResponse(match ctx.clusters.client_for(&req.api_resource).await {
-                                Err(e) => KubeGetThenDeleteResponse { res: Err(unbound_as_timeout(log_header, "GetThenDelete", &cluster, &key, &e)) },
+                                Err(e) => KubeGetThenDeleteResponse { res: Err(unavailable_answer(log_header, "GetThenDelete", &cluster, &key, e)) },
                                 Ok(client) => transactional_get_then_delete_by_retry(&client, req, log_header.to_string()).await,
                             });
                         }
@@ -1059,7 +1192,7 @@ where
                             let cluster = req.api_resource.cluster();
                             let key = req.key();
                             kube_resp = KubeAPIResponse::GetThenUpdateResponse(match ctx.clusters.client_for(&req.api_resource).await {
-                                Err(e) => KubeGetThenUpdateResponse { res: Err(unbound_as_timeout(log_header, "GetThenUpdate", &cluster, &key, &e)) },
+                                Err(e) => KubeGetThenUpdateResponse { res: Err(unavailable_answer(log_header, "GetThenUpdate", &cluster, &key, e)) },
                                 Ok(client) => transactional_get_then_update_by_retry(&client, req, log_header.to_string()).await,
                             });
                         }
@@ -1068,7 +1201,7 @@ where
                             let cluster = req.api_resource.cluster();
                             let key = req.key();
                             kube_resp = KubeAPIResponse::GetThenUpdateStatusResponse(match ctx.clusters.client_for(&req.api_resource).await {
-                                Err(e) => KubeGetThenUpdateStatusResponse { res: Err(unbound_as_timeout(log_header, "GetThenUpdateStatus", &cluster, &key, &e)) },
+                                Err(e) => KubeGetThenUpdateStatusResponse { res: Err(unavailable_answer(log_header, "GetThenUpdateStatus", &cluster, &key, e)) },
                                 Ok(client) => transactional_get_then_update_status_by_retry(&client, req, log_header.to_string()).await,
                             });
                         }
