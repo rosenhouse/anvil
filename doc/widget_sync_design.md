@@ -109,11 +109,13 @@ the `Synced` condition: `Forbidden` for an authorization error;
 `CreateFailed` for a `NotFound` answering the Create (the inner namespace is
 missing); `Rejected` for `Invalid`, `BadRequest` and `NotSupported`;
 `RequestFailed` otherwise (a `NotFound` answering the Patch, an
-`AlreadyExists`, a `Conflict`). A failed JSON patch `test` is also answered
-`Invalid`, so `Rejected` can follow a race on the mirror; the next reconcile
-clears it. The shim maps a connection failure or a client-side request
-timeout to `Timeout`, so a partition from the inner cluster reads
-`InnerUnreachable`. `ForeignObject`, `Forbidden` and `Rejected` are the
+`AlreadyExists`, a `Conflict`). In the model a failed JSON patch `test` is
+also answered `Invalid`; on a real API server the two share the 422 status
+and differ only in the message, and the shim hands a failed test to the
+reconciler as `Conflict`, so a race on the mirror reads `RequestFailed` and
+is retried, while `Rejected` is reserved for a schema or webhook rejection.
+The shim also maps a connection failure or a client-side request timeout to
+`Timeout`, so a partition from the inner cluster reads `InnerUnreachable`. `ForeignObject`, `Forbidden` and `Rejected` are the
 permanent cases: nothing the reconciler does again changes the answer, and
 `Stalled` is `True` for them (section 1.4).
 

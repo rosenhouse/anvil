@@ -62,7 +62,7 @@ The reasons of a `False` `Synced` condition:
 | `Forbidden` | the inner cluster refused a request for lack of authorization | yes | the credential's RBAC is fixed |
 | `InnerUnreachable` | a request timed out or failed server-side; the inner cluster is not answering | no | the inner cluster answers again |
 | `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | no | the namespace is created |
-| `Rejected` | a request was rejected as invalid (also the answer to a failed patch test after a race on the mirror, which the next reconcile clears) | yes | the schema or the object is fixed |
+| `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | yes | the schema or the object is fixed |
 | `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | no | the next reconcile |
 
 After a failed request the controller writes the status once and requeues;
