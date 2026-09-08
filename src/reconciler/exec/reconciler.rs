@@ -74,6 +74,15 @@ where
 // wrapped for the kind the controller was started for, which is what the
 // precondition on the kind trusts (shim_layer::controller_runtime::
 // reconcile_dyn_with).
+//
+// reconcile_core requires only that the object is well formed for a namespaced
+// kind and that its kind is the one the reconciler was built for. It does not
+// require state_validation, which the static Reconciler above does: a dyn
+// reconciler is instantiated at boot for a kind whose spec it has never seen, so
+// there is no typed state_validation to require -- what validates a spec is the
+// CRD's own schema, a parameter of the shape's installed type
+// (Cluster::synced_installed_type). A dyn reconciler must work for any spec, and
+// its proof may not lean on the spec being anything in particular.
 pub trait DynReconciler
 where
     Self::S: View,

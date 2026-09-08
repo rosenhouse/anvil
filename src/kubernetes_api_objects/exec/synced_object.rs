@@ -270,10 +270,8 @@ impl SyncedStatus {
     // the body arranges, because the postcondition says the view's rest is the
     // value it was given -- for a value carrying an `observedGeneration` of its
     // own there is no status of which that is true, whatever the body does with
-    // it. (The body used to strip those two members, which made the
-    // postcondition false rather than making it true.) The two callers pass a
-    // rest() or an empty_rest(): widget_sync_controller's outer_status_for, and
-    // the tests below.
+    // it. The two callers pass a rest() or an empty_rest():
+    // widget_sync_controller's outer_status_for, and the tests below.
     #[verifier(external_body)]
     pub fn new(observed_generation: Option<i64>, conditions: Option<Vec<SyncedCondition>>, rest: RawValue) -> (s: SyncedStatus)
         requires spec::status_rest_ok(rest@),

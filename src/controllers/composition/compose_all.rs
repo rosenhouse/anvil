@@ -1,4 +1,6 @@
 
+// The whole-repository composition: the four framework controllers beside the
+// Widget sync controller and janitors (doc/widget_sync_design.md, section 3.4).
 use verus_temporal_logic::{defs::*, rules::*};
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::proof::core::*;

@@ -336,10 +336,7 @@ pub fn crd_name(kind: &KindConfig, plural: &str) -> String {
 /// rests on the CRD name being free of `@` (spec::model_kind::kind_name_ok);
 /// `/` is refused with it, since it separates the binding's two parts.
 ///
-/// A CRD name is a DNS subdomain, so this cannot fire on a name the API server
-/// accepted. It is here because it is the exec side of a hypothesis the proofs
-/// rest on, and a hypothesis nothing checks is a hypothesis that can quietly
-/// stop holding.
+/// A DNS name has neither, but the proofs assume it, so it is checked.
 pub fn check_kind_name(name: &str) -> Result<(), String> {
     if name.contains('@') || name.contains('/') {
         return Err(format!(
