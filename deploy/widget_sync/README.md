@@ -99,6 +99,42 @@ binary exposes no health endpoint and nothing else that says whether the
 reconcilers are still making progress, and a probe that does not measure that
 would only restart healthy pods.
 
+**Before restoring the outer cluster.** The janitor recognizes a mirror's
+parent by uid: the mirror's `anvil.dev/parent-uid` annotation must equal the
+uid of the outer `Widget` of the same namespace and name. A restore of the
+outer cluster that issues new uids (Velero, re-applied manifests, a recreated
+namespace, a GitOps re-bootstrap; an etcd snapshot restore keeps uids) makes
+every mirror's annotation stale at once, so the janitor would delete every
+mirror and the sync reconciler would then create each one afresh, which in
+the Cluster API setting means every workload cluster is torn down and
+rebuilt. To withhold the janitor's deletes for the duration of such an event,
+add the key `pause` to the ConfigMap `widget-sync-janitor`; the binary checks
+the mounted file before every Delete, so the pause takes effect within the
+kubelet's ConfigMap sync period (about a minute) and needs no restart:
+
+```sh
+kubectl --context kind-widget-sync-outer -n widget-sync patch configmap widget-sync-janitor --type merge -p '{"data":{"pause":""}}'
+kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-controller | grep 'janitor paused'   # each withheld delete
+kubectl --context kind-widget-sync-outer -n widget-sync patch configmap widget-sync-janitor --type json -p '[{"op":"remove","path":"/data/pause"}]'
+```
+
+The recommended sequence is: pause, restore the outer cluster, look at what
+the restore produced, decide, resume. While paused, the janitor answers each
+stale mirror with a withheld delete (a warn log with `cause="janitor
+paused"`) and retries it; nothing else changes, and the sync reconciler never
+adopts: a restored outer `Widget` whose uid differs from the mirror's
+annotation reports `Synced=False/ForeignObject` and gets a new mirror only
+after the old one is gone. Resuming therefore lets the janitor delete every
+mirror whose annotation no longer matches, and the sync reconciler then
+recreates them; what the pause buys is the time to confirm that the restore
+is the intended one, or to redo it from an etcd snapshot, which keeps uids,
+before that happens. Re-stamping a mirror's annotation or stripping its label
+by hand is an edit the proofs' rely excludes (`doc/widget_sync_design.md`,
+section 2.3) and is not a way out. Withholding a delete cannot violate
+anything the controller is verified for: R3 and R3s promise that a stale
+mirror is eventually removed, and they resume once the key is deleted; the
+paused period only defers that cleanup.
+
 **One replica is not at-most-one.** The proofs assume a single active sync
 controller. `replicas: 1` with `strategy: Recreate` keeps the Deployment from
 running two pods on purpose, but Kubernetes does not guarantee it: a node that
@@ -110,8 +146,9 @@ election, which would close that gap, is not implemented.
 **Pod hardening.** The image runs as uid 65532 and the pod repeats it with
 `runAsNonRoot`; the container drops all capabilities, forbids privilege
 escalation, uses the `RuntimeDefault` seccomp profile and a read-only root
-filesystem (the ready file's emptyDir is the only writable mount), and has
-CPU and memory requests and limits sized for the demo.
+filesystem (the ready file's emptyDir is the only writable mount; the pause
+gate's ConfigMap is mounted read-only), and has CPU and memory requests and
+limits sized for the demo.
 
 **RBAC.** In the outer cluster the controller reads `widgets` and patches
 `widgets/status`. `rbac.yaml` also binds, in namespace `default`, `get` and

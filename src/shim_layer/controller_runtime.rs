@@ -24,6 +24,7 @@ use kube_core::{ErrorResponse, NamespaceResourceScope};
 use serde::{de::DeserializeOwned, Serialize};
 use tracing::{debug, error, info, warn};
 use crate::crds::Error;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use vstd::string::*;
@@ -155,7 +156,7 @@ where
     info!("starting controller");
     Controller::new(crs, watcher::Config::default()) // The controller's reconcile is triggered when a CR is created/updated
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -207,7 +208,7 @@ where
         .owns(Api::<Pod>::all(client.clone()), watcher::Config::default()) // Watch owned Pods
         .owns(Api::<O>::all(client.clone()), watcher::Config::default()) // Watch owned CRs of type O
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -224,10 +225,13 @@ where
 // that cluster's client) and whose requests may target either cluster.
 // `field_manager`, if set, is sent as the fieldManager of every create, update
 // and patch the controller issues, so the API server records the controller by
-// that name in the objects' managedFields.
+// that name in the objects' managedFields. `delete_pause_file`, if set, is the
+// path whose existence withholds the controller's Delete requests (see
+// `deletes_withheld`).
 pub async fn run_controller_in_clusters<K, R, E>(
     clusters: ClusterClients,
     field_manager: Option<String>,
+    delete_pause_file: Option<String>,
     fault_injection: bool,
 ) -> Result<()>
 where
@@ -260,7 +264,7 @@ where
     info!("starting controller (custom resource in {:?} cluster)", cr_cluster);
     Controller::new(crs, watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -282,6 +286,7 @@ pub async fn run_controller_with_same_name_watch<K, R, E, O>(
     clusters: ClusterClients,
     watched_cluster: ClusterId,
     field_manager: Option<String>,
+    delete_pause_file: Option<String>,
     fault_injection: bool,
 ) -> Result<()>
 where
@@ -327,7 +332,7 @@ where
                 .map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
         })
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -551,20 +556,42 @@ where
                                 );
                             }
                             let key = delete_req.key();
-                            match api.delete(&delete_req.name, &dp).await {
-                                Err(err) => {
-                                    kube_resp =
-                                        KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
-                                            res: Err(kube_error_to_api_error(&err)),
-                                        });
-                                    log_request_failure(&log_header, "Delete", cluster, &key, &err);
-                                }
-                                Ok(_) => {
-                                    kube_resp =
-                                        KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
-                                            res: Ok(()),
-                                        });
-                                    info!("{} Delete {} done", log_header, key);
+                            if deletes_withheld(ctx.delete_pause_file.as_deref()) {
+                                // The operator has paused deletes (deploy/widget_sync/README.md,
+                                // "Before restoring the outer cluster"). The request is not sent.
+                                // The reconciler is answered with Timeout: in the model's
+                                // `drop_req` fault (kubernetes_cluster/spec/cluster.rs) that is
+                                // the error of a request the network dropped before it reached
+                                // the API server, which is what happened here, and the shim
+                                // already produces it for a real timeout. The reconciler ends
+                                // this reconcile in Error and is requeued by error_policy.
+                                warn!(
+                                    object = %key,
+                                    request = "Delete",
+                                    cluster = ?cluster,
+                                    cause = "janitor paused",
+                                    "{} Delete {} withheld: the pause file exists, the reconcile is retried",
+                                    log_header, key
+                                );
+                                kube_resp = KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
+                                    res: Err(APIError::Timeout),
+                                });
+                            } else {
+                                match api.delete(&delete_req.name, &dp).await {
+                                    Err(err) => {
+                                        kube_resp =
+                                            KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
+                                                res: Err(kube_error_to_api_error(&err)),
+                                            });
+                                        log_request_failure(&log_header, "Delete", cluster, &key, &err);
+                                    }
+                                    Ok(_) => {
+                                        kube_resp =
+                                            KubeAPIResponse::DeleteResponse(KubeDeleteResponse {
+                                                res: Ok(()),
+                                            });
+                                        info!("{} Delete {} done", log_header, key);
+                                    }
                                 }
                             }
                         }
@@ -1042,13 +1069,61 @@ where
 
 // Data is passed to reconcile_with.
 // It carries the clients that communicate with the Kubernetes API servers,
-// which of them hosts the custom resource this controller reconciles, and the
+// which of them hosts the custom resource this controller reconciles, the
 // fieldManager the controller's writes are sent with (None: unset, so the API
-// server records them under the client's default manager name).
+// server records them under the client's default manager name), and the path
+// of the pause file that withholds the controller's Delete requests (None: no
+// gate; see `deletes_withheld`).
 pub struct Data {
     pub clusters: ClusterClients,
     pub cr_cluster: ClusterId,
     pub field_manager: Option<String>,
+    pub delete_pause_file: Option<String>,
+}
+
+// deletes_withheld is the delete-withholding gate: true when a pause file is
+// configured and exists at this moment. While it is true, reconcile_with does
+// not send Delete requests and answers the reconciler with a Timeout instead,
+// which to the verified reconciler is a failed request the model already covers
+// (the `drop_req` fault), so no reconciler, model or proof knows about the gate.
+// The file is checked per request so that the gate takes effect, and is
+// released, without a restart; a mounted ConfigMap key is the intended file.
+// The widget sync controller sets the path from $JANITOR_PAUSE_FILE so an
+// operator can withhold the janitor's deletes while the outer cluster is
+// restored with new uids (deploy/widget_sync/README.md). Withholding a delete
+// can only defer cleanup: R3 and R3s promise that stale mirrors are removed,
+// and resume once the gate is cleared; nothing promises a delete is sent now.
+pub fn deletes_withheld(pause_file: Option<&str>) -> bool {
+    match pause_file {
+        Some(path) => Path::new(path).exists(),
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The gate is true when the configured file exists and false when it does
+    // not or when no path is configured. The dispatch that acts on it is not
+    // tested here: it needs a kube client.
+    #[test]
+    fn deletes_withheld_follows_the_pause_file() {
+        let dir = std::env::temp_dir().join(format!("anvil-janitor-pause-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pause = dir.join("pause");
+        let pause_path = pause.to_str().unwrap();
+
+        assert!(!deletes_withheld(None));
+        assert!(!deletes_withheld(Some(pause_path)));
+        std::fs::write(&pause, b"").unwrap();
+        assert!(deletes_withheld(Some(pause_path)));
+        assert!(!deletes_withheld(None));
+        std::fs::remove_file(&pause).unwrap();
+        assert!(!deletes_withheld(Some(pause_path)));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }
 
 // The message the API server puts on a 422 it raises itself while applying a
