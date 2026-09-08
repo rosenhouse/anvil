@@ -30,6 +30,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 use tracing::*;
 use verifiable_controllers::crds::{Widget, WidgetCondition, WidgetSpec, WidgetStatus};
+use verifiable_controllers::shim_layer::bindings::{CLUSTER_NAME_LABEL, SECRET_TYPE};
 
 use crate::common::*;
 use crate::widget_sync_e2e::{
@@ -98,21 +99,39 @@ async fn must_stay_absent(widgets: &Widgets, name: &str, why: &str) -> Result<()
     Ok(())
 }
 
-// The kubeconfig Secret of a binding, as the controller reads it.
+// The kubeconfig Secret of a binding, as the controller reads it: the Cluster
+// API convention, checked here so that a testbed that stopped writing the type
+// or the label fails as itself rather than as a controller that binds nothing.
 async fn get_secret(secrets: &Api<Secret>, name: &str) -> Result<Secret, Error> {
-    secrets.get(name).await.map_err(|e| {
+    let secret = secrets.get(name).await.map_err(|e| {
         error!("the binding Secret {} is not in the outer cluster: {}", name, e);
         Error::WidgetSyncFailed
-    })
+    })?;
+    let cluster = name.strip_suffix("-kubeconfig").unwrap_or(name);
+    if secret.type_.as_deref() != Some(SECRET_TYPE)
+        || secret.labels().get(CLUSTER_NAME_LABEL).map(|s| s.as_str()) != Some(cluster)
+    {
+        error!(
+            "the binding Secret {} is not of the Cluster API convention (type {:?}, labels {:?}); tools/two-cluster-test.sh writes it",
+            name, secret.type_, secret.metadata.labels
+        );
+        return Err(Error::WidgetSyncFailed);
+    }
+    Ok(secret)
 }
 
-// A copy of `secret` under `name` in `namespace`, carrying its data alone: a
-// re-created binding credential, or the copied one of the claim scenario.
+// A copy of `secret` under `name` in `namespace`, carrying its data, its type
+// and its labels: a re-created binding credential, or the copied one of the
+// claim scenario. The type `cluster.x-k8s.io/secret` and the label
+// `cluster.x-k8s.io/cluster-name` are what makes a Secret a binding
+// (doc/widget_sync_fanout_design.md, section 1.2), so a copy without them would
+// be no binding at all and the scenario would prove nothing.
 fn copy_of(secret: &Secret, namespace: &str, name: &str) -> Secret {
     Secret {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some(namespace.to_string()),
+            labels: secret.metadata.labels.clone(),
             ..ObjectMeta::default()
         },
         data: secret.data.clone(),

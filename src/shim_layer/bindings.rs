@@ -1,10 +1,13 @@
 // The binding manager (doc/widget_sync_fanout_design.md, sections 1.2 to 1.4 and
 // 3.4). A binding is a pair (namespace, clusterName) of the outer cluster; its
 // inner cluster is reached through the Secret `<clusterName>-kubeconfig` in
-// `namespace`, key `value`, the Cluster API convention. The manager watches the
-// Secrets of every namespace and, per binding:
+// `namespace`, key `value`, the Cluster API convention: type
+// `cluster.x-k8s.io/secret`, labelled `cluster.x-k8s.io/cluster-name:
+// <clusterName>`. The manager watches those Secrets in every namespace and, per
+// binding:
 //
-//   - builds the pair of clients from the kubeconfig,
+//   - checks the kubeconfig against the shape a Cluster API kubeconfig has
+//     (validate_kubeconfig) and builds the pair of clients from it,
 //   - asks the inner cluster, with a SelfSubjectAccessReview per verb, whether
 //     the credential may do what the reconcilers need in the binding's
 //     namespace (section 1.4),
@@ -53,6 +56,16 @@ type KubeDynamicObject = kube::api::DynamicObject;
 pub const SECRET_SUFFIX: &str = "-kubeconfig";
 pub const SECRET_KEY: &str = "value";
 
+// The rest of the Cluster API convention, which the watch is narrowed to: the
+// Secret's type is `cluster.x-k8s.io/secret` and it carries the label
+// `cluster.x-k8s.io/cluster-name`, whose value is the cluster it belongs to.
+// A Secret that is merely named `<something>-kubeconfig` is not a binding: the
+// watch selects on the label, and the type and the label's value are checked on
+// every event, so an ordinary Secret of that name — a backup, a user's own
+// kubeconfig — is never handed to a client.
+pub const SECRET_TYPE: &str = "cluster.x-k8s.io/secret";
+pub const CLUSTER_NAME_LABEL: &str = "cluster.x-k8s.io/cluster-name";
+
 // The claim: a ConfigMap of the inner cluster, in kube-system so that it lives
 // where a workload cluster's own bookkeeping does and is not swept away with a
 // tenant namespace.
@@ -89,6 +102,28 @@ pub fn binding_of_secret(namespace: &str, name: &str) -> Option<ClusterRef> {
         return None;
     }
     Some(ClusterRef::new(namespace.to_string(), cluster.to_string()))
+}
+
+/// binding_of_capi_secret is binding_of_secret plus the rest of the Cluster API
+/// convention: the Secret's `type` must be `cluster.x-k8s.io/secret` and its
+/// label `cluster.x-k8s.io/cluster-name` must be the cluster its name says it
+/// is. The label is what the watch selects on and the authority on the cluster
+/// name; requiring it to agree with the name keeps one Secret from being two
+/// bindings depending on which of the two is read.
+pub fn binding_of_capi_secret(
+    namespace: &str,
+    name: &str,
+    secret_type: Option<&str>,
+    cluster_label: Option<&str>,
+) -> Option<ClusterRef> {
+    if secret_type != Some(SECRET_TYPE) {
+        return None;
+    }
+    let binding = binding_of_secret(namespace, name)?;
+    if cluster_label != Some(binding.name.as_str()) {
+        return None;
+    }
+    Some(binding)
 }
 
 /// validate_kubeconfig is the trust boundary of a binding's credential. A
@@ -411,12 +446,19 @@ impl BindingManager {
     /// a single bad binding; the error is the watch itself ending.
     pub async fn run(mut self, shutdown: impl Future<Output = ()>) -> Result<()> {
         let secrets = Api::<Secret>::all(self.clusters.primary.clone());
-        let stream = watcher(secrets, watcher::Config::default());
+        // Only the Secrets of the Cluster API convention: the watch asks the
+        // API server for the ones carrying the cluster-name label, so an
+        // ordinary Secret of any namespace is never sent to this process, and
+        // binding_of checks the type and the label's value on each event.
+        let stream = watcher(secrets, watcher::Config::default().labels(CLUSTER_NAME_LABEL));
         futures::pin_mut!(stream);
         futures::pin_mut!(shutdown);
         let mut ticker = tokio::time::interval(TICK);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        info!("binding manager: watching Secrets named *{} in every namespace", SECRET_SUFFIX);
+        info!(
+            "binding manager: watching Secrets of type {} labelled {} and named *{}, in every namespace",
+            SECRET_TYPE, CLUSTER_NAME_LABEL, SECRET_SUFFIX
+        );
         loop {
             tokio::select! {
                 _ = &mut shutdown => {
@@ -853,9 +895,17 @@ pub async fn outer_cluster_id(client: &Client, override_id: Option<String>) -> R
     Ok(id)
 }
 
-// The binding a Secret names, if it names one.
+// The binding a Secret names, if it names one: the Cluster API convention
+// (binding_of_capi_secret), read off the object the watch delivered. The watch
+// selects on the label, but a label selector cannot check the type or compare
+// the label with the name, so both are checked here on every event.
 fn binding_of(secret: &Secret) -> Option<ClusterRef> {
-    binding_of_secret(secret.namespace().as_deref().unwrap_or(""), &secret.name_any())
+    binding_of_capi_secret(
+        secret.namespace().as_deref().unwrap_or(""),
+        &secret.name_any(),
+        secret.type_.as_deref(),
+        secret.labels().get(CLUSTER_NAME_LABEL).map(|s| s.as_str()),
+    )
 }
 
 // The kubeconfig a Secret carries: the `value` key of its data (kube has already
@@ -900,6 +950,25 @@ mod tests {
         assert!(binding_of_secret("default", "a-kubeconfig-backup").is_none());
         assert!(binding_of_secret("default", "-kubeconfig").is_none());
         assert!(binding_of_secret("", "a-kubeconfig").is_none());
+    }
+
+    // The whole Cluster API convention, not the name alone: an ordinary Secret
+    // called `a-kubeconfig` (a backup, a user's own kubeconfig) is not a
+    // binding, and neither is one whose label names another cluster than its
+    // name does.
+    #[test]
+    fn only_a_cluster_api_secret_is_a_binding() {
+        let capi = |name: &str, type_: Option<&str>, label: Option<&str>| {
+            binding_of_capi_secret("default", name, type_, label)
+        };
+        let binding = capi("a-kubeconfig", Some(SECRET_TYPE), Some("a")).expect("the convention");
+        assert_eq!((binding.namespace.as_str(), binding.name.as_str()), ("default", "a"));
+        assert!(capi("a-kubeconfig", Some("Opaque"), Some("a")).is_none());
+        assert!(capi("a-kubeconfig", None, Some("a")).is_none());
+        assert!(capi("a-kubeconfig", Some(SECRET_TYPE), None).is_none());
+        assert!(capi("a-kubeconfig", Some(SECRET_TYPE), Some("b")).is_none());
+        assert!(capi("a-kubeconfig", Some(SECRET_TYPE), Some("")).is_none());
+        assert!(capi("a", Some(SECRET_TYPE), Some("a")).is_none());
     }
 
     fn binding(namespace: &str, name: &str) -> ClusterRef {

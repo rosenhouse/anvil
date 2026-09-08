@@ -12,9 +12,11 @@
 ##                        widget echo controller plays the inner Widget
 ##                        implementation.
 ## Each binding is a Secret `<clusterName>-kubeconfig` in the outer namespace
-## `default`, key `value`, holding a self-contained kubeconfig built from an
-## inner service-account token: the Cluster API convention the controller reads
-## bindings by (doc/widget_sync_fanout_design.md, section 1.2).
+## `default`, of type `cluster.x-k8s.io/secret` and labelled
+## `cluster.x-k8s.io/cluster-name: <clusterName>`, key `value`, holding a
+## self-contained kubeconfig built from an inner service-account token: the
+## Cluster API convention the controller reads bindings by, and the only shape
+## it accepts (doc/widget_sync_fanout_design.md, section 1.2).
 ##
 ## Requires kind, kubectl, docker and the prerequisites of deploy.sh.
 ## Usage:
@@ -137,8 +139,13 @@ contexts:
 current-context: ${binding}
 EOF
     unset token
+    # Type and label as Cluster API writes them: the controller's Secret watch
+    # selects on the label and refuses anything of another type.
     kubectl --context "$outer_ctx" -n default create secret generic "${binding}-kubeconfig" \
+        --type=cluster.x-k8s.io/secret \
         --from-file=value="$kubeconfig_dir/value"
+    kubectl --context "$outer_ctx" -n default label secret "${binding}-kubeconfig" \
+        "cluster.x-k8s.io/cluster-name=${binding}"
     rm -rf "$kubeconfig_dir"
     set -x
 done

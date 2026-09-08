@@ -210,20 +210,35 @@ namespace whose cluster selector names that cluster, and the inner cluster
 they are mirrored into. Its credential is the Secret
 `<clusterName>-kubeconfig` of that namespace, key `value`, holding a
 self-contained kubeconfig — the Cluster API convention, so a management
-cluster provides it without any help from us. The controller watches the
-Secrets of every namespace (`rbac.yaml` grants `secrets` get, list and watch)
-and keeps one pair of clients per binding whose Secret exists. Nothing is
-mounted and nothing is configured per binding: adding an inner cluster is
-adding its Secret, removing one is removing its Secret.
+cluster provides it without any help from us. The whole convention is
+required, not the name alone:
+
+| | |
+|---|---|
+| name | `<clusterName>-kubeconfig` |
+| `type` | `cluster.x-k8s.io/secret` |
+| label | `cluster.x-k8s.io/cluster-name: <clusterName>`, which must be the cluster the name says it is |
+| `data.value` | a self-contained kubeconfig of the shape below |
+
+The controller watches the Secrets of every namespace that carry the
+`cluster.x-k8s.io/cluster-name` label (`rbac.yaml` grants `secrets` get, list
+and watch; the label is a selector on the watch, so no other Secret is sent to
+this process at all) and checks the type and the label's value on every event.
+A Secret merely *named* `something-kubeconfig` — a backup, an operator's own
+kubeconfig — is not a binding. It keeps one pair of clients per binding whose
+Secret exists. Nothing is mounted and nothing is configured per binding: adding
+an inner cluster is adding its Secret, removing one is removing its Secret.
 
 ```sh
-kubectl --context kind-widget-sync-outer -n default create secret generic c-kubeconfig --from-file=value=./kubeconfig-of-c
+kubectl --context kind-widget-sync-outer -n default create secret generic c-kubeconfig \
+    --type=cluster.x-k8s.io/secret --from-file=value=./kubeconfig-of-c
+kubectl --context kind-widget-sync-outer -n default label secret c-kubeconfig cluster.x-k8s.io/cluster-name=c
 kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-controller | grep '^.*binding default/c'
 ```
 
 | The binding's Secret | What its objects report | What the controller does |
 |---|---|---|
-| missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
+| missing, not of type `cluster.x-k8s.io/secret`, not labelled with its cluster name, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
 | present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; it is retried when the Secret changes |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
 | present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |

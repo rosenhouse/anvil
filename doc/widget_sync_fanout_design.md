@@ -85,11 +85,16 @@ A **binding** is a pair `b = (namespace, clusterName)`. Its inner cluster is
 reached through the Secret `<clusterName>-kubeconfig` in `namespace`, key
 `value`, a self-contained kubeconfig (certificate data or an inline
 token). This is the Cluster API convention, so a management cluster
-provides the Secret without any help from us.
+provides the Secret without any help from us; the convention is taken whole,
+so the Secret must also be of type `cluster.x-k8s.io/secret` and carry the
+label `cluster.x-k8s.io/cluster-name`, whose value is the cluster name and
+must agree with the name minus the suffix. A Secret merely named
+`<something>-kubeconfig` is not a binding.
 
-The controller watches Secrets in all namespaces and keeps one pair of
-clients (requests, watch; section 5.3 of the main design) per binding whose
-Secret exists. A Secret that changes (a rotated credential; Cluster API
+The controller watches the labelled Secrets in all namespaces (the label is a
+selector on the watch; the type and the label's value are checked on each
+event) and keeps one pair of clients (requests, watch; section 5.3 of the main
+design) per binding whose Secret exists. A Secret that changes (a rotated credential; Cluster API
 rewrites the Secret) rebuilds the binding's clients; a Secret that goes
 away drops the binding, its janitors included. The `tokenFile` mechanism of
 the single-pair deployment is not used: a Cluster API kubeconfig is inline
