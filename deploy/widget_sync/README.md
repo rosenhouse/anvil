@@ -72,7 +72,8 @@ The reasons of a `False` `Synced` condition:
 | `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | yes | the schema or the object is fixed |
 | `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | no | the next reconcile |
 
-After a failed request the controller writes the status once and requeues;
+After a failed request the controller writes the status once and requeues; that
+requeue is the per-object backoff of "Retries" below, not the 60-second one.
 `ready` and `observedCount` keep their last reported values.
 
 The mirror carries `anvil.dev/managed-by: widget-sync` and
@@ -275,7 +276,7 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 |---|---|---|
 | missing, not of type `cluster.x-k8s.io/secret`, not labelled with its cluster name, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: the binding is not bound, so the reconciler does not address it at all -- it reports the status and requeues, without a round trip. Its janitors do not run, so its mirrors are left alone |
 | present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; nothing retries it on a timer, only a change of the Secret's `value` |
-| present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
+| present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | the *binding* is retried with backoff, 1s doubling to 1min, for an unreachable cluster, and re-checked every 5 minutes for a denied one; its *objects* are retried on their own schedule ("Retries" below) |
 | present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes, or at once when the Secret's `value` changes |
 | present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it; its access and its claim are re-checked every minute |
 
@@ -286,6 +287,21 @@ and created again. Editing a label or another key of the same Secret, or a
 relist of the watch, leaves a bound binding running and an unbound one on its
 existing retry schedule — nothing is rebuilt and no janitor of the process is
 restarted by a relist.
+
+**Who may create a binding's Secret.** The owner's decision is that
+`<clusterName>-kubeconfig` Secrets are created by **Cluster API only** — the
+management cluster's own controllers — and by nobody else. That is the
+deployment this controller is built for and the one it is supported in. The
+type and label filter on the Secret watch, and the kubeconfig validation below,
+are **defence in depth; they are not an authorization boundary.** They narrow
+what a malformed or unexpected Secret can do, and they do not decide who is
+allowed to write one: they are not designed to hold against a principal who is
+trying to get past them. A namespace in which principals other than Cluster API
+may create Secrets of this name is **outside the supported deployment** — put
+the other way round, whoever can create such a Secret in a namespace is as
+trusted as Cluster API is, which is what the next paragraph spells out the
+consequences of. The place to enforce that is RBAC on `secrets` in the
+namespaces this controller watches, not anything in this process.
 
 **What a kubeconfig may contain.** A kubeconfig is a program as much as it is a
 credential: the client library it is handed to will run the command a `users[].user.exec`
@@ -420,6 +436,36 @@ bindings from Secrets ("Bindings and the claim" above): one sync reconciler
 per kind, started at boot, and one janitor per kind and bound inner cluster,
 started and stopped with its binding.
 
+**Retries.** A reconcile that ends without a failure is requeued after **60
+seconds** — that is the sync reconciler's interval and the janitor's resync,
+and it is what liveness rests on. A reconcile that **fails** is retried per
+object on an exponential backoff instead: **10 seconds** after that object's
+first failure, twice the last delay after each further consecutive failure of
+the same object, up to a cap of **5 minutes** — 10, 20, 40, 80, 160, 300, 300,
+... seconds. The count is **per object, not per controller**: one object
+failing does not slow the retries of any other, and each walks the schedule on
+its own.
+
+What puts an object back at the 10-second base is **a reconcile of that object
+succeeding**; its count is dropped then, and also when the object turns out to
+be gone or to have a status outside the shape. Nothing else resets it — not
+another object recovering, not a binding coming back, not time passing. So an
+object that has been failing for a few minutes is up to 5 minutes from its next
+attempt, and a fault repaired outside its own cluster (a binding's Secret
+restored, an inner cluster answering again) reaches it within those 5 minutes
+at the latest. It is usually much sooner, because the repair itself tends to
+produce an event the controller acts on at once: any edit of the outer object,
+and the same-name trigger a re-bound binding's mirror watch emits for every
+existing mirror when it starts. An object whose reconcile ends by *reporting* a
+condition — `ForeignObject`, `StaleMirror`, `InnerConverging` — has not failed
+and stays on the 60-second requeue.
+
+The backoff is what keeps a binding that is down or refused from being a steady
+load on the API server its objects are read from: at a fixed 10 seconds a
+namespace of a thousand such objects is a hundred reads a second that cannot
+succeed, for as long as the fault lasts; at the cap it is between three and
+four a second.
+
 **Probes.** A startup probe, `test -f /run/widget-sync/ready`, waits for a
 file the binary creates (path from `READY_FILE`, on a small emptyDir) once
 every configured kind has passed the boot checks and the sync controllers are
@@ -467,10 +513,22 @@ kubectl --context kind-widget-sync-outer -n widget-sync patch configmap widget-s
 The recommended sequence is: pause, restore the outer cluster, look at what
 the restore produced, decide, resume. While paused, the janitor answers each
 stale mirror with a withheld delete (a warn log with `cause="janitor
-paused"`) and retries it; nothing else changes, and the sync reconciler never
-adopts: a restored outer `Widget` whose uid differs from the mirror's
-annotation reports `Synced=False/ForeignObject` and gets a new mirror only
-after the old one is gone. Resuming therefore lets the janitor delete every
+paused"`) and retries it — and that retry is the backed-off one of "Retries"
+above. The gate answers a withheld Delete with a `Timeout`, which the janitor's
+reconcile ends in `Error` on, so each withheld mirror walks the retry schedule
+up to the 5-minute cap while the pause is on. **Deleting the `pause` key
+therefore does not resume the deletes within one requeue.** Clearing the gate
+changes nothing in either cluster, so no watch fires and each mirror waits for
+the retry it is already scheduled for: the deletes resume within **at most 5
+minutes, plus the reconcile itself**, and a mirror withheld for any length of
+time will be at that cap rather than below it. Nothing is lost by the wait —
+withholding a delete and deferring it are the same thing here, as the end of
+this section says — but do not read the log going quiet in the first minute
+after clearing the key as the deletes having resumed. Nothing else changes
+while paused, and the sync reconciler never adopts: a restored outer `Widget`
+whose uid differs from the mirror's annotation reports
+`Synced=False/ForeignObject` and gets a new mirror only after the old one is
+gone. Resuming therefore lets the janitor delete every
 mirror whose annotation no longer matches, and the sync reconciler then
 recreates them; what the pause buys is the time to confirm that the restore
 is the intended one, or to redo it from an etcd snapshot, which keeps uids,
