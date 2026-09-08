@@ -218,10 +218,13 @@ every installed type, including any the other controller brings, must meet
 hypothesis 2. For the six-controller cluster of section 3.4 that would mean
 the state validation of the four other controllers' types as well as their
 commutation lemmas, which is why that cluster is not pulled back. The pair's relies of section 3.2 must hold of the other
-controller as invariants of the one-store model from init and next
-(`widget_relies_hold_of`); that is what a Welder composition of the controller
-with the pair establishes from its guarantee. No fairness of the other
-controllers is assumed. `widget_instance_two_cluster_theorem` discharges the
+controller as invariants of the one-store model under the pair's own spec,
+init, next, the pair's fairness and D3 (`widget_relies_hold_of`);
+`lemma_relies_hold_of_from_welder` derives that from what a Welder composition
+of the controller with the pair establishes, the controller's guarantee as an
+invariant under `cluster_model`, given that the guarantee implies the relies
+and that the pair's spec provides every fairness the Welder registry declares.
+No fairness of the other controllers is assumed. `widget_instance_two_cluster_theorem` discharges the
 hypotheses for the concrete cluster of the pair, the case with no other
 controller (`widget_pair_cluster`). `widget_disturbed_two_cluster_theorem`
 does the same for the cluster of the pair with the disturber (section 2.4).
