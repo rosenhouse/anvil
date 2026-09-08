@@ -351,9 +351,9 @@ Trusted beyond the specification, all under `widget_sync_controller/`: the
 `external_body` accessors and constructors of `trusted/exec_types.rs`
 (`well_formed`, `spec`, `status`, `set_spec` and `set_status` of both
 wrappers; `count`, `message`, `observed_generation`, `ready` and
-`observed_count` of the status; `outer_status_for` and
-`outer_status_without_inner`, which build the outer status by hand to match
-the spec's definition), and the three `Marshallable` instances of the
+`observed_count` of the status; `outer_status_for`, which builds the outer
+status, its three conditions included, by hand to match the spec's
+definition), and the three `Marshallable` instances of the
 reconcile states in `model/install.rs`. From the framework the pair relies on
 the wrapper macro's `unmarshal`, `marshal`, `api_resource` and `has_kind`
 postconditions, on `UidToken`, on the `PatchTests` and `Preconditions`
