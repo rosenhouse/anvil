@@ -43,12 +43,33 @@ if [ $# -gt 0 ]; then
     esac
 fi
 
+# The features the app's binary needs on top of the default set. The sync
+# controller's runners take work from outside their own watches
+# (Controller::reconcile_on), which is kube-runtime's unstable-runtime API, and
+# its [[bin]] in Cargo.toml requires the `dyn-runtime` feature that turns it on
+# (build.md). The echo controller does not.
+features_of() {
+    case "$1" in
+        widget_sync) echo "dyn-runtime" ;;
+        *) echo "" ;;
+    esac
+}
+
 build_image() {
     local app="$1"
+    local features
+    features="$(features_of "$app")"
     case "$build_controller" in
         local)
             echo "Building ${app} controller binary"
-            cargo verus build --release --bin "${app}_controller" -- --no-verify "${@:2}"
+            if [ -n "$features" ]; then
+                # cargo-verus insists that the cargo options it also reads
+                # (--features, --package, --manifest-path) precede the ones it
+                # does not (--bin), or it refuses the invocation.
+                cargo verus build --features "$features" --release --bin "${app}_controller" -- --no-verify "${@:2}"
+            else
+                cargo verus build --release --bin "${app}_controller" -- --no-verify "${@:2}"
+            fi
             echo "Building ${app} controller image"
             docker build -f docker/controller/Dockerfile \
                 -t "local/$(echo "$app" | tr '_' '-')-controller:v0.1.0" \

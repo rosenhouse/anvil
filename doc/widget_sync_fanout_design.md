@@ -3,10 +3,9 @@
 This document is the design for issues #15 (many outer namespaces, each
 with its own inner cluster) and #20 (controllers generic over kinds,
 instantiated at boot). It extends `doc/widget_sync_design.md`, which
-describes the single pair as it is verified today, and it records the
-decisions of the project owner of 2026-09-08. Sections 1 to 4 are the
-design; section 5 is what is proved and what is assumed once the work
-lands; section 6 is the work breakdown and the order it is done in.
+describes the sync reconciler and the janitor and what is proved of them.
+Sections 1 to 4 are the design; section 5 is what is proved and what is
+assumed.
 
 ## 0. Summary
 
@@ -25,9 +24,7 @@ lands; section 6 is the work breakdown and the order it is done in.
 - A **claim** object in each inner cluster, created on first contact,
   records which binding owns it; a second binding pointing at a claimed
   cluster (a copied kubeconfig) is refused. This is what makes "one outer
-  binding per inner cluster", an assumption of the proofs, true in practice,
-  and it replaces the parent-cluster annotation on mirrors that #10
-  proposed.
+  binding per inner cluster", an assumption of the proofs, true in practice.
 - In the model, a kind and a binding are data. The one-store model keeps
   one model kind per (kind, side): `widgets.anvil.dev` for the outer copy,
   `widgets.anvil.dev@<namespace>/<clusterName>` for the mirror in that
@@ -70,12 +67,11 @@ janitor nevertheless also checks the cluster (section 3.3), so that the
 janitor's *decision* does not depend on the CEL rule; the rule's job is to
 keep an edit from tearing down and rebuilding a workload cluster.
 
-The proofs do lean on the rule in one place, which was not foreseen when
-this was written. The janitor's per-binding delete-soundness invariant says
-that a listed outer object stays selected for the binding it was seen in;
-that is stable only because the installed type's `valid_transition` — the
-model's reading of the CEL rule (section 2.3) — preserves `cluster_of`
-across an update. `Cluster::lemma_api_server_step_preserves_cluster_of`
+The proofs do lean on the rule in one place. The janitor's per-binding
+delete-soundness invariant says that a listed outer object stays selected for
+the binding it was seen in; that is stable only because the installed type's
+`valid_transition` — the model's reading of the CEL rule (section 2.3) —
+preserves `cluster_of` across an update. `Cluster::lemma_api_server_step_preserves_cluster_of`
 (`kubernetes_cluster/proof/synced_objects.rs`) is that step. So a kind
 configured with a `field` selector whose CRD does not carry the immutability
 rule breaks the invariant, not merely the operational guarantee. For a
@@ -124,8 +120,7 @@ does not consult the binding set. The model covers the fallback as `drop_req`.
 A **refused** binding (section 1.3) is bound, so it *is* in the set a reconcile
 serves: its requests are sent and the shim answers them `Forbidden`, which is
 what makes its parents report `Forbidden` with `Stalled=True` rather than
-`InnerUnreachable`. The deploy README says that a missing kubeconfig Secret
-reads as `InnerUnreachable`.
+`InnerUnreachable`.
 
 ### 1.3 The claim
 
@@ -149,8 +144,7 @@ cluster or another, owns the inner cluster. A claimed cluster is a
 `Stalled=True`, and the janitors of the binding are never started. A
 refused binding is re-checked at the Secret's next change and at a fixed
 interval, so releasing the claim (deleting the ConfigMap by hand, which is
-an operator's decision) recovers it. The deploy README documents the claim,
-the log line and the recovery.
+an operator's decision) recovers it.
 
 The **outer cluster id** is the uid of the outer cluster's `kube-system`
 namespace, the de facto stable cluster identity, read once at boot; an
@@ -167,14 +161,12 @@ the model covers.
 
 What the claim does not cover: two outer clusters with the same
 `kube-system` uid (a cloned management cluster). The override flag exists
-for that case; the README says so.
+for that case.
 
 ### 1.4 Access check and readiness
 
-The startup access check of the single pair (one cluster-wide
-`SelfSubjectAccessReview` per verb, exit on any failure) becomes a
-per-binding check at bind time, namespaced to the binding's namespace,
-that never exits the process: a denied verb or an unreachable inner
+The access check runs per binding at bind time, namespaced to the binding's
+namespace, and never exits the process: a denied verb or an unreachable inner
 cluster marks the binding degraded, is logged, and is retried with
 backoff; while degraded the binding's requests are answered `Timeout`
 (unreachable) or `Forbidden` (denied). The readiness file is created once
@@ -228,9 +220,7 @@ objects of this shape, and any CRD that has the shape can be reconciled.
 
 ### 2.3 The model of the shape
 
-The typed views of the single pair (`OuterWidgetView`, `InnerWidgetView`,
-with `count`, `message`, `ready`, `observedCount`) are replaced by one view
-of the shape, with the kind as data:
+One view of the shape carries the kind as data:
 
 ```
 SyncedObjectView { kind: Kind, metadata: ObjectMetaView, spec: Value, status: Option<SyncedStatusView> }
@@ -269,10 +259,9 @@ plus the cluster tag, whose `unmarshal`, `marshal`, `has_kind` and
 `api_resource` are `external_body` with the same postconditions as
 today's wrapper macro, restated over the **registry** (section 2.4)
 instead of a compiled type. The status accessors and `outer_status_for`
-are `external_body` over `serde_json::Value`, as they are today over the
-typed status.
+are `external_body` over `serde_json::Value`.
 
-The trusted surface of the shape is therefore no longer under the
+The trusted surface of the shape is therefore not under the
 controller, and the exec hygiene script pins it where it is, file by
 file (`doc/widget_sync_design.md`, section 3, lists the items):
 
@@ -288,9 +277,10 @@ file (`doc/widget_sync_design.md`, section 3, lists the items):
   trusted as *iffs* over the view.
 - `kubernetes_api_objects/exec/registry.rs`: `crd_name` and
   `api_resource`, the routing the model trusts.
-- `widget_sync_controller/trusted/`: `outer_status_for`, the three
-  `Marshallable` instances of the reconcile states, and the
-  uninterpreted `default_status_rest()`.
+- `widget_sync_controller`: `outer_status_for` in `trusted/exec_types.rs`,
+  the uninterpreted `default_status_rest()` in `trusted/spec_types.rs`, and
+  the three `Marshallable` instances of the reconcile states in
+  `model/install.rs`.
 
 The installed type of a kind of the shape is a function of the schema, not
 of a type:
@@ -316,7 +306,7 @@ discovered `ApiResource`s. It is the one place that ties a runtime kind and
 cluster to a model kind:
 
 ```
-model_kind(k: KindName, cluster: ClusterIdView) -> Kind
+model_kind(k: StringView, cluster: ClusterIdView) -> Kind      // k is the CRD name
    Primary          => CustomResourceKind(k)
    Remote(ns, name) => CustomResourceKind(k + "@" + ns + "/" + name)
 ```
@@ -362,17 +352,17 @@ built directly:
 ```
 widget_sync_controller_model(k: SyncKind) -> ControllerModel        // kind: k.outer_kind
 widget_janitor_controller_model(k: SyncKind, b: Binding) -> ControllerModel  // kind: inner_kind(k, b)
-SyncKind { outer_kind: Kind, name: KindName, selector: ClusterSelector, bindings: Set<Binding> }
+SyncKind { outer_kind: Kind, name: StringView, selector: ClusterSelector, bindings: Set<Binding> }
 inner_kind(k, b) := model_kind(k.name, Remote(b))
 ```
 
-(`model/install.rs`. `bindings` is the finite set of section 3.2, added after this
-was first written; section 5.2 says what it is for.)
+(`model/install.rs`. `bindings` is the finite set of section 3.2; section 5.2
+says what it is for.)
 
 The exec reconcilers carry the same data (`SyncReconciler { kind, registry
 entry }`), and their conformance proofs relate them to the model with the
-data as a parameter. The exec `Reconciler` trait is static today; a
-`DynReconciler` variant with `&self` is added to the framework. The shim keeps
+data as a parameter. The framework has two exec reconciler traits: the static
+`Reconciler` and `DynReconciler`, whose methods take `&self`. The shim keeps
 two entry points rather than one overloaded `reconcile_with`:
 `reconcile_with` for a static `Reconciler` and `reconcile_dyn_with` for a
 `DynReconciler` built per reconcile from a factory. What they share is the
@@ -413,7 +403,9 @@ Exec side, `k.bindings` is a snapshot: the dynamic runners hold a *factory*
 value, and build the reconciler at the start of each reconcile from
 `ClusterClients::remote_refs()`, the bound clusters of the moment, refused ones
 included. The reconciler value, and so the model it conforms to, is then fixed
-for the whole of that reconcile; no time-varying view enters the proofs.
+for the whole of that reconcile. That is all a single reconcile needs; that the
+bound set does not change over the whole of an execution the theorems speak
+about is a separate assumption, stated in section 5.4.
 
 The spec written on the mirror is the outer `spec` value; the outer status
 is `outer_status_for(g, inner status, outcome)` as today, with `rest`
@@ -429,20 +421,13 @@ name. Under the CEL rule the second conjunct is redundant; without it the
 janitor of the old cluster collects the mirror of a parent that moved.
 
 R3's premise is the other side of that asymmetry: `parent_absent` says no outer
-copy of the kind carries the mirror's parent uid, with nothing said about which
-cluster such a copy would select, while the janitor's decision does check the
-cluster. So there is a state R3 does not speak about and the janitor still acts
-on: a stored outer copy with the mirror's parent uid that selects *another*
-cluster, which the janitor reads as an absent parent and collects. Under the CEL
-rule that state cannot arise -- the parent uid was issued for one object, and
-that object's `cluster_of` never changes
-(`Cluster::lemma_api_server_step_preserves_cluster_of`), so an outer copy with
-that uid selects the binding it was created in -- and a uid is never reissued,
-so no later object carries it either. Without the rule the janitor collects a
-mirror whose parent has moved away, which is what one wants operationally; it is
-simply not the case R3 is stated for. The delete-soundness invariant, which does
-carry the cluster conjunct, is the statement that covers it
-(`doc/widget_sync_design.md`, section 2.2).
+copy of the kind carries the mirror's parent uid and says nothing about which
+cluster such a copy would select, so there is a state R3 does not speak about and
+the janitor still acts on -- a stored outer copy with the mirror's parent uid
+that selects another cluster. Under the CEL rule that state cannot arise, and the
+janitor's delete-soundness invariant, which does carry the cluster conjunct, is
+the statement that covers it; the argument is in `doc/widget_sync_design.md`,
+section 2.2.
 
 A binding's janitors start when the binding is bound and its claim is
 held, and stop when the Secret goes away. A mirror in a cluster whose
@@ -459,9 +444,11 @@ The binary:
 3. Starts one kube-runtime controller per kind on
    `Api<DynamicObject>` (`Controller::new_with` with the discovered
    `ApiResource`), the sync reconciler for that kind.
-4. Starts the binding manager: a watch on Secrets in all namespaces, name
-   suffix `-kubeconfig`. Per binding: build the clients, run the access
-   check, create or verify the claim, start the janitors (one
+4. Starts the binding manager: a watch, in every namespace, on the Secrets
+   carrying the label `cluster.x-k8s.io/cluster-name`, whose type, label value
+   and `<clusterName>-kubeconfig` name are checked on each event
+   (`bindings::binding_of_capi_secret`). Per binding: build the clients, run
+   the access check, create or verify the claim, start the janitors (one
    kube-runtime controller per kind on the binding's watch client, with a
    graceful-shutdown token), and register the clients with the sync
    controllers' client map. On change: rebuild the clients in place. On
@@ -472,37 +459,45 @@ The same-name secondary watch of the sync controller (a latency
 optimization) is per binding as well, started with the binding's janitors
 and mapped to the outer kind's controller.
 
-The client map is `RwLock<HashMap<ClusterRef, RemoteClients>>` shared by all
-controllers of the process, replacing the two-slot `ClusterClients`;
+`ClusterClients`, shared by all controllers of the process, holds the primary
+client and `Arc<RwLock<HashMap<ClusterRef, RemoteBinding>>>`, each binding's
+pair of clients together with its status (bound or refused);
 `client_for(api_resource)` looks up the tag. The janitor pause gate and the
 fault-injection hook are unchanged; both act per process.
 
 ## 4. Deployment and test
 
-- Outer RBAC adds `secrets` get, list, watch (cluster-wide: bindings live in
-  any namespace), `customresourcedefinitions` get, and `namespaces` get on
-  `kube-system`; the kind rules are generated per configured kind
-  (`<plural>` get, list, watch; `<plural>/status` patch).
-- Inner RBAC, per binding's credential: `<plural>` get, list, watch, create,
-  patch, delete for each kind, and `configmaps` get and create in
-  `kube-system`. The demo's testbed makes a service-account kubeconfig with
-  these rights; a Cluster API workload cluster's kubeconfig is admin.
-- The demo keeps `Widget` (selector `field:spec.clusterName`, the CRD gaining
-  the field with its CEL rule) and adds `Gadget`, a kind with a different
-  spec (`selector: name`) to show genericity. The echo controller becomes
-  generic: for each kind it is given, it stamps `observedGeneration` and a
-  `Ready` condition.
-- The testbed and the e2e run three kind clusters: `outer`, `inner-a`,
-  `inner-b`, with Secrets `a-kubeconfig` and `b-kubeconfig` in namespace
-  `default`. Scenarios added to the nine of today: two Widgets in one
-  namespace bound to different clusters; a Gadget named `a`; a Secret in a
-  second namespace copied from `a-kubeconfig`, whose parents report
-  `Forbidden` while the mirrors of namespace `default` survive; a Secret
-  removed and re-added; a Secret whose `value` is replaced by an equivalent
-  kubeconfig with other bytes, after which the bound objects keep their
-  mirrors and a new edit still propagates; the claim of a bound binding
-  deleted by hand and written again at the next re-check; a kind refused at
-  boot for a missing rule.
+The demo configures two kinds in `deploy/widget_sync/deploy_local.yaml`:
+`Widget`, selected by `field:spec.clusterName`, whose CRD carries the
+immutability rule on that field, and `Gadget`, selected by `name`, a kind whose
+spec has nothing in common with a Widget's and which needs no rule. The echo
+controller of the inner clusters is generic in the same way: for each kind it is
+given it stamps `observedGeneration` and a `Ready` condition.
+
+The outer RBAC (`deploy/widget_sync/rbac.yaml`) carries one pair of rules per
+configured kind -- `<plural>` get, list, watch and `<plural>/status` patch --
+beside `secrets` get, list and watch cluster-wide (bindings live in any
+namespace), `customresourcedefinitions` get for the boot shape check, and
+`namespaces` get on `kube-system` for the outer cluster id. Each binding's
+credential needs, in its inner cluster, `<plural>` get, list, watch, create,
+patch and delete per kind, and `configmaps` create in `kube-system` with get on
+the claim (`rbac_inner.yaml`); the testbed mints a service-account kubeconfig
+with exactly those rights, where a Cluster API workload cluster's kubeconfig is
+admin. The deploy README's "RBAC" paragraph is the list.
+
+`tools/two-cluster-test.sh` runs three kind clusters -- `widget-sync-outer`,
+`widget-sync-inner-a` and `widget-sync-inner-b` -- with the Secrets
+`default/a-kubeconfig` and `default/b-kubeconfig` in the outer one. Three e2e
+suites run against them: `e2e/src/widget_sync_e2e.rs` covers one binding of one
+kind, `widget_sync_kinds_e2e.rs` the genericity over kinds (a Gadget selected by
+its name, and an object naming a cluster that is no binding of the process), and
+`widget_sync_bindings_e2e.rs` the bindings (two objects of one namespace bound to
+different clusters, a copied kubeconfig refused by the claim, a Secret removed
+and re-added, a credential rotated to other bytes with the mirrors surviving, and
+a claim deleted by hand and written again at the next re-check). A kind refused
+at boot for a missing immutability rule is checked without a cluster, by
+`cargo test --features dyn-runtime --bin widget_sync_controller`. The deploy
+README's "Scenarios" list is what to read for the sequences themselves.
 
 ## 5. What is proved, what is assumed
 
@@ -522,23 +517,7 @@ The statements of the main design, section 3.3, with parameters:
 - Composition: for one kind `k` and a finite set of bindings `B`, the
   controller set `{sync_k} ∪ {janitor_{k,b} | b ∈ B}` satisfies `core`; the
   sync controller's liveness dependency is the conjunction of the janitors'
-  ESRs, discharged by composing the janitors one binding at a time. Kinds
-  compose with each other and with the four other controllers of the
-  repository by kind disjointness, exactly as the pair does today.
-  `widget_two_kind_core_holds` (`composition/widget_two_kinds.rs`) is the first
-  of those: two kinds `k1`, `k2` with `k1.outer_kind != k2.outer_kind` (and
-  `sync_kind_ok` of both) compose, because each side's guarantee already implies
-  the other's relies -- a sync controller touches only its own outer kind and its
-  own mirror kinds, a janitor only its own outer kind (a List) and its own mirror
-  (a Delete). The disjointness of the mirror kinds is
-  `lemma_kinds_of_distinct_configurations`, and it holds for *every* binding, not
-  only the configured ones, because the relies quantify over `is_inner_kind`.
-  Neither side has a liveness dependency left, so this is plain `compose`.
-  `two_kind_demo_core_holds` instantiates it for `widgets.anvil.dev` and
-  `gadgets.anvil.dev` in one cluster. `core_holds_for`
-  (`composition/compose_all.rs`) is the other: the four controllers of the
-  repository beside the sync controller and janitors of any configured kind whose
-  outer kind is none of the four framework kinds.
+  ESRs, discharged by composing the janitors one binding at a time.
 
   `widget_fanout_core_holds` is that statement, for any `B` and any
   assignment `ids` of janitor ids that is injective on `B` and misses the sync
@@ -566,6 +545,24 @@ The statements of the main design, section 3.3, with parameters:
   are two applications of it: the demo's one binding, and a two-binding cluster
   with the bindings `default/inner` and `default/second`, a janitor for each and
   the three model kinds they need installed.
+
+  Kinds compose with each other, and with the four other controllers of the
+  repository, by kind disjointness. `widget_kinds_core_holds` is the statement
+  for the kinds: a finite set of configured kinds, `sync_kind_ok` of each and
+  their outer kinds pairwise distinct, composes into one `core`, by induction on
+  the set. Every step is plain `compose` -- no member has a liveness dependency
+  left, the sync controller's having been discharged against its own janitors --
+  and the compatibility of each step is one fact, that a configuration's
+  controllers address only the model kinds of that configuration: a sync
+  controller its own outer kind and its own mirror kinds, a janitor its own outer
+  kind (a List) and its own mirror (a Delete). That two configurations' mirror
+  kinds are disjoint is `lemma_kinds_of_distinct_configurations`, and it holds
+  for *every* binding, not only the configured ones, because the relies quantify
+  over `is_inner_kind`. `core_holds_for` (`composition/compose_all.rs`) is the
+  statement for the framework plus the kinds: the four controllers of the
+  repository beside the sync controllers and janitors of a finite set of
+  configured kinds, none of whose outer kinds is one of the four framework
+  kinds. `core_holds` is the demo's instance of it.
 
 Hypotheses added to the theorems, in place of the lemmas that today prove
 them from the literal strings. `sync_kind_ok(k)` and `binding_ok(b)` are real
@@ -605,44 +602,36 @@ sends for an outer copy of another *served* binding must still name a known kind
 function, for every object it could be triggered by, not only the stored ones).
 The mirrors of the other served bindings then live on the primary side, which is
 what the paragraph above says. Second, the selector of `k` must be a *field* of
-the spec, not `metadata.name`: the refinement asks that the API server's
-validation not read metadata (`installed_types_ignore_metadata`), and the
-immutability rule of a `name` selector reads `metadata.name`. Third, the theorem
-is read for one binding `b ∈ k.bindings` at a time: the ESRs it consumes and the
-D3 it assumes are `b`'s, only `b`'s mirrors are remote, and the janitors of the
-other bindings enter as other controllers, which is what "per binding" means.
+the spec, not `metadata.name` (`sk.selector is Field`): the refinement asks that
+the API server's validation not read metadata
+(`installed_types_ignore_metadata`), and the immutability rule of a `name`
+selector reads `metadata.name`. That restriction is an artifact of how the model
+states validation, not a limitation of the system: a `name` selector is immutable
+because Kubernetes never renames an object, so the real API server enforces it
+with no rule at all, and it is only the model's reading of the rule as a
+`valid_transition` that has to touch metadata. Third, the theorem is read for one
+binding `b ∈ k.bindings` at a time: the ESRs it consumes and the D3 it assumes
+are `b`'s, only `b`'s mirrors are remote, and the janitors of the other bindings
+enter as other controllers, which is what "per binding" means.
 
 `widget_two_cluster_theorem` (`widget_sync_controller/proof/two_cluster.rs`)
 is that statement, for any cluster meeting the hypotheses, and it is proved.
 R3s is read there with its one-store premise, `bound_parent_absent`, which
 fixes the mirror key's kind; the two-store delete-soundness clause is read
-with the conjuncts `parent_absent_forever` has since the port (the parent is
-an outer copy of `k` that selects `b`'s cluster), not over every stored
-object.
+with the conjuncts of `parent_absent_forever` (the parent is an outer copy of
+`k` that selects `b`'s cluster), not over every stored object.
 
-**Closed, and it was vacuous before.** The first hypothesis above used to
-quantify over *every* binding: `all_inner_kinds_installed` asked that
-`model_kind(k.name, Remote(ns, clusterName))` be installed for every pair
-(namespace, cluster name). Those kinds are infinitely many -- `remote_kind_name`
-is injective in the cluster name -- and `InstalledTypes` is vstd's `Map`, whose
-domain is a finite `Set`, so no `Cluster` value satisfied the hypothesis. Between
-the fan-out port (commit `7eebc12`) and this change, every statement of
-`proof/two_cluster.rs` was therefore vacuous rather than merely missing an
-instance, and the fixed pair's closed statements
-(`widget_instance_two_cluster_theorem`, `widget_disturbed_two_cluster_theorem`)
-could not be restated.
-
-The remedy is the finite binding set of section 3.2. The sync reconciler's model
-is parameterized by `k.bindings`; an outer copy whose binding is outside the set
-is refused at `Init` with `Failed(InnerUnreachable)`, before any request, and the
-Create of a mirror carries the same guard, so the mirror kinds the model can
-write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many as the
-bindings, and `Set` is finite. `all_inner_kinds_installed` is now that finite
-conjunction, `widget_cluster_with_others` and `widget_pair_cluster` take `bnd ∈
-bs` (rather than pinning `bs` to `{bnd}`) with `k.bindings == bs` carried by
-`sync_membership`, and the closed statements are back -- and they are closed for
-*any* configuration, not only the demo's. `lemma_widget_is_pair_cluster` and
-`widget_instance_two_cluster_theorem` take `k`, `bnd ∈ k.bindings`, two ids and
+What makes the first hypothesis satisfiable is the finite binding set of section
+3.2. The sync reconciler serves `k.bindings`: an outer copy whose binding is
+outside the set is refused at `Init` with `Failed(InnerUnreachable)`, before any
+request, and the Create of a mirror carries the same guard, so the mirror kinds
+the model can write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many
+as the bindings, and `Set` is finite. `all_inner_kinds_installed` is that finite
+conjunction, and `widget_cluster_with_others` and `widget_pair_cluster` take
+`bnd ∈ bs` with `k.bindings == bs` carried by `sync_membership`. The closed
+statements are therefore closed for *any* configuration, not only the demo's.
+`lemma_widget_is_pair_cluster` and `widget_instance_two_cluster_theorem`
+take `k`, `bnd ∈ k.bindings`, two ids and
 the schema, under `sync_kind_ok(k)`, `binding_ok(bnd)` and a field selector, and
 read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
 janitor_id)`: the model kinds of the whole configuration installed, the sync
@@ -655,24 +644,19 @@ applications. Those clusters install exactly `k.outer_kind` and `inner_kind(k,
 b)` for `b ∈ k.bindings`, and they are the satisfiability witness for every
 hypothesis of the general theorem.
 
-Only the janitor of `bnd` runs there. A configuration whose other bindings'
-janitors also run needs `widget_other_controller_ok` of each of them, which
-nothing proves yet: they are the same reconciler, so their commutation lemma is
-already the one the refinement asks for, but their guarantee has not been carried
-into the one-store model as an invariant the way `lemma_relies_hold_of_from_welder`
-does for the disturber. That is what "the janitors of the other bindings enter as
-other controllers" above still costs.
-
-The three alternatives this rules out, recorded because they were the other ways
-to close it: an `InstalledTypes` with an infinite domain (vstd's `IMap`), which
-changes `Cluster` and every controller's concrete cluster; a `TwoCluster` whose
-`request_ok` tolerates a Create of an uninstalled kind, which needs
-`installed_types_ignore_metadata` and `installed_types_coherent` for every name
-rather than every installed one (a `Map` says nothing about indexes outside its
-domain, so a concrete map cannot provide that either); or narrowing the
-hypothesis to a finite set of bindings without changing the model, which does not
-work by itself, since `models_ok` quantifies over every object a reconcile could
-be triggered by and the namespace of an outer copy is unbounded.
+Only the janitor of `bnd` runs in those clusters, and that is where the closed
+statement says what it is about: `widget_pair_cluster_for` and its disturbed twin
+register the sync controller of `k` and exactly one janitor, the janitor of
+`bnd`. `widget_instance_two_cluster_theorem` and
+`widget_disturbed_two_cluster_theorem` are therefore statements about a cluster
+running one binding's janitor, whatever `k.bindings` holds. A configuration whose other
+bindings' janitors also run needs `widget_other_controller_ok` of each of them,
+which nothing proves yet: they are the same reconciler, so their commutation
+lemma is already the one the refinement asks for, but their guarantee has not
+been carried into the one-store model as an invariant the way
+`lemma_relies_hold_of_from_welder` does for the disturber. That is what "the
+janitors of the other bindings enter as other controllers" above still costs, and
+it is what the multi-binding two-store reading waits on.
 
 ### 5.3 What that leaves unstated
 
@@ -691,10 +675,27 @@ indexed by cluster id and redoes `kubernetes_cluster/proof/two_cluster/`
 and is a natural continuation, not a rework: the per-binding theorems are
 the pieces it assembles.
 
+That refinement and the multi-binding two-store reading of section 5.2 --
+`widget_other_controller_ok` for the janitors of the other bindings -- are what
+is outstanding. Everything else this document designs is in the branch.
+
 ### 5.4 Assumptions
 
 The assumptions of the main design, section 3.5, plus:
 
+- The set of bound clusters is constant over the execution the theorems speak
+  about. The reconciler value of one reconcile is a snapshot (section 3.2), but
+  the theorems are about a `Cluster` whose controller models are fixed, and
+  `k.bindings` is part of the sync controller's model: a binding appearing or
+  disappearing is a different controller model, and so a different cluster,
+  as much outside the model as a controller restarting with another
+  configuration is. What covers the transient is an operational argument, not a
+  proof. An object whose binding is not in the snapshot the reconcile was built
+  with is refused with `Synced=False/InnerUnreachable` and requeued, no request
+  having been sent for it, and a later reconcile, built from a snapshot that has
+  the binding, serves it. A binding that goes away takes its janitors with it
+  and leaves its mirrors in a cluster nothing of ours can reach, which is the
+  case section 3.3 already says nothing about.
 - Each binding is its own inner cluster: no two bindings reach the same
   API server. Enforced operationally by the claim (section 1.3).
 - Schema parity per kind between the outer cluster and every inner
@@ -704,37 +705,17 @@ The assumptions of the main design, section 3.5, plus:
   install the outer kind and every inner kind with the same
   `synced_installed_type(spec_ok, selector)`, whose `valid_transition` *is* the
   rule, so an inner CRD that does not carry it is a parity failure like any
-  other schema drift.
+  other schema drift. The hypothesis is stated as equality of the two schema
+  predicates, which is more than the proofs need: the spec travels outward to
+  inward and is never validated back, so it would be enough that the inner CRD
+  accept every object the outer one does. An inner CRD that accepts more is
+  harmless. Equality is what the model can say with one `spec_ok` parameter.
+- `sync_kind_ok(k)` and `binding_ok(b)` -- no `@` in a CRD name, no `@` or `/`
+  in a binding's parts -- are assumptions in the same sense as the rest. What
+  discharges them for a running controller is `check_kind_name` and
+  `binding_of_secret` (section 2.4), unverified boot checks: a configuration
+  that got past them satisfies what the proofs assume, and nothing proves that
+  the checks are the right ones.
 - The registry's `model_kind` is the model kind of the objects the shim
   returns for a binding, which the model cannot check (the trusted
-  routing of section 2.2 of the main design, now per binding).
-
-## 6. Work breakdown and order
-
-The two issues share one core: the model and proof rewrite must be done
-once, with both the kind and the binding as parameters, because every
-lemma that names a kind is touched either way and the mirror key changes
-shape once. Around that core the exec and deployment work of the two
-issues is separable. The order:
-
-1. **Foundation** (#20 sub-issue): the framework and shim pieces with no
-   change to the verified pair. `ClusterId::Remote(ClusterRef)`; the client
-   map; dynamic kube-runtime controllers on `Api<DynamicObject>`; the
-   `DynReconciler` exec trait; `ReconcileModel` built from data; the
-   registry; the `SyncedObjectView` shape with its trusted accessors and the
-   exec `SyncedObject` wrapper. The existing pair keeps verifying on the
-   old wrappers so CI stays green.
-2. **Model and proofs** (shared sub-issue): the pair rewritten over
-   `SyncedObjectView` with `SyncKind` and `Binding` as parameters; the
-   theorems of section 5.1; the per-binding two-store instance; the
-   composition with the other controllers; the exec reconcilers over
-   `SyncedObject` with their conformance proofs. The binary is adapted with
-   one kind and one binding so the two-cluster e2e stays green.
-3. **Bindings** (#15 sub-issue) and **kinds** (#20 sub-issue), in parallel:
-   the binding manager, claim, per-binding janitors, access check, RBAC and
-   the three-cluster testbed; the kind flags, boot shape check, `Gadget`,
-   the generic echo controller and the kind scenarios of the e2e.
-4. **Follow-up**: the (n+1)-store refinement (section 5.3).
-
-Each step is one pull request against `gabe/sync-controller`, verified
-with `cargo verus verify --lib` and the e2e before it merges.
+  routing of section 5.3 of the main design, now per binding).

@@ -8,8 +8,23 @@ default = ["openssl-tls", "kubederive", "ws", "runtime", "k8s-openapi/v1_30"]
 kubederive = ["kube/derive"]
 openssl-tls = ["kube/client", "kube/openssl-tls"]
 rustls-tls = ["kube/client", "kube/rustls-tls"]
-runtime = ["kube/runtime", "kube/unstable-runtime"]
+runtime = ["kube/runtime"]
+# kube-runtime's unstable-runtime, which is what Controller::reconcile_on needs
+# (the same-name trigger stream of the sync runners, see build.md). It is not in
+# the default feature set: an unstable API of a dependency is opted into by the
+# one target that needs it, so that the library and the other four controllers
+# build on the stable surface alone. widget_sync_controller requires it below.
+dyn-runtime = ["runtime", "kube/unstable-runtime"]
 ws = ["kube/ws"]
+
+# The Widget sync controller is the one binary that takes work from outside its
+# own watches (Controller::reconcile_on), so it is the one that requires
+# dyn-runtime. Every other binary is auto-discovered from src/bin/ and builds on
+# the default features.
+[[bin]]
+name = "widget_sync_controller"
+path = "src/bin/widget_sync_controller.rs"
+required-features = ["dyn-runtime"]
 
 [dependencies]
 vstd = { git = "https://github.com/verus-lang/verus.git" }

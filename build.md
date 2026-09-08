@@ -7,7 +7,7 @@ This project uses [`cargo verus`](https://github.com/verus-lang/verus). All thir
 `src/`
 
 - `reconciler/` This defines the API for implementing `reconcile()` as a state machine.
-- `shim_layer/` A layer that intercepts the requests returned by each state transition of `reconcile()`, issues the requests to the Kubernetes API server (or other endpoints customized by developers), and feeds the response to the next state transition of `reconcile()`. This layer is built on top of [kube](https://github.com/kube-rs/kube).
+- `shim_layer/` A layer that intercepts the requests returned by each state transition of `reconcile()`, issues the requests to the Kubernetes API server (or other endpoints customized by developers), and feeds the response to the next state transition of `reconcile()`. This layer is built on top of [kube](https://github.com/kube-rs/kube). Its `error_policy` is shared by every runner, so its retry schedule is what all five controllers do: a reconcile that ends without a failure is requeued after 60 seconds, and one that **fails** is retried per object on an exponential backoff -- 10 seconds after that object's first failure, doubling with each further consecutive failure of the same object, capped at 5 minutes, and reset when a reconcile of that object succeeds. The count is per object, so one failing object does not slow another's retries. It replaces the fixed retry interval the four existing controllers used to be on.
 - `kubernetes_cluster/` A model of the core components in a Kubernetes cluster that controllers often interact with, including API servers, etcd, and some built-in controllers. It is written as a TLA-style state machine.
 - `kubernetes_api_objects/` A library that defines commonly used Kubernetes API objects (e.g., Pod, ConfigMap, StatefulSet, Service, etc.). Most definitions are imported from [k8s-openapi](https://github.com/Arnavion/k8s-openapi) (which is also used by [kube](https://github.com/kube-rs/kube)) with a wrapper that allows formal reasoning on these objects.
 - `state_machine/` A library for defining TLA-style state machines, used by `kubernetes_cluster/`.
@@ -86,6 +86,34 @@ Pass extra Verus flags after `--`. Replace `--lib` with `--bin <name>` to verify
   script deliberately.
 
 ## Build and test
+
+### Cargo features
+
+The default feature set builds the library and every binary but one. The Widget
+sync controller also needs `dyn-runtime`, which turns on
+`kube/unstable-runtime`: its sync runners take work from outside their own
+watches through `Controller::reconcile_on` (the same-name trigger a binding's
+mirror watch emits), and that is a kube-runtime API behind an unstable feature.
+It is deliberately not in `default`, so that the library and the other four
+controllers build on kube's stable surface: `cargo build --lib` and
+`cargo test --lib` must pass without it. The shim compiles the trigger path only
+under the feature and otherwise runs the same runner with no trigger stream,
+which costs at most one requeue interval of latency and no correctness --
+liveness rests on the periodic requeue, never on a trigger.
+
+`required-features` on the binary's `[[bin]]` enforces it:
+
+```sh
+cargo verus build --features dyn-runtime --release --bin widget_sync_controller -- --no-verify
+cargo test --features dyn-runtime --bin widget_sync_controller
+```
+
+`cargo build --bins` without the feature skips that one binary silently;
+`cargo build --bin widget_sync_controller` without it fails and names the
+feature. `cargo-verus` insists that the cargo options it also reads
+(`--features`, `--package`, `--manifest-path`) come before the ones it does not
+(`--bin`). `tools/two-cluster-test.sh` passes the feature for `widget_sync` and
+not for `widget_echo`.
 
 ### Build a controller binary (fast, no verification)
 

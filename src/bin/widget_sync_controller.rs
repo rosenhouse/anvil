@@ -78,9 +78,11 @@ const OUTER_CLUSTER_ID_ENV: &str = "OUTER_CLUSTER_ID";
 // If READY_FILE is set, the file is created once the boot checks have passed and
 // the sync runners are started, and is removed before the checks so that a
 // restarted container does not inherit the previous run's signal.
-// deploy/widget_sync/deploy_local.yaml probes it as the pod's readiness. The
-// bindings are deliberately not part of it: an inner cluster that is down must
-// not keep the pod from becoming ready (section 1.4).
+// deploy/widget_sync/deploy_local.yaml probes it as the pod's startup probe,
+// not its readiness: the file appears once and never disappears, so there is
+// nothing to re-check afterwards. The bindings are deliberately not part of it:
+// an inner cluster that is down must not keep the pod from starting up
+// (section 1.4).
 const READY_FILE_ENV: &str = "READY_FILE";
 
 // If JANITOR_PAUSE_FILE is set, the shim withholds every Delete request of this

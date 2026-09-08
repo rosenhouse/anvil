@@ -86,8 +86,9 @@ pub const RECHECK_INTERVAL: Duration = Duration::from_secs(300);
 // claim of a bound binding is the process's evidence that no other binding
 // holds its inner cluster, and a claim that was deleted (or taken over) is not
 // otherwise reported by anything -- no request fails, no condition changes.
-// Every re-check is two SelfSubjectAccessReviews per kind and verb plus a
-// create and a get, so a minute is a bound on the noise as much as on the
+// Every re-check is one SelfSubjectAccessReview per kind and verb plus two for
+// the claim's ConfigMap, and then the claim's own create (and, when it is
+// already there, a get), so a minute is a bound on the noise as much as on the
 // staleness.
 pub const BOUND_RECHECK_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -985,8 +986,8 @@ async fn attempt(
 /// refused; a request that fails is an unreachable cluster and is the Err
 /// (doc/widget_sync_fanout_design.md, section 1.4).
 /// The reviews are issued together, not one after another: there is one per verb
-/// and kind and they are independent, so a sequence of them made the time to
-/// bind a binding the sum of its round trips.
+/// and kind and they are independent, so a sequence of them would make the time
+/// to bind a binding the sum of its round trips.
 pub async fn check_binding_access(
     client: &Client,
     binding: &ClusterRef,

@@ -744,8 +744,8 @@ pub proof fn lemma_widget_types_installed(k: SyncKind, spec_ok: spec_fn(Value) -
 
 // The concrete cluster of a configuration: the sync controller of `k` at
 // `sync_id`, the janitor of each of `k.bindings` at the id `ids` gives it, and
-// the model kinds of `k` installed. Everything the closed statements of the pair
-// used to fix by hand is a function of the configuration here.
+// the model kinds of `k` installed. Every part of it is a function of the
+// configuration.
 pub open spec fn widget_cluster_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>) -> Cluster {
     Cluster {
         installed_types: widget_installed_types(k, spec_ok),
