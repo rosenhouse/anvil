@@ -87,10 +87,14 @@ delete `widgets.anvil.dev`; a 401, 403 or denied verb is logged and the
 process exits, so a wrong credential shows up as a crash-looping, never-ready
 pod rather than as failing reconciles.
 
-**Probes.** Readiness is `test -f /run/widget-sync/ready`, a file the binary
-creates (path from `READY_FILE`, on a small emptyDir) once the access check
-has passed and just before the reconcilers start; it is removed at startup so
-a restarted container does not inherit it. There is no liveness probe: the
+**Probes.** A startup probe, `test -f /run/widget-sync/ready`, waits for a
+file the binary creates (path from `READY_FILE`, on a small emptyDir) once the
+access check has passed and just before the reconcilers start; it is removed
+at startup so a restarted container does not inherit it. It is a startup
+probe rather than a readiness probe because the file never disappears again:
+after the access check nothing the binary knows about can make the pod
+un-ready, and a credential that goes bad at runtime shows up in the warn logs
+of failed requests, not in the pod's status. There is no liveness probe: the
 binary exposes no health endpoint and nothing else that says whether the
 reconcilers are still making progress, and a probe that does not measure that
 would only restart healthy pods.

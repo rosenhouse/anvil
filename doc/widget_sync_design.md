@@ -280,7 +280,7 @@ reconcilers.
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt |
 | Two outer clusters feeding one inner cluster; many outer namespaces each with its own inner cluster | no | assumed away for the single pair; the fan-out and parent-cluster identity are follow-up work (issue #15) |
 | Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
-| Two replicas of the controller | no | one replica; a second would violate the rely |
+| Two replicas of the controller | no | one replica assumed; a second is benign for safety (every write tests uid and generation or carries a uid precondition) but is outside the model, and costs status flapping and `AlreadyExists` noise |
 
 ### 2.4 The disturber
 
