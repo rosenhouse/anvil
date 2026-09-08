@@ -13,6 +13,7 @@ use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::cluster::*;
 use crate::widget_sync_controller::model::install::*;
 use crate::widget_sync_controller::proof::disturber::*;
+use crate::widget_sync_controller::proof::liveness::spec::*;
 use crate::widget_sync_controller::trusted::{rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;
@@ -171,48 +172,96 @@ pub proof fn widget_pair_with_disturber_core_holds(k: SyncKind, b: Binding, spec
 }
 
 // ---------------------------------------------------------------------------
-// A concrete three-controller cluster: the pair and the disturber.
+// The pair with the disturber, for any configuration.
+// ---------------------------------------------------------------------------
+
+// The cluster of a configuration with the disturber beside the pair: the model
+// kinds of `k` installed, the sync controller, the janitor of `b`, and the
+// disturber on `b`'s mirror kind. A function of the configuration, like
+// widget_pair_cluster_for.
+pub open spec fn widget_disturbed_cluster_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int) -> Cluster {
+    Cluster {
+        installed_types: widget_installed_types(k, spec_ok),
+        controller_models: widget_pair_cluster_for(k, b, spec_ok, sync_id, janitor_id).controller_models
+            .insert(disturber_id, widget_disturber_controller_model(inner_kind(k, b))),
+    }
+}
+
+pub open spec fn widget_disturbed_core_cluster_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int) -> CoreCluster {
+    CoreCluster {
+        cluster: widget_disturbed_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
+        registry: Map::empty()
+            .insert(janitor_id, widget_janitor_controller_spec(k, b, Set::empty().insert(b), spec_ok, janitor_id))
+            .insert(sync_id, widget_sync_controller_spec(k, Set::empty().insert(b), spec_ok, sync_id, Map::empty().insert(b, janitor_id)))
+            .insert(disturber_id, widget_disturber_controller_spec(k, b, spec_ok, disturber_id)),
+    }
+}
+
+// The closed statement, for ANY one-binding configuration: the pair and the
+// disturber satisfy `core`. As in widget_core_holds, the model kinds are told
+// apart by the injectivity of model_kind, from `sync_kind_ok` and `binding_ok`.
+pub proof fn widget_disturbed_core_holds_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int)
+    requires
+        sync_kind_ok(k),
+        binding_ok(b),
+        k.bindings == Set::<Binding>::empty().insert(b),
+        janitor_id != sync_id,
+        janitor_id != disturber_id,
+        sync_id != disturber_id,
+    ensures
+        well_formed(widget_disturbed_core_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
+            widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
+        core(widget_disturbed_core_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
+            widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
+{
+    let bs = Set::<Binding>::empty().insert(b);
+    let ids = Map::<Binding, int>::empty().insert(b, janitor_id);
+    let cluster = widget_disturbed_core_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id);
+    let inner = cluster.cluster;
+
+    lemma_widget_types_installed(k, spec_ok, inner);
+    lemma_outer_kind_is_not_inner(k, b);
+    assert(bs.contains(b));
+    assert(inner.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector));
+    assert(ids_ok(bs, ids, sync_id)) by {
+        assert forall |x: Binding, y: Binding| #![trigger ids[x], ids[y]] bs.contains(x) && bs.contains(y) && ids[x] == ids[y] implies x == y by {
+            assert(x == b && y == b);
+        }
+    }
+    assert(well_formed(cluster, widget_janitor_core_set(k, b, bs, spec_ok, janitor_id)));
+    assert(well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, disturber_id)));
+    assert(well_formed(cluster, widget_sync_core_set(k, bs, spec_ok, sync_id, ids))) by {
+        assert forall |b2: Binding| #[trigger] bs.contains(b2)
+            implies sync_membership(k, b2, bs, spec_ok, inner, sync_id, ids[b2]) by {
+            assert(b2 == b);
+        }
+    }
+    widget_pair_with_disturber_core_holds(k, b, spec_ok, cluster, janitor_id, sync_id, disturber_id);
+}
+
+// ---------------------------------------------------------------------------
+// The demo configuration with the disturber: three controllers.
 // ---------------------------------------------------------------------------
 
 pub open spec fn widget_disturber_id() -> int { 3 }
 
 pub open spec fn widget_disturbed_cluster_instance() -> Cluster {
-    Cluster {
-        installed_types: Map::empty()
-            .insert(widget_kind().outer_kind->CustomResourceKind_0, Cluster::synced_installed_type(widget_spec_ok(), widget_selector()))
-            .insert(widget_inner_kind()->CustomResourceKind_0, Cluster::synced_installed_type(widget_spec_ok(), widget_selector())),
-        controller_models: Map::empty()
-            .insert(widget_janitor_id(), widget_janitor_controller_model(widget_kind(), widget_binding()))
-            .insert(widget_sync_id(), widget_sync_controller_model(widget_kind()))
-            .insert(widget_disturber_id(), widget_disturber_controller_model(widget_inner_kind())),
-    }
+    widget_disturbed_cluster_for(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_disturber_id())
 }
 
 pub open spec fn widget_disturbed_core_cluster() -> CoreCluster {
-    CoreCluster {
-        cluster: widget_disturbed_cluster_instance(),
-        registry: Map::empty()
-            .insert(widget_janitor_id(), widget_janitor_controller_spec(widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok(), widget_janitor_id()))
-            .insert(widget_sync_id(), widget_sync_controller_spec(widget_kind(), widget_bindings(), widget_spec_ok(), widget_sync_id(), widget_janitor_ids()))
-            .insert(widget_disturber_id(), widget_disturber_controller_spec(widget_kind(), widget_binding(), widget_spec_ok(), widget_disturber_id())),
-    }
+    widget_disturbed_core_cluster_for(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_disturber_id())
 }
 
+// The demo is one line of the generic statement.
 pub proof fn widget_disturbed_core_holds()
     ensures
         well_formed(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_spec_ok(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
         core(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_spec_ok(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
 {
-    let cluster = widget_disturbed_core_cluster();
-    widget_kind_strings_distinct();
-    assert(cluster.cluster.synced_type_is_installed(widget_kind().outer_kind, widget_spec_ok(), widget_selector()));
-    assert(cluster.cluster.synced_type_is_installed(widget_inner_kind(), widget_spec_ok(), widget_selector()));
-    assert(widget_bindings().contains(widget_binding()));
-    assert(ids_ok(widget_bindings(), widget_janitor_ids(), widget_sync_id()));
-    assert(well_formed(cluster, widget_janitor_core_set(widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok(), widget_janitor_id())));
-    assert(well_formed(cluster, widget_sync_core_set(widget_kind(), widget_bindings(), widget_spec_ok(), widget_sync_id(), widget_janitor_ids())));
-    assert(well_formed(cluster, widget_disturber_core_set(widget_kind(), widget_binding(), widget_spec_ok(), widget_disturber_id())));
-    widget_pair_with_disturber_core_holds(widget_kind(), widget_binding(), widget_spec_ok(), cluster, widget_janitor_id(), widget_sync_id(), widget_disturber_id());
+    widget_demo_config_ok();
+    assert(widget_kind().bindings =~= Set::<Binding>::empty().insert(widget_binding()));
+    widget_disturbed_core_holds_for(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_disturber_id());
 }
 
 }

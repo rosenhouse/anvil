@@ -12,8 +12,11 @@
 // reconciler model now serves the finite set k.bindings and refuses every other
 // binding before it sends a request, so the hypothesis is a finite conjunction;
 // widget_instance_two_cluster_theorem and widget_disturbed_two_cluster_theorem at
-// the end of this file are the concrete instances, and the witness that the
-// hypotheses of the general theorem are satisfiable at all.
+// the end of this file close the statement for the cluster of any configuration,
+// and are the witness that the hypotheses of the general theorem are satisfiable
+// at all. Nothing there names a kind: the distinctness of the model kinds comes
+// from sync_kind_ok and binding_ok through the injectivity of model_kind, and the
+// demo configuration is one line applying them.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
@@ -44,10 +47,10 @@ verus! {
 // ---------------------------------------------------------------------------
 
 // What the two-store instantiation needs of the configured kind and binding: the
-// outer kind is not this binding's mirror kind (so side_of_kind splits them; for
-// a concrete configuration lemma_outer_kind_is_not_inner or a length argument
-// discharges it), and the selector reads the spec, not metadata, so that the
-// API server's validation is metadata-blind as the refinement requires.
+// outer kind is not this binding's mirror kind (so side_of_kind splits them;
+// lemma_widget_kinds_ok discharges it from sync_kind_ok, by the injectivity of
+// model_kind), and the selector reads the spec, not metadata, so that the API
+// server's validation is metadata-blind as the refinement requires.
 pub open spec fn widget_kinds_ok(sk: SyncKind, bnd: Binding) -> bool {
     &&& sk.outer_kind != inner_kind(sk, bnd)
     &&& sk.selector is Field
@@ -70,7 +73,8 @@ pub open spec fn widget_two_cluster(sk: SyncKind, bnd: Binding, bs: Set<Binding>
 }
 
 // The two sides of the pair's kinds, from the distinctness widget_kinds_ok
-// carries: the literal-string argument the fixed pair used is now a hypothesis.
+// carries: a hypothesis of this lemma, discharged for any configuration by
+// lemma_widget_kinds_ok and never from the characters of a kind name.
 pub proof fn lemma_widget_sides(sk: SyncKind, bnd: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: Cluster)
     requires widget_kinds_ok(sk, bnd),
     ensures
@@ -2626,52 +2630,51 @@ pub proof fn lemma_janitor_sound_transfer(sk: SyncKind, bnd: Binding, bs: Set<Bi
 }
 
 // ---------------------------------------------------------------------------
-// The concrete configuration.
+// Closed statements, for any configuration.
 // ---------------------------------------------------------------------------
 
-// The concrete configuration of composition/widget_sync_reconciler.rs meets the
-// two hypotheses about the kinds: they differ (by the length of a mirror kind
-// name) and the selector is a field of the spec.
-pub proof fn widget_instance_kinds_ok()
-    ensures widget_kinds_ok(widget_kind(), widget_binding()),
+// What the refinement needs of the kinds, for any configuration: the outer kind
+// is not the binding's mirror kind, which is lemma_outer_kind_is_not_inner under
+// sync_kind_ok -- the injectivity of model_kind, not the length of a name.
+pub proof fn lemma_widget_kinds_ok(sk: SyncKind, bnd: Binding)
+    requires sync_kind_ok(sk), sk.selector is Field,
+    ensures widget_kinds_ok(sk, bnd),
 {
-    widget_kind_strings_distinct();
+    lemma_outer_kind_is_not_inner(sk, bnd);
 }
 
-// The installed types of the concrete configuration are ones the refinement can
-// follow. Both kinds are installed with the same synced_installed_type, whose
-// schema check reads the spec and whose transition check reads the selector
-// field of the spec, so neither reads metadata; and the default status it stamps
-// on a created object unmarshals, by the round trip of marshal_status.
+// The installed types of a configuration are ones the refinement can follow.
+// Every kind of the configuration carries the same synced_installed_type, whose
+// schema check reads the spec and whose transition check reads the selector field
+// of the spec, so neither reads metadata; and the default status it stamps on a
+// created object unmarshals, by the round trip of marshal_status.
 //
 // This is also where the mirror kinds are counted: the sync reconciler serves
-// widget_kind().bindings, the singleton {widget_binding()}, and refuses every
-// other binding before it sends a request (spec_types::serves), so the one mirror
-// kind the folded store must install is inner_kind of that binding.
-pub proof fn lemma_widget_instance_types(cluster: Cluster)
-    requires cluster.installed_types == widget_cluster_instance().installed_types,
+// `sk.bindings` and refuses every other binding before it sends a request
+// (spec_types::serves), so the mirror kinds the folded store must install are the
+// finitely many inner_kind(sk, b) for b in sk.bindings -- exactly the names
+// widget_installed_types holds.
+pub proof fn lemma_widget_types(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: Cluster)
+    requires
+        sync_kind_ok(sk),
+        // The refinement asks that the API server's validation not read metadata,
+        // and a `name` selector's immutability rule reads metadata.name
+        // (doc/widget_sync_fanout_design.md, section 5.2).
+        sk.selector is Field,
+        cluster.installed_types == widget_installed_types(sk, spec_ok),
     ensures
-        cluster.synced_type_is_installed(widget_kind().outer_kind, widget_spec_ok(), widget_selector()),
-        cluster.synced_type_is_installed(widget_inner_kind(), widget_spec_ok(), widget_selector()),
-        all_inner_kinds_installed(widget_kind(), widget_spec_ok(), cluster),
+        cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
+        forall |b: Binding| #[trigger] sk.bindings.contains(b)
+            ==> cluster.synced_type_is_installed(inner_kind(sk, b), spec_ok, sk.selector),
+        all_inner_kinds_installed(sk, spec_ok, cluster),
         installed_types_ignore_metadata(cluster.installed_types),
         installed_types_coherent(cluster.installed_types),
 {
     let it = cluster.installed_types;
-    let ty = Cluster::synced_installed_type(widget_spec_ok(), widget_selector());
-    widget_kind_strings_distinct();
-    assert(cluster.synced_type_is_installed(widget_kind().outer_kind, widget_spec_ok(), widget_selector()));
-    assert(cluster.synced_type_is_installed(widget_inner_kind(), widget_spec_ok(), widget_selector()));
-    // Every installed name carries the same type, so one case does for all of them.
-    assert forall |name: StringView| #[trigger] it.contains_key(name) implies it[name] == ty by {
-        if name != widget_kind().outer_kind->CustomResourceKind_0 {
-            assert(name == widget_inner_kind()->CustomResourceKind_0);
-        }
-    }
-    assert forall |b2: Binding| widget_kind().bindings.contains(b2)
-        implies cluster.synced_type_is_installed(#[trigger] inner_kind(widget_kind(), b2), widget_spec_ok(), widget_selector()) by {
-        assert(b2 == widget_binding());
-    }
+    let ty = Cluster::synced_installed_type(spec_ok, sk.selector);
+    lemma_widget_types_installed(sk, spec_ok, cluster);
+    assert forall |b2: Binding| sk.bindings.contains(b2)
+        implies cluster.synced_type_is_installed(#[trigger] inner_kind(sk, b2), spec_ok, sk.selector) by {}
     assert forall |name: StringView, o: DynamicObjectView, m: ObjectMetaView| it.contains_key(name) && o.kind == Kind::CustomResourceKind(name)
         implies (#[trigger] (it[name].valid_object)(DynamicObjectView { metadata: m, ..o })) == (it[name].valid_object)(o) by {
         assert(it[name] == ty);
@@ -2688,22 +2691,56 @@ pub proof fn lemma_widget_instance_types(cluster: Cluster)
     }
 }
 
-// The concrete cluster of composition/widget_sync_reconciler.rs is the pair's
-// cluster: the sync reconciler of widget_kind() at widget_sync_id(), the janitor
-// of its one binding at widget_janitor_id(), and nothing else.
-pub proof fn lemma_widget_instance_is_pair_cluster()
-    ensures widget_pair_cluster(widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok(), widget_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+// The cluster of composition::widget_sync_reconciler::widget_pair_cluster_for is
+// the pair's cluster: the sync reconciler of `sk` at `sync_id`, the janitor of
+// `bnd` at `janitor_id`, and nothing else.
+pub proof fn lemma_widget_is_pair_cluster(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
+    requires
+        sync_kind_ok(sk),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+    ensures widget_pair_cluster(sk, bnd, sk.bindings, spec_ok, widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id), sync_id, janitor_id),
 {
-    let cluster = widget_cluster_instance();
-    lemma_widget_instance_types(cluster);
-    assert(widget_bindings() =~= Set::<Binding>::empty().insert(widget_binding()));
-    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(widget_sync_id()).insert(widget_janitor_id()));
+    let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_widget_types(sk, spec_ok, cluster);
+    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(sync_id).insert(janitor_id));
 }
 
-// The theorem for the concrete cluster: R1, R2, R3, R3s and the janitor's delete
+// The theorem for ANY configuration: R1, R2, R3, R3s and the janitor's delete
 // soundness, read on two-store executions of the pair, with the outer copies in
-// the primary store and the mirrors of widget_binding() in the remote one.
-pub proof fn widget_instance_two_cluster_theorem()
+// the primary store and the mirrors of `bnd` in the remote one. Nothing here is
+// specific to a kind name: `sync_kind_ok` and `binding_ok` are what the
+// distinctness of the model kinds is discharged from.
+pub proof fn widget_instance_two_cluster_theorem(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+    ensures ({
+        let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+        let bs = sk.bindings;
+        let tc = widget_two_cluster(sk, bnd, bs, spec_ok, cluster);
+        widget_two_cluster_spec(sk, bnd, bs, spec_ok, cluster, sync_id, janitor_id).entails(
+            two_cluster_spec_eventually_synced(sk, bnd, bs, spec_ok)
+            .and(two_cluster_status_eventually_mirrored(sk, bnd, bs, spec_ok))
+            .and(two_cluster_mirrors_stably_collected(sk, bnd, bs, spec_ok, tc))
+            .and(two_cluster_mirrors_eventually_collected(sk, bnd, bs, spec_ok, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, bs, spec_ok, tc, janitor_id))))
+        )
+    }),
+{
+    let cluster = widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_is_pair_cluster(sk, bnd, spec_ok, sync_id, janitor_id);
+    lemma_pair_cluster_is_cluster_with_others(sk, bnd, sk.bindings, spec_ok, cluster, sync_id, janitor_id);
+    widget_two_cluster_theorem(sk, bnd, sk.bindings, spec_ok, cluster, sync_id, janitor_id);
+}
+
+// The demo configuration is one application of it.
+pub proof fn widget_demo_two_cluster_theorem()
     ensures ({
         let cluster = widget_cluster_instance();
         let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
@@ -2717,12 +2754,9 @@ pub proof fn widget_instance_two_cluster_theorem()
         )
     }),
 {
-    let cluster = widget_cluster_instance();
-    let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
-    widget_instance_kinds_ok();
-    lemma_widget_instance_is_pair_cluster();
-    lemma_pair_cluster_is_cluster_with_others(k, b, bs, spec_ok, cluster, widget_sync_id(), widget_janitor_id());
-    widget_two_cluster_theorem(k, b, bs, spec_ok, cluster, widget_sync_id(), widget_janitor_id());
+    widget_demo_config_ok();
+    assert(widget_kind().bindings =~= widget_bindings());
+    widget_instance_two_cluster_theorem(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id());
 }
 
 // ---------------------------------------------------------------------------
@@ -2792,27 +2826,64 @@ pub proof fn lemma_disturber_is_other_controller_ok(sk: SyncKind, bnd: Binding, 
 }
 
 
-// The concrete three-controller cluster of
-// composition/widget_disturber_reconciler.rs meets the same hypotheses, with the
-// disturber as the one other controller.
-pub proof fn lemma_widget_disturbed_instance_is_cluster_with_others()
-    ensures widget_cluster_with_others(widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok(), widget_disturbed_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+// The three-controller cluster of composition/widget_disturber_reconciler.rs
+// meets the same hypotheses, for ANY configuration, with the disturber as the one
+// other controller.
+pub proof fn lemma_widget_disturbed_is_cluster_with_others(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+        sync_id != disturber_id,
+        janitor_id != disturber_id,
+    ensures widget_cluster_with_others(sk, bnd, sk.bindings, spec_ok,
+        widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id), sync_id, janitor_id),
 {
-    let cluster = widget_disturbed_cluster_instance();
-    let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
-    widget_instance_kinds_ok();
-    lemma_widget_instance_types(cluster);
-    assert(bs =~= Set::<Binding>::empty().insert(b));
-    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != widget_sync_id() && id != widget_janitor_id()
-        implies widget_other_controller_ok(k, b, bs, spec_ok, cluster, widget_sync_id(), widget_janitor_id(), id) by {
-        assert(id == widget_disturber_id());
-        lemma_disturber_is_other_controller_ok(k, b, bs, spec_ok, cluster, widget_sync_id(), widget_janitor_id(), id);
+    let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_types(sk, spec_ok, cluster);
+    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
+        implies widget_other_controller_ok(sk, bnd, sk.bindings, spec_ok, cluster, sync_id, janitor_id, id) by {
+        assert(id == disturber_id);
+        lemma_disturber_is_other_controller_ok(sk, bnd, sk.bindings, spec_ok, cluster, sync_id, janitor_id, id);
     }
 }
 
-// The same theorem with the disturber beside the pair: an out-of-band actor that
-// patches and deletes mirrors in the remote store, admitted by the pair's relies.
-pub proof fn widget_disturbed_two_cluster_theorem()
+// The same theorem with the disturber beside the pair, for ANY configuration: an
+// out-of-band actor that patches and deletes mirrors in the remote store,
+// admitted by the pair's relies.
+pub proof fn widget_disturbed_two_cluster_theorem(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int, disturber_id: int)
+    requires
+        sync_kind_ok(sk),
+        binding_ok(bnd),
+        sk.selector is Field,
+        sk.bindings.contains(bnd),
+        sync_id != janitor_id,
+        sync_id != disturber_id,
+        janitor_id != disturber_id,
+    ensures ({
+        let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+        let bs = sk.bindings;
+        let tc = widget_two_cluster(sk, bnd, bs, spec_ok, cluster);
+        widget_two_cluster_spec(sk, bnd, bs, spec_ok, cluster, sync_id, janitor_id).entails(
+            two_cluster_spec_eventually_synced(sk, bnd, bs, spec_ok)
+            .and(two_cluster_status_eventually_mirrored(sk, bnd, bs, spec_ok))
+            .and(two_cluster_mirrors_stably_collected(sk, bnd, bs, spec_ok, tc))
+            .and(two_cluster_mirrors_eventually_collected(sk, bnd, bs, spec_ok, tc))
+            .and(always(lift_state(two_cluster_janitor_deletes_are_sound(sk, bnd, bs, spec_ok, tc, janitor_id))))
+        )
+    }),
+{
+    let cluster = widget_disturbed_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    lemma_widget_kinds_ok(sk, bnd);
+    lemma_widget_disturbed_is_cluster_with_others(sk, bnd, spec_ok, sync_id, janitor_id, disturber_id);
+    widget_two_cluster_theorem(sk, bnd, sk.bindings, spec_ok, cluster, sync_id, janitor_id);
+}
+
+// The demo configuration with the disturber is one application of it.
+pub proof fn widget_demo_disturbed_two_cluster_theorem()
     ensures ({
         let cluster = widget_disturbed_cluster_instance();
         let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
@@ -2826,11 +2897,9 @@ pub proof fn widget_disturbed_two_cluster_theorem()
         )
     }),
 {
-    let cluster = widget_disturbed_cluster_instance();
-    let (k, b, bs, spec_ok) = (widget_kind(), widget_binding(), widget_bindings(), widget_spec_ok());
-    widget_instance_kinds_ok();
-    lemma_widget_disturbed_instance_is_cluster_with_others();
-    widget_two_cluster_theorem(k, b, bs, spec_ok, cluster, widget_sync_id(), widget_janitor_id());
+    widget_demo_config_ok();
+    assert(widget_kind().bindings =~= widget_bindings());
+    widget_disturbed_two_cluster_theorem(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_disturber_id());
 }
 
 }
