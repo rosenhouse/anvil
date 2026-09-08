@@ -52,6 +52,16 @@ impl RawValue {
         self.inner == other.inner
     }
 
+    // The remainder of a status that has none: the empty object, which carries
+    // neither of the two members a status keeps apart from its rest. It is what
+    // a status the outer copy has never carried is built from.
+    #[verifier(external_body)]
+    pub fn empty_rest() -> (rest: RawValue)
+        ensures spec::status_rest_ok(rest@),
+    {
+        RawValue { inner: serde_json::Value::Object(serde_json::Map::new()) }
+    }
+
     // The string at `path` (a sequence of object keys from the root of the
     // value), None if the path does not lead to a string. The exec twin of
     // spec::spec_field.
@@ -195,17 +205,27 @@ impl SyncedCondition {
     // parse is the shape check of one condition: an object whose `type` and
     // `status` are strings, whose `observedGeneration` is an integer if present
     // and whose `reason` and `message` are strings if present.
+    //
+    // A JSON `null` is absent, for every optional field. A CRD declares these
+    // fields `nullable: true` (deploy/widget_sync/crd.yaml does), and a client
+    // that serializes a Go struct with an empty pointer or slice writes
+    // `"reason": null` rather than leaving the key out; refusing that would
+    // refuse the status of an ordinary inner implementation. The accessors
+    // already read a null as absent (`as_str`, `as_i64` answer None), so this is
+    // what makes parse agree with them.
     pub fn parse(value: &serde_json::Value) -> Result<SyncedCondition, UnmarshalError> {
         let object = value.as_object().ok_or(())?;
         let is_string = |key: &str| object.get(key).map_or(false, |v| v.is_string());
-        let is_string_if_present = |key: &str| object.get(key).map_or(true, |v| v.is_string());
+        let is_string_or_null = |key: &str| object.get(key).map_or(true, |v| v.is_string() || v.is_null());
+        // type and status are required: a null there is a condition that says
+        // nothing, not a condition with a default.
         if !is_string("type") || !is_string("status") {
             return Err(());
         }
-        if !object.get("observedGeneration").map_or(true, |v| v.as_i64().is_some()) {
+        if !object.get("observedGeneration").map_or(true, |v| v.as_i64().is_some() || v.is_null()) {
             return Err(());
         }
-        if !is_string_if_present("reason") || !is_string_if_present("message") {
+        if !is_string_or_null("reason") || !is_string_or_null("message") {
             return Err(());
         }
         Ok(SyncedCondition { inner: value.clone() })
@@ -242,10 +262,21 @@ impl std::clone::Clone for SyncedStatus {
 }
 
 impl SyncedStatus {
-    // new builds a status from its three parts. An observedGeneration or
-    // conditions member of `rest` is dropped: the view's rest never holds them.
+    // new builds a status from its three parts: the explicit fields, written
+    // over the mirrored remainder.
+    //
+    // `rest` must be a remainder (`status_rest_ok`): the value another status's
+    // rest() gave, or empty_rest(). That is a precondition and not something
+    // the body arranges, because the postcondition says the view's rest is the
+    // value it was given -- for a value carrying an `observedGeneration` of its
+    // own there is no status of which that is true, whatever the body does with
+    // it. (The body used to strip those two members, which made the
+    // postcondition false rather than making it true.) The two callers pass a
+    // rest() or an empty_rest(): widget_sync_controller's outer_status_for, and
+    // the tests below.
     #[verifier(external_body)]
     pub fn new(observed_generation: Option<i64>, conditions: Option<Vec<SyncedCondition>>, rest: RawValue) -> (s: SyncedStatus)
+        requires spec::status_rest_ok(rest@),
         ensures s@ == (SyncedStatusView {
             observed_generation: opt_i64_as_int(observed_generation),
             conditions: conditions.deep_view(),
@@ -254,10 +285,10 @@ impl SyncedStatus {
     {
         let mut object = match rest.inner {
             serde_json::Value::Object(o) => o,
+            // Outside the precondition; the fields the postcondition names are
+            // kept authoritative rather than a value that is no remainder.
             _ => serde_json::Map::new(),
         };
-        object.remove("observedGeneration");
-        object.remove("conditions");
         if let Some(g) = observed_generation {
             object.insert("observedGeneration".to_string(), serde_json::json!(g));
         }
@@ -283,10 +314,14 @@ impl SyncedStatus {
         })
     }
 
-    // The mirrored remainder: the status without observedGeneration and conditions.
+    // The mirrored remainder: the status without observedGeneration and
+    // conditions, which is what makes it a `status_rest_ok` value and so an
+    // argument SyncedStatus::new accepts.
     #[verifier(external_body)]
     pub fn rest(&self) -> (rest: RawValue)
-        ensures rest@ == self@.rest,
+        ensures
+            rest@ == self@.rest,
+            spec::status_rest_ok(rest@),
     {
         let mut object = self.inner.as_object().cloned().unwrap_or_default();
         object.remove("observedGeneration");
@@ -311,16 +346,23 @@ impl SyncedStatus {
 impl SyncedStatus {
     // parse is the shape check of a status value, the exec twin of
     // spec::unmarshal_status: an absent status (None, or JSON null) is Ok(None).
+    //
+    // A null `observedGeneration` or `conditions` is absent, as it is in a
+    // condition (SyncedCondition::parse): the CRD declares them `nullable:
+    // true`, and a Go controller that serializes a status with no conditions
+    // writes `"conditions": null`. Refusing it would make an ordinary inner
+    // implementation's status unreadable. Everything else stays strict: a
+    // string observedGeneration or an object `conditions` is still refused.
     pub fn parse(value: Option<&serde_json::Value>) -> Result<Option<SyncedStatus>, UnmarshalError> {
         let value = match value {
             None | Some(serde_json::Value::Null) => return Ok(None),
             Some(v) => v,
         };
         let object = value.as_object().ok_or(())?;
-        if !object.get("observedGeneration").map_or(true, |v| v.as_i64().is_some()) {
+        if !object.get("observedGeneration").map_or(true, |v| v.as_i64().is_some() || v.is_null()) {
             return Err(());
         }
-        if let Some(conditions) = object.get("conditions") {
+        if let Some(conditions) = object.get("conditions").filter(|v| !v.is_null()) {
             let items = conditions.as_array().ok_or(())?;
             for item in items {
                 SyncedCondition::parse(item)?;
@@ -719,10 +761,17 @@ mod tests {
         assert_eq!(edited_status.observed_generation(), Some(7));
         assert_eq!(edited_status.conditions().unwrap().len(), 1);
         assert_eq!(edited_status.rest().as_json(), s.rest().as_json());
-        let stripped = SyncedStatus::new(None, None, RawValue::from_json(json!({"observedGeneration": 9, "conditions": [], "x": 1})));
-        assert_eq!(stripped.as_json(), &json!({"x": 1}));
-        assert_eq!(stripped.observed_generation(), None);
-        assert!(stripped.conditions().is_none());
+        // A status of the explicit fields alone: empty_rest() is the remainder
+        // of a status that carries nothing else, and the fields are written
+        // over it.
+        let bare = SyncedStatus::new(None, None, RawValue::empty_rest());
+        assert_eq!(bare.as_json(), &json!({}));
+        assert_eq!(bare.observed_generation(), None);
+        assert!(bare.conditions().is_none());
+        assert_eq!(bare.rest().as_json(), &json!({}));
+        let generation_only = SyncedStatus::new(Some(9), None, RawValue::empty_rest());
+        assert_eq!(generation_only.as_json(), &json!({"observedGeneration": 9}));
+        assert_eq!(generation_only.rest().as_json(), &json!({}));
     }
 
     #[test]
@@ -745,6 +794,73 @@ mod tests {
         assert!(SyncedObject::unmarshal(&entry(), &remote(), wrong_tag).is_err());
         let wrong_kind = object(Some("Gadget"), remote(), json!({}), None);
         assert!(SyncedObject::unmarshal(&entry(), &remote(), wrong_kind).is_err());
+    }
+
+    // The CRD declares observedGeneration, conditions, reason and message
+    // `nullable: true`, and a Go controller that serializes an empty pointer or
+    // slice writes `null` rather than leaving the key out. A null is absent,
+    // wherever it appears, and the status is otherwise as strict as it was.
+    #[test]
+    fn null_is_absent_in_a_status_and_in_a_condition() {
+        let null_fields = json!({
+            "observedGeneration": null,
+            "conditions": null,
+            "ready": true
+        });
+        let obj = object(Some("Widget"), remote(), json!({}), Some(null_fields));
+        let synced = SyncedObject::unmarshal(&entry(), &remote(), obj).expect("nulls read as absent");
+        let s = synced.status().expect("a status");
+        assert_eq!(s.observed_generation(), None);
+        assert!(s.conditions().is_none());
+        assert_eq!(s.rest().as_json(), &json!({"ready": true}));
+
+        let null_in_condition = json!({
+            "conditions": [
+                {"type": "Ready", "status": "True", "observedGeneration": null, "reason": null, "message": null}
+            ]
+        });
+        let obj = object(Some("Widget"), remote(), json!({}), Some(null_in_condition));
+        let synced = SyncedObject::unmarshal(&entry(), &remote(), obj).expect("nulls read as absent");
+        let conditions = synced.status().unwrap().conditions().expect("the conditions");
+        assert_eq!(conditions[0].observed_generation(), None);
+        assert_eq!(conditions[0].reason(), None);
+        assert_eq!(conditions[0].message(), None);
+
+        // A null `type` or `status` is not a condition with a default: those two
+        // are required, and the other wrong types are refused as before.
+        for bad in [
+            json!({"conditions": [{"type": null, "status": "True"}]}),
+            json!({"conditions": [{"type": "Ready", "status": null}]}),
+            json!({"conditions": [{"type": "Ready", "status": "True", "reason": 7}]}),
+            json!({"conditions": [{"type": "Ready", "status": "True", "observedGeneration": "three"}]}),
+            json!({"observedGeneration": "three"}),
+            json!({"conditions": {}}),
+        ] {
+            let obj = object(Some("Widget"), remote(), json!({}), Some(bad.clone()));
+            assert!(SyncedObject::unmarshal(&entry(), &remote(), obj).is_err(), "{}", bad);
+        }
+    }
+
+    // eq is equality of the view, and a null field is absent in the view, so a
+    // status that writes its nulls equals one that leaves the keys out.
+    #[test]
+    fn a_status_with_null_fields_equals_one_without_the_keys() {
+        let parse = |v: serde_json::Value| SyncedStatus::parse(Some(&v)).unwrap().unwrap();
+        let with_nulls = parse(json!({"observedGeneration": null, "conditions": null, "ready": true}));
+        let without = parse(json!({"ready": true}));
+        assert!(with_nulls.eq(&without));
+        assert!(without.eq(&with_nulls));
+        assert!(with_nulls.rest().eq(&without.rest()));
+
+        let null_in_condition = parse(json!({
+            "conditions": [{"type": "Ready", "status": "True", "reason": null, "message": null}]
+        }));
+        let without_keys = parse(json!({"conditions": [{"type": "Ready", "status": "True"}]}));
+        assert!(null_in_condition.eq(&without_keys));
+
+        // A present value is still not an absent one.
+        assert!(!with_nulls.eq(&parse(json!({"observedGeneration": 1, "ready": true}))));
+        assert!(!with_nulls.eq(&parse(json!({"conditions": [], "ready": true}))));
     }
 
     #[test]

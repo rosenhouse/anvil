@@ -593,12 +593,15 @@ where
 // same-name trigger of each binding's mirrors: the binding manager watches the
 // mirrors of a bound cluster and sends the outer object of each changed mirror
 // into `triggers` (shim_layer::bindings::SameNameTriggers). A trigger for an
-// object that does not exist is harmless: the reconcile reads it, finds
-// NotFound and ends.
+// object that does not exist is harmless, and the reconciler is not even
+// reached: the applier looks the object up in the controller's store and
+// answers `ObjectNotFound` for one that is not there, which the error handler
+// logs and nothing else acts on.
 //
 // The stream is the only way a running kube-runtime controller takes work from
-// outside its own watches; it needs kube's `unstable-runtime-reconcile-on`
-// feature (enabled in Cargo.toml). The triggers are a latency optimization
+// outside its own watches; it needs kube-runtime's
+// `unstable-runtime-reconcile-on` feature, which the `kube/unstable-runtime`
+// of Cargo.toml's `runtime` feature turns on. The triggers are a latency optimization
 // only: liveness rests on the periodic requeue, so a dropped trigger costs at
 // most one requeue interval.
 pub async fn run_dyn_controller_with_triggers<R, E>(

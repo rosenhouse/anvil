@@ -37,7 +37,7 @@ use verifiable_controllers::shim_layer::controller_runtime::{
     discover_kinds, run_dyn_controller, run_dyn_controller_with_triggers, ClusterClients,
     ReconcilerFactory,
 };
-use verifiable_controllers::shim_layer::crd_shape::{check_crd, CrdCheckError};
+use verifiable_controllers::shim_layer::crd_shape::{check_crd, check_kind_name, CrdCheckError};
 use verifiable_controllers::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use verifiable_controllers::widget_sync_controller::exec::janitor_reconciler::JanitorReconciler;
 use verifiable_controllers::widget_sync_controller::exec::sync_reconciler::SyncReconciler;
@@ -126,12 +126,23 @@ fn parse_flags(args: &[String]) -> Result<Flags, String> {
             "--outer-cluster-id" => {
                 i += 1;
                 match args.get(i) {
+                    // An empty id would be written as the owner of every claim
+                    // this process creates, and two outer clusters with an empty
+                    // id are indistinguishable -- which is the one thing the
+                    // claim is there to tell apart.
+                    Some(value) if value.trim().is_empty() => {
+                        return Err("--outer-cluster-id must not be empty".to_string())
+                    }
                     Some(value) => flags.outer_cluster_id = Some(value.clone()),
                     None => return Err("--outer-cluster-id needs a value".to_string()),
                 }
             }
             arg if arg.starts_with("--outer-cluster-id=") => {
-                flags.outer_cluster_id = Some(arg["--outer-cluster-id=".len()..].to_string())
+                let value = &arg["--outer-cluster-id=".len()..];
+                if value.trim().is_empty() {
+                    return Err("--outer-cluster-id must not be empty".to_string());
+                }
+                flags.outer_cluster_id = Some(value.to_string())
             }
             arg => return Err(format!("unexpected argument {:?}", arg)),
         }
@@ -162,7 +173,7 @@ fn configured_kinds(args: &[String]) -> Result<Vec<KindConfig>, String> {
 // one line per failing row of the table of doc/widget_sync_fanout_design.md,
 // section 2.2. The boot check runs before any controller starts, so a refused
 // kind is a usage error and the process exits with status 2.
-fn refused_kind(kind: &KindConfig, err: &CrdCheckError) -> String {
+fn refused_kind(kind: &KindConfig, err: &impl std::fmt::Display) -> String {
     format!("--kind {}: {}", kind, err)
 }
 
@@ -181,6 +192,38 @@ fn sync_kind(entry: &RegistryEntry, config: &KindConfig, bindings: Vec<ClusterRe
         ClusterSelector::Field(path) => ClusterSelectorExec::Field(path.clone()),
     };
     SyncKindExec { entry: entry.clone(), selector, bindings }
+}
+
+// The signals that mean stop. SIGTERM is the one that matters in a cluster: it
+// is what the kubelet sends first when a pod is deleted, a Deployment rolls or
+// a node drains, and only after `terminationGracePeriodSeconds` does SIGKILL
+// follow. This process is PID 1 in its container, and PID 1 has no default
+// action for SIGTERM, so a binary that waits on ctrl_c alone ignores it and
+// every restart costs the whole grace period. SIGINT is kept for a run from a
+// terminal.
+#[cfg(unix)]
+async fn termination_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut terminate = match signal(SignalKind::terminate()) {
+        Ok(terminate) => terminate,
+        Err(e) => {
+            // Nothing can be done about it, but say so: the pod would take the
+            // full grace period to restart and the reason would be invisible.
+            warn!("cannot listen for SIGTERM ({}); only SIGINT will shut this process down", e);
+            let _ = tokio::signal::ctrl_c().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => info!("SIGINT received"),
+        _ = terminate.recv() => info!("SIGTERM received"),
+    }
+}
+
+#[cfg(not(unix))]
+async fn termination_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+    info!("interrupt received");
 }
 
 #[tokio::main]
@@ -215,7 +258,18 @@ async fn main() -> Result<()> {
             // missing flag is a usage error, reported before any client is built.
             let (kinds, cluster_id_override) = match (configured_kinds(&args[2..]), parse_flags(&args[2..])) {
                 (Ok(kinds), Ok(flags)) => {
-                    (kinds, flags.outer_cluster_id.or_else(|| env::var(OUTER_CLUSTER_ID_ENV).ok()))
+                    let given = flags.outer_cluster_id.or_else(|| env::var(OUTER_CLUSTER_ID_ENV).ok());
+                    // As for the flag: an empty override is not an override, and
+                    // taking it as one would make every claim this process
+                    // writes name an owner that identifies nothing.
+                    if given.as_deref().map(|id| id.trim().is_empty()).unwrap_or(false) {
+                        eprintln!(
+                            "{} is set but empty; unset it to use the uid of the outer kube-system namespace\n{}",
+                            OUTER_CLUSTER_ID_ENV, USAGE
+                        );
+                        process::exit(2);
+                    }
+                    (kinds, given)
                 }
                 (Err(message), _) | (_, Err(message)) => {
                     eprintln!("{}\n{}", message, USAGE);
@@ -258,6 +312,16 @@ async fn main() -> Result<()> {
             for (i, kind) in kinds.iter().enumerate() {
                 let entry = registry.entry(i).clone();
                 let plural = entry.kube_api_resource().plural.clone();
+                // The exec side of model_kind's injectivity hypothesis: the CRD
+                // name is what a mirror's model kind is built from, with '@'
+                // and '/' as its separators. A DNS name has neither, so this is
+                // defensive, but it is a hypothesis the proofs rest on.
+                if let Err(e) = check_kind_name(&entry.crd_name()) {
+                    let message = refused_kind(kind, &e);
+                    error!("{}", message);
+                    eprintln!("{}", message);
+                    process::exit(2);
+                }
                 if let Err(e) = check_crd(&primary, kind, &plural).await {
                     // Nothing has been started yet: print the failing rows and
                     // exit as on any other usage error.
@@ -273,14 +337,13 @@ async fn main() -> Result<()> {
 
             let clusters = ClusterClients::new(primary);
 
-            // One shutdown signal for the whole process: on SIGINT the sync
-            // runners and the binding manager stop taking new work and drain,
-            // and the manager stops every binding's runners.
+            // One shutdown signal for the whole process: on SIGTERM (or SIGINT)
+            // the sync runners and the binding manager stop taking new work and
+            // drain, and the manager stops every binding's runners.
             let (tx, shutdown_rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
-                if tokio::signal::ctrl_c().await.is_ok() {
-                    info!("shutting down");
-                }
+                termination_signal().await;
+                info!("shutting down");
                 let _ = tx.send(true);
             });
             let signalled = |mut rx: tokio::sync::watch::Receiver<bool>| async move {
@@ -294,9 +357,19 @@ async fn main() -> Result<()> {
             // carries the same-name triggers of every bound cluster's mirrors of
             // that kind (shim_layer::bindings).
             let mut runners: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
+            // What each runner is called in the log line that says it stopped;
+            // same index as `runners`.
+            let mut runner_names: Vec<String> = Vec::new();
             let mut binding_kinds = Vec::with_capacity(configured.len());
             for (kind, entry, plural) in &configured {
                 let (triggers, trigger_stream) = same_name_triggers();
+                runner_names.push(format!("the sync runner of {}", kind));
+                // The runner's `entry` and `cr_cluster` say which objects it
+                // watches and which model kind the shim stamps them with; the
+                // reconciler the factory builds carries its own copy of the
+                // kind and computes the same model kind from it. The factory
+                // closes over the runner's own entry, so the two agree by
+                // construction; the janitor side checks the pairing explicitly.
                 let (sync_entry, sync_config) = (entry.clone(), kind.clone());
                 let make_sync: ReconcilerFactory<SyncReconciler> = Arc::new(move |clusters: ClusterClients| {
                     let (entry, config) = (sync_entry.clone(), sync_config.clone());
@@ -341,6 +414,25 @@ async fn main() -> Result<()> {
                     let clusters = janitor_clusters.clone();
                     let (janitor_entry, janitor_config, janitor_binding) =
                         (entry.clone(), kind.clone(), binding.clone());
+                    // As for the sync runner, and with the binding too: this
+                    // janitor deletes mirrors in the cluster `cluster` names,
+                    // by the rule its reconciler holds for the binding it was
+                    // built with. The factory closes over the runner's own
+                    // entry and binding, so the reconciler it builds agrees with
+                    // the runner by construction; the check below is the same
+                    // pairing stated once, where the values are made.
+                    let entry = entry.clone();
+                    let cluster = ClusterId::Remote(binding.clone());
+                    debug_assert_eq!(
+                        janitor_entry.crd_name(),
+                        entry.crd_name(),
+                        "a janitor of binding {}/{} was given another kind's registry entry",
+                        binding.namespace, binding.name
+                    );
+                    debug_assert!(
+                        matches!(&cluster, ClusterId::Remote(r) if r == &janitor_binding),
+                        "a janitor's cluster is not its binding's"
+                    );
                     let reconciler: ReconcilerFactory<JanitorReconciler> = Arc::new(move |clusters: ClusterClients| {
                         let (entry, config, binding) =
                             (janitor_entry.clone(), janitor_config.clone(), janitor_binding.clone());
@@ -352,16 +444,16 @@ async fn main() -> Result<()> {
                             JanitorReconciler { kind: sync_kind(&entry, &config, bindings), binding }
                         })
                     });
-                    let entry = entry.clone();
-                    let cluster = ClusterId::Remote(binding.clone());
                     let pause_file = janitor_pause.clone();
                     let binding = binding.clone();
+                    let kind_name = kind.to_string();
+                    let asked_to_stop = stop.clone();
                     let mut stop = stop.clone();
                     tokio::spawn(async move {
                         let stopped = async move {
                             let _ = stop.changed().await;
                         };
-                        if let Err(e) = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
+                        let outcome = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
                             clusters,
                             reconciler,
                             entry,
@@ -371,9 +463,27 @@ async fn main() -> Result<()> {
                             fault_injection,
                             stopped,
                         )
-                        .await
-                        {
-                            warn!("a janitor of binding {}/{} stopped: {}", binding.namespace, binding.name, e);
+                        .await;
+                        // A janitor returns when the manager stops it: its
+                        // Secret changed or went away, or the process is
+                        // shutting down. Anything else is a janitor that has
+                        // stopped collecting stale mirrors of a live binding
+                        // with nothing to restart it, so the process exits and
+                        // the kubelet brings the container back.
+                        let janitor = format!("the janitor of {} for binding {}/{}", kind_name, binding.namespace, binding.name);
+                        match (*asked_to_stop.borrow(), outcome) {
+                            (true, Ok(())) => info!("{} stopped with its binding", janitor),
+                            (true, Err(e)) => {
+                                warn!("{} stopped with its binding, reporting: {}", janitor, e)
+                            }
+                            (false, Ok(())) => {
+                                error!("{} ended although its binding is up; exiting so the pod restarts", janitor);
+                                process::exit(1);
+                            }
+                            (false, Err(e)) => {
+                                error!("{} failed although its binding is up: {}; exiting so the pod restarts", janitor, e);
+                                process::exit(1);
+                            }
                         }
                     });
                 }
@@ -387,6 +497,8 @@ async fn main() -> Result<()> {
                 REMOTE_REQUEST_TIMEOUT,
                 start_runners,
             );
+            runner_names.push("the binding manager".to_string());
+            let shutting_down = shutdown_rx.clone();
             runners.push(tokio::spawn(manager.run(signalled(shutdown_rx))));
 
             // Ready: every configured kind is served and has the right shape, and
@@ -399,8 +511,31 @@ async fn main() -> Result<()> {
                 }
             }
 
-            for result in futures::future::try_join_all(runners).await? {
-                result?;
+            // The first runner to return decides what happens to the process.
+            // Away from shutdown there is no good reason for one to return:
+            // nothing restarts it, so the pod would go on running, and passing
+            // its startup probe, with a kind that is no longer reconciled or a
+            // binding manager that no longer notices a Secret. Exiting non-zero
+            // is what makes the kubelet restart the container, and the error log
+            // is what says which runner it was.
+            let (first, index, rest) = futures::future::select_all(runners).await;
+            let name = runner_names[index].clone();
+            if *shutting_down.borrow() {
+                info!("{} stopped; draining the others", name);
+                for handle in rest {
+                    match handle.await {
+                        Ok(Ok(())) | Err(_) => {}
+                        Ok(Err(e)) => warn!("a runner reported on its way out: {}", e),
+                    }
+                }
+                info!("every runner has stopped");
+            } else {
+                match first {
+                    Ok(Ok(())) => error!("{} returned unexpectedly; exiting so the pod restarts", name),
+                    Ok(Err(e)) => error!("{} failed: {}; exiting so the pod restarts", name, e),
+                    Err(e) => error!("{} did not finish ({}); exiting so the pod restarts", name, e),
+                }
+                process::exit(1);
             }
         }
         other => {
@@ -450,6 +585,11 @@ mod tests {
         let without = args(&["--kind", "anvil.dev/v1/Widget:name"]);
         assert_eq!(parse_flags(&without).unwrap().outer_cluster_id, None);
         assert!(parse_flags(&args(&["--outer-cluster-id"])).unwrap_err().contains("needs a value"));
+        // An empty id is not an id: it would be the owner of every claim this
+        // process writes, and would identify no outer cluster.
+        for empty in [args(&["--outer-cluster-id", ""]), args(&["--outer-cluster-id=  "])] {
+            assert!(parse_flags(&empty).unwrap_err().contains("must not be empty"), "{:?}", empty);
+        }
     }
 
     #[test]

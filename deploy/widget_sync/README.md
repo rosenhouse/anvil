@@ -103,6 +103,13 @@ ours.
   create an object there bound to `a`. The claim refuses the second binding:
   the object reports `Synced=False/Forbidden` with `Stalled=True` and nothing
   of it ever reaches the inner cluster ("Bindings and the claim" below).
+- Rotate a credential: write the same kubeconfig back into
+  `default/a-kubeconfig` with a byte changed (a comment line will do). The
+  binding's clients are rebuilt and its janitors restarted in place, the
+  mirrors are untouched, and the next edit goes through the new clients.
+- Delete `kube-system/anvil-sync-claim` in `widget-sync-inner-a`. Within a
+  minute the binding that holds the cluster writes it again and says so at
+  warn — a released claim that nobody else took is taken back.
 
 ## Kinds and their shape
 
@@ -120,7 +127,9 @@ widget_sync_controller run \
 required and the same kind twice is refused (two sync controllers on the same
 objects is what the proofs exclude). Each kind gets its own sync reconciler
 and, per binding, its own janitor. `widget_sync_controller export` prints the
-demo CRDs.
+demo CRDs — exactly the two manifests in this directory, immutability rule
+included, so what it prints is what this binary accepts at boot (a test holds
+the two to being the same document).
 
 The **selector** is the field that says which inner cluster an object belongs
 to:
@@ -128,7 +137,27 @@ to:
 | Selector | The object's cluster is | What the CRD must carry |
 |---|---|---|
 | `name` | `metadata.name` | nothing; `metadata.name` is immutable by construction |
-| `field:spec.<path>` (the `field:` prefix may be dropped) | the string at that path | the field, required and a string, guarded by `x-kubernetes-validations: [{rule: "self == oldSelf"}]` on the field, or the equivalent rule `self.<path> == oldSelf.<path>` on `spec` |
+| `field:spec.<path>` (the `field:` prefix may be dropped) | the string at that path | the field, required and a string, and every step of the path required in its parent, guarded by `x-kubernetes-validations: [{rule: "self == oldSelf"}]` on the field itself, or the equivalent rule naming the field on `spec` or on the object that holds it (see below) |
+
+The rule is matched as text, so only these spellings count, on the field, on
+the object holding it, and on `spec` — with `oldSelf` allowed on either side
+and any spacing (`self==oldSelf` is the rule `self  ==  oldSelf` is):
+
+| Where the rule sits | Accepted spellings, for the selector `field:spec.placement.clusterName` |
+|---|---|
+| the field itself | `self == oldSelf`, `oldSelf == self` |
+| the object that holds the field (`spec.placement`) | `self.clusterName == oldSelf.clusterName`, `oldSelf.clusterName == self.clusterName` |
+| `spec` | `self.placement.clusterName == oldSelf.placement.clusterName`, and the same with the sides swapped |
+
+Anything else — a rule that says the same thing another way, a rule with a
+`has()` guard — is refused: recognising it would mean evaluating CEL. A CRD
+whose rule is written differently is not wrong, but this controller will not
+run against it until the rule is spelled one of these ways.
+
+The rule must be in **every served version** of the CRD, not only the
+configured one: an object is one object whichever version it is written
+through, so a served version without the rule is a way to move an object to
+another inner cluster. A version that is not served is not checked.
 
 `Widget` uses `field:spec.clusterName`, `Gadget` uses `name` — its own name is
 the cluster, the shape of Cluster API's `Cluster` object. Immutability matters
@@ -150,13 +179,19 @@ them:
 | every other status field | mirrored verbatim inner to outer while `Synced` | none |
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
-A status (or a `conditions` item) declared with
-`x-kubernetes-preserve-unknown-fields` passes the rows it does not declare;
-what it does declare is still checked, since a declared string
-`observedGeneration` would reject the integer the controller writes. Anything
-outside the table is opaque: `Gadget`'s `spec.size` is copied without the
+The fields in the table must be **declared, with these types**, even on a
+status (or a `conditions` item) that carries
+`x-kubernetes-preserve-unknown-fields`. That setting makes the API server keep
+a field it does not know; it does not make it check one. The controller — and
+the model it is verified against — takes every stored status to be of this
+shape, and the only thing that holds another writer to it is the CRD's own
+schema: an undeclared `observedGeneration` accepts the string `"three"`, and
+then the mirror's status cannot be read at all. Anything *outside* the table is
+opaque and needs no declaration: `Gadget`'s `spec.size` is copied without the
 controller knowing it exists, and its `status.observedSize` comes back on the
-outer copy as part of the mirrored remainder.
+outer copy as part of the mirrored remainder;
+`x-kubernetes-preserve-unknown-fields` on the status is how a CRD keeps such a
+remainder it does not declare.
 
 Inner clusters are not checked for schema parity beyond serving the kind;
 parity stays an operational assumption. So does this, for now: **fields are
@@ -187,7 +222,7 @@ The log ends with
 
 ```
 --kind anvil.dev/v1/Widget:field:spec.clusterName: CRD widgets.anvil.dev does not have the shape the sync controller needs:
-  - spec: selector field spec.clusterName: must carry the x-kubernetes-validations rule `self == oldSelf` (or spec the rule `self.clusterName == oldSelf.clusterName`)
+  - spec: selector field spec.clusterName: must carry the x-kubernetes-validations rule `self == oldSelf` (or spec the rule `self.clusterName == oldSelf.clusterName`; either side may come first and the spacing does not matter)
 ```
 
 and the container exits 2. `kubectl apply -f deploy/widget_sync/crd.yaml`
@@ -210,28 +245,80 @@ namespace whose cluster selector names that cluster, and the inner cluster
 they are mirrored into. Its credential is the Secret
 `<clusterName>-kubeconfig` of that namespace, key `value`, holding a
 self-contained kubeconfig — the Cluster API convention, so a management
-cluster provides it without any help from us. The controller watches the
-Secrets of every namespace (`rbac.yaml` grants `secrets` get, list and watch)
-and keeps one pair of clients per binding whose Secret exists. Nothing is
-mounted and nothing is configured per binding: adding an inner cluster is
-adding its Secret, removing one is removing its Secret.
+cluster provides it without any help from us. The whole convention is
+required, not the name alone:
+
+| | |
+|---|---|
+| name | `<clusterName>-kubeconfig` |
+| `type` | `cluster.x-k8s.io/secret` |
+| label | `cluster.x-k8s.io/cluster-name: <clusterName>`, which must be the cluster the name says it is |
+| `data.value` | a self-contained kubeconfig of the shape below |
+
+The controller watches the Secrets of every namespace that carry the
+`cluster.x-k8s.io/cluster-name` label (`rbac.yaml` grants `secrets` get, list
+and watch; the label is a selector on the watch, so no other Secret is sent to
+this process at all) and checks the type and the label's value on every event.
+A Secret merely *named* `something-kubeconfig` — a backup, an operator's own
+kubeconfig — is not a binding. It keeps one pair of clients per binding whose
+Secret exists. Nothing is mounted and nothing is configured per binding: adding
+an inner cluster is adding its Secret, removing one is removing its Secret.
 
 ```sh
-kubectl --context kind-widget-sync-outer -n default create secret generic c-kubeconfig --from-file=value=./kubeconfig-of-c
+kubectl --context kind-widget-sync-outer -n default create secret generic c-kubeconfig \
+    --type=cluster.x-k8s.io/secret --from-file=value=./kubeconfig-of-c
+kubectl --context kind-widget-sync-outer -n default label secret c-kubeconfig cluster.x-k8s.io/cluster-name=c
 kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-controller | grep '^.*binding default/c'
 ```
 
 | The binding's Secret | What its objects report | What the controller does |
 |---|---|---|
-| missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: the binding is not bound, so the reconciler does not address it at all -- it reports the status and requeues, without a round trip. Its janitors do not run, so its mirrors are left alone |
-| present but not a parseable kubeconfig | `Synced=False/InnerUnreachable` | the same, plus one warn line; it is retried when the Secret changes |
+| missing, not of type `cluster.x-k8s.io/secret`, not labelled with its cluster name, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: the binding is not bound, so the reconciler does not address it at all -- it reports the status and requeues, without a round trip. Its janitors do not run, so its mirrors are left alone |
+| present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; nothing retries it on a timer, only a change of the Secret's `value` |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
-| present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
-| present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it |
+| present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes, or at once when the Secret's `value` changes |
+| present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it; its access and its claim are re-checked every minute |
 
-A changed Secret (a rotated credential; Cluster API rewrites the Secret)
-rebuilds the binding's clients and restarts its janitors, with no restart of
-the pod.
+A changed Secret rebuilds the binding's clients and restarts its janitors,
+with no restart of the pod. What counts as changed is the `value` itself: a
+rotated credential, which is how Cluster API rotates one, or the Secret deleted
+and created again. Editing a label or another key of the same Secret, or a
+relist of the watch, leaves a bound binding running and an unbound one on its
+existing retry schedule — nothing is rebuilt and no janitor of the process is
+restarted by a relist.
+
+**What a kubeconfig may contain.** A kubeconfig is a program as much as it is a
+credential: the client library it is handed to will run the command a `users[].user.exec`
+block names, or the `cmd-path` of an `auth-provider`, inside this pod; it will
+read the file a `tokenFile`, `client-certificate`, `client-key` or
+`certificate-authority` names — the pod's own ServiceAccount token, for
+instance — and send it to whatever `server` the same document names; and
+`proxy-url` and `insecure-skip-tls-verify` decide who may answer for the inner
+cluster. **Whoever can create such a Secret in a namespace therefore decides
+what this controller does for that namespace's bindings.** Grant that right in
+a namespace only to whoever you would let run code in the controller's pod.
+
+The controller narrows that to the shape a Cluster API workload cluster's
+kubeconfig has, before it builds a client. A Secret whose `value` breaks one of
+these rules is logged once at warn with the rule it broke and leaves the
+binding unbound (its objects read `InnerUnreachable`); nothing retries it on a
+timer, only a change of the Secret does:
+
+- exactly one cluster, one user and one context, and the `current-context` is
+  that context and names that cluster and that user;
+- the server starts with `https://`;
+- no `exec`, no `auth-provider`, no `tokenFile`, no `client-certificate`, no
+  `client-key`, no `certificate-authority` — the data forms
+  (`certificate-authority-data`, `client-certificate-data`, `client-key-data`,
+  an inline `token`) are what a Cluster API kubeconfig uses and are what is
+  accepted;
+- no `proxy-url` and no `insecure-skip-tls-verify: true` (an explicit `false`
+  is the default and is accepted).
+
+This bounds what a Secret can do to: naming an API server this controller then
+talks to with the credential in the same document. It does not bound *which*
+server that is, so a Secret can still point a binding at a cluster of the
+Secret author's choosing — which is what the claim below is about.
 
 **The access check.** Before a binding is used, the controller asks its inner
 cluster, with one `SelfSubjectAccessReview` per verb and configured kind in the
@@ -240,7 +327,20 @@ patch and delete the kind, and whether it may `get` and `create` configmaps in
 `kube-system` for the claim. A denial marks that one binding degraded — its
 requests are answered `Forbidden` — and is logged; an error means the cluster
 did not answer, which leaves the binding unbound and retried. Neither ever
-exits the process: one bad inner cluster must not stop the others.
+exits the process: one bad inner cluster must not stop the others. The reviews
+of one check are sent together, not one after another.
+
+Creating a `SelfSubjectAccessReview` is itself a right, and the credential is
+not granted it by `rbac_inner.yaml`: it comes from the default ClusterRoleBinding
+`system:basic-user`, which every Kubernetes cluster binds to
+`system:authenticated` and which allows `create` on
+`selfsubjectaccessreviews` and `selfsubjectrulesreviews`. A cluster whose
+administrator has removed or narrowed that binding answers the reviews with
+`Forbidden`, which the controller reports as an error of the check rather than
+as a denial, so the binding stays unbound and retried with backoff and the log
+line names the review that failed. Grant the credential
+`create` on `authorization.k8s.io/selfsubjectaccessreviews` explicitly in such
+a cluster.
 
 **The claim.** On first contact the controller creates, in the inner cluster,
 the ConfigMap `kube-system/anvil-sync-claim` with
@@ -275,8 +375,30 @@ kubectl --context kind-widget-sync-inner-a -n kube-system get configmap anvil-sy
 kubectl --context kind-widget-sync-inner-a -n kube-system delete configmap anvil-sync-claim
 ```
 
-The next re-check, at most five minutes later or at once if the binding's
-Secret is touched, claims it for the binding that is still there.
+The next re-check, at most five minutes later for a refused binding — or at
+once if its Secret's `value` changes — claims it for the binding that is still
+there.
+
+**The claim is re-checked.** A *bound* binding re-runs its access check and its
+claim every **60 seconds**; a *refused* one every **300**. The bound case is the
+faster of the two because it is the one nothing else would report: no request
+fails and no condition changes when a claim is deleted or taken over in an
+inner cluster, and the claim is this process's only evidence that no second
+binding is writing the same mirrors. Both cases are logged at warn, once each
+time they happen:
+
+```
+WARN binding default/a: its claim was gone and has been created again (owner="7f3c…" binding=default/a).
+     Someone removed kube-system/anvil-sync-claim in its inner cluster; while it was gone another
+     binding could have claimed the cluster.
+WARN binding default/a: its claim now names owner="7f3c…" binding=tenant/a; its inner cluster has
+     been taken by another binding since the last check
+```
+
+The second is followed by the refusal: the binding stops its janitors and its
+objects report `Synced=False/Forbidden`. Which binding wins a contested
+re-claim is whichever one asked first — re-creating the claim does not take a
+cluster back from a binding that already holds it.
 
 **The outer cluster id** is the uid of the outer cluster's `kube-system`
 namespace, read once at boot: the de facto stable identity of a cluster.
@@ -312,6 +434,16 @@ warn logs and in its objects' conditions, not in the pod's status. There is no
 liveness probe: the binary exposes no health endpoint and nothing else that says whether the
 reconcilers are still making progress, and a probe that does not measure that
 would only restart healthy pods.
+
+What takes the place of a liveness probe is the process exiting. **A runner
+that ends when it was not asked to takes the process down with it**: if a sync
+runner of a kind, the binding manager (the Secret watch ending counts as a
+failure, not as a clean finish) or the janitor of a live binding returns — with
+an error or without one — the binary logs at error which runner it was and
+exits non-zero, and the kubelet restarts the container. Nothing restarts a
+runner in place, so the alternative is a pod that passes its startup probe
+while a kind is no longer reconciled. On SIGTERM the same returns are expected:
+the runners drain and the process exits 0.
 
 **Before restoring the outer cluster.** The janitor recognizes a mirror's
 parent by uid: the mirror's `anvil.dev/parent-uid` annotation must equal the

@@ -15,11 +15,16 @@
 //   spec                   for a `field` selector: the path is a required
 //                          string, every step of it required in its parent,
 //                          with the rule `self == oldSelf` on the field or
-//                          `self.<path> == oldSelf.<path>` on spec
-// A status (or a conditions item) with x-kubernetes-preserve-unknown-fields
-// passes the rows for the fields it does not declare; the ones it declares
-// must still have the right type, since a declared string would reject the
-// controller's integer.
+//                          `self.<path> == oldSelf.<path>` on the object that
+//                          holds it or on spec (has_immutability_rule), in
+//                          every served version of the CRD and not only in the
+//                          configured one
+// x-kubernetes-preserve-unknown-fields does not excuse a status (or a
+// conditions item) from declaring these fields: it makes the API server keep
+// what it does not know, not check it, and what makes "every stored status
+// unmarshals" -- the model's installed type -- true of what other writers store
+// is the CRD's schema. The rest of a status is opaque and needs no declaration;
+// preserve-unknown-fields is how a CRD keeps it.
 use crate::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
     CustomResourceDefinition, JSONSchemaProps, JSONSchemaPropsOrArray,
@@ -44,6 +49,10 @@ pub enum ShapeError {
     StatusConditions(String),
     /// `spec` row, for a `field` selector: `path` is the dotted path.
     SelectorField { path: String, reason: String },
+    /// The `spec` row on another served version of the CRD: an update sent
+    /// through that version is an update, so the immutability rule has to be
+    /// there too.
+    SelectorFieldInVersion { version: String, path: String, reason: String },
 }
 
 impl fmt::Display for ShapeError {
@@ -64,6 +73,12 @@ impl fmt::Display for ShapeError {
             ShapeError::SelectorField { path, reason } => {
                 write!(f, "spec: selector field {}: {}", path, reason)
             }
+            ShapeError::SelectorFieldInVersion { version, path, reason } => write!(
+                f,
+                "spec of the served version {}: selector field {}: {} (an update sent through \
+                 another served version is an update, so every served version must guard the field)",
+                version, path, reason
+            ),
         }
     }
 }
@@ -103,6 +118,23 @@ pub fn check_shape(crd: &CustomResourceDefinition, kind: &KindConfig) -> Result<
         if let Err(reason) = check_selector_field(schema, path) {
             errors.push(ShapeError::SelectorField { path: kind.selector.dotted_path(), reason });
         }
+        // Every other served version too. An object is one object whichever
+        // version it is written through, so a version that does not guard the
+        // selector field is a way to move an object between inner clusters,
+        // which is what the rule is there to prevent (design section 1.1).
+        for other in crd.spec.versions.iter().filter(|v| v.served && v.name != version.name) {
+            let reason = match other.schema.as_ref().and_then(|s| s.open_api_v3_schema.as_ref()) {
+                Some(schema) => check_selector_field(schema, path),
+                None => Err("the version has no openAPIV3Schema".to_string()),
+            };
+            if let Err(reason) = reason {
+                errors.push(ShapeError::SelectorFieldInVersion {
+                    version: other.name.clone(),
+                    path: kind.selector.dotted_path(),
+                    reason,
+                });
+            }
+        }
     }
 
     if errors.is_empty() {
@@ -120,21 +152,24 @@ fn is_required(schema: &JSONSchemaProps, name: &str) -> bool {
     schema.required.as_ref().is_some_and(|r| r.iter().any(|n| n == name))
 }
 
-fn preserves_unknown_fields(schema: &JSONSchemaProps) -> bool {
-    schema.x_kubernetes_preserve_unknown_fields == Some(true)
-}
-
 fn type_of(schema: &JSONSchemaProps) -> &str {
     schema.type_.as_deref().unwrap_or("(untyped)")
 }
 
-// A field of `parent` named `name` must have type `expected`; when the parent
-// preserves unknown fields the field may also be absent.
+// A field of `parent` named `name` must be declared with type `expected`.
+//
+// `x-kubernetes-preserve-unknown-fields` on the parent is not an excuse for
+// leaving it out: it only makes the API server keep a field it does not know,
+// it does not make the server check its type. The model's installed type says
+// that every stored status unmarshals -- observedGeneration an integer,
+// conditions a list of conditions -- and the only thing that makes that true of
+// what other writers store is the CRD's own schema. An undeclared
+// observedGeneration accepts the string "three", which the controller would
+// then fail to unmarshal.
 fn check_typed_field(parent: &JSONSchemaProps, name: &str, expected: &str) -> Result<(), String> {
     match property(parent, name) {
         Some(field) if type_of(field) == expected => Ok(()),
         Some(field) => Err(format!("{} has type {}, must be {}", name, type_of(field), expected)),
-        None if preserves_unknown_fields(parent) => Ok(()),
         None => Err(format!("{} is not declared", name)),
     }
 }
@@ -159,7 +194,6 @@ fn check_status(schema: &JSONSchemaProps, errors: &mut Vec<ShapeError>) {
 fn check_conditions(status: &JSONSchemaProps) -> Result<(), String> {
     let conditions = match property(status, "conditions") {
         Some(c) => c,
-        None if preserves_unknown_fields(status) => return Ok(()),
         None => return Err("conditions is not declared".to_string()),
     };
     if type_of(conditions) != "array" {
@@ -217,24 +251,51 @@ fn check_selector_field(schema: &JSONSchemaProps, path: &[String]) -> Result<(),
         return Err(format!("has type {}, must be string", type_of(field)));
     }
     let dotted = path.join(".");
-    let on_field = has_rule(field, "self == oldSelf");
-    let on_spec = has_rule(spec, &format!("self.{} == oldSelf.{}", dotted, dotted));
-    if on_field || on_spec {
+    // The rule may sit on the field itself, on the object that holds it, or on
+    // `spec`; on an object it names the field by the path from that object.
+    // `parent` is `spec` for a one-segment path, so the two coincide there.
+    let last = path[path.len() - 1].as_str();
+    let on_field = has_immutability_rule(field, "");
+    let on_parent = has_immutability_rule(parent, last);
+    let on_spec = has_immutability_rule(spec, &dotted);
+    if on_field || on_parent || on_spec {
         Ok(())
     } else {
         Err(format!(
             "must carry the x-kubernetes-validations rule `self == oldSelf` \
-             (or spec the rule `self.{0} == oldSelf.{0}`)",
+             (or spec the rule `self.{0} == oldSelf.{0}`; either side may come \
+             first and the spacing does not matter)",
             dotted
         ))
     }
 }
 
-fn has_rule(schema: &JSONSchemaProps, rule: &str) -> bool {
-    schema
-        .x_kubernetes_validations
-        .as_ref()
-        .is_some_and(|rules| rules.iter().any(|r| r.rule.trim() == rule))
+// Whether `schema` carries an immutability rule for the field at `field_path`
+// relative to it; the empty path is the field itself, whose rule is
+// `self == oldSelf`.
+//
+// A CEL rule is text, and the same rule has several spellings: the two sides
+// may be written either way round and the spacing is free (`self==oldSelf` is
+// the rule that `self  ==  oldSelf` is). Comparing the text as written refused
+// CRDs that are in fact guarded, which matters more than the brittleness of a
+// text comparison suggests: this rule is what the janitor's delete-soundness
+// invariant rests on (design section 1.1), so whether a kind is accepted must
+// not depend on how a person typed it. Everything beyond these spellings is
+// still refused: recognising an arbitrary CEL expression would mean evaluating
+// CEL, which this deliberately does not.
+fn has_immutability_rule(schema: &JSONSchemaProps, field_path: &str) -> bool {
+    let (new, old) = if field_path.is_empty() {
+        ("self".to_string(), "oldSelf".to_string())
+    } else {
+        (format!("self.{}", field_path), format!("oldSelf.{}", field_path))
+    };
+    let accepted = [format!("{}=={}", new, old), format!("{}=={}", old, new)];
+    schema.x_kubernetes_validations.as_ref().is_some_and(|rules| {
+        rules.iter().any(|r| {
+            let written: String = r.rule.chars().filter(|c| !c.is_whitespace()).collect();
+            accepted.contains(&written)
+        })
+    })
 }
 
 /// What `check_crd` can report: the CRD could not be read, or it has the wrong shape.
@@ -266,6 +327,28 @@ impl std::error::Error for CrdCheckError {}
 /// The name of the CRD for a kind, `<plural>.<group>`; `plural` comes from discovery.
 pub fn crd_name(kind: &KindConfig, plural: &str) -> String {
     format!("{}.{}", plural, kind.group)
+}
+
+/// check_kind_name holds a kind's CRD name to what the model assumes of it.
+/// The model kind of an object is the CRD name for an outer copy and
+/// `<crd name>@<namespace>/<clusterName>` for a mirror, and the theorems'
+/// distinctness hypotheses are discharged by that map being injective, which
+/// rests on the CRD name being free of `@` (spec::model_kind::kind_name_ok);
+/// `/` is refused with it, since it separates the binding's two parts.
+///
+/// A CRD name is a DNS subdomain, so this cannot fire on a name the API server
+/// accepted. It is here because it is the exec side of a hypothesis the proofs
+/// rest on, and a hypothesis nothing checks is a hypothesis that can quietly
+/// stop holding.
+pub fn check_kind_name(name: &str) -> Result<(), String> {
+    if name.contains('@') || name.contains('/') {
+        return Err(format!(
+            "the CRD name {:?} contains '@' or '/', which the model kind of a mirror uses as \
+             separators (`<kind>@<namespace>/<clusterName>`)",
+            name
+        ));
+    }
+    Ok(())
 }
 
 /// Fetch the CRD of `kind` from the cluster `client` talks to and run `check_shape`.
@@ -401,6 +484,50 @@ mod tests {
         assert_eq!(check_shape(&crd, &by_field()), Ok(()));
     }
 
+    // The same rule, spelled the other ways a person writes it: either side
+    // first, and any spacing. All of them guard the field, so all of them are
+    // accepted, on the field and on the object that holds it.
+    #[test]
+    fn the_rule_is_recognised_however_it_is_spelled() {
+        for rule in ["self == oldSelf", "oldSelf == self", "self==oldSelf", "oldSelf\t==\n self"] {
+            let mut spec = with_cluster_name(old_widget_spec(), false);
+            spec["properties"]["clusterName"]["x-kubernetes-validations"] = json!([{ "rule": rule }]);
+            assert_eq!(check_shape(&good_crd(spec, widget_status()), &by_field()), Ok(()), "{:?}", rule);
+        }
+        for rule in [
+            "self.clusterName == oldSelf.clusterName",
+            "oldSelf.clusterName == self.clusterName",
+            "self.clusterName==oldSelf.clusterName",
+        ] {
+            let mut spec = with_cluster_name(old_widget_spec(), false);
+            spec["x-kubernetes-validations"] = json!([{ "rule": rule }]);
+            assert_eq!(check_shape(&good_crd(spec, widget_status()), &by_field()), Ok(()), "{:?}", rule);
+        }
+    }
+
+    // For a nested field the rule may also sit on the object that holds it,
+    // where it names the field by that object's path, not spec's.
+    #[test]
+    fn the_rule_may_sit_on_the_field_s_own_object() {
+        let kind: KindConfig = "anvil.dev/v1/Widget:field:spec.placement.clusterName".parse().unwrap();
+        let mut spec = old_widget_spec();
+        spec["properties"]["placement"] = json!({
+            "type": "object",
+            "required": ["clusterName"],
+            "x-kubernetes-validations": [{ "rule": "oldSelf.clusterName == self.clusterName" }],
+            "properties": { "clusterName": { "type": "string" } }
+        });
+        spec["required"] = json!(["count", "placement"]);
+        assert_eq!(check_shape(&good_crd(spec.clone(), widget_status()), &kind), Ok(()));
+
+        // The path is the one from that object: spec's spelling on the parent
+        // guards nothing here and is refused.
+        spec["properties"]["placement"]["x-kubernetes-validations"] =
+            json!([{ "rule": "self.placement.clusterName == oldSelf.placement.clusterName" }]);
+        let errors = check_shape(&good_crd(spec, widget_status()), &kind).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+    }
+
     #[test]
     fn a_rule_with_other_text_does_not_count() {
         let mut spec = with_cluster_name(old_widget_spec(), false);
@@ -456,6 +583,38 @@ mod tests {
         assert!(errors[0].to_string().contains("spec.placement must be required"), "{}", errors[0]);
     }
 
+    // A second served version is a second way to write the object, so the rule
+    // has to be there too; a version that is not served is not.
+    #[test]
+    fn every_served_version_must_guard_the_selector_field() {
+        let with_versions = |v2_served: bool, v2_guarded: bool| {
+            let spec = with_cluster_name(old_widget_spec(), true);
+            let mut crd = crd("Namespaced", true, spec.clone(), widget_status());
+            let v2_spec = with_cluster_name(old_widget_spec(), v2_guarded);
+            let mut v2 = crd.spec.versions[0].clone();
+            v2.name = "v2".to_string();
+            v2.served = v2_served;
+            v2.storage = false;
+            v2.schema = serde_json::from_value(json!({ "openAPIV3Schema": {
+                "type": "object",
+                "required": ["spec"],
+                "properties": { "spec": v2_spec, "status": widget_status() }
+            } }))
+            .unwrap();
+            crd.spec.versions.push(v2);
+            crd
+        };
+        assert_eq!(check_shape(&with_versions(true, true), &by_field()), Ok(()));
+        // Not served: nothing can be written through it.
+        assert_eq!(check_shape(&with_versions(false, false), &by_field()), Ok(()));
+        let errors = check_shape(&with_versions(true, false), &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].to_string().contains("served version v2"), "{}", errors[0]);
+        assert!(errors[0].to_string().contains("self == oldSelf"), "{}", errors[0]);
+        // A `name` selector needs no rule in any version.
+        assert_eq!(check_shape(&with_versions(true, false), &by_name()), Ok(()));
+    }
+
     #[test]
     fn a_crd_without_the_status_subresource_is_refused() {
         let crd = crd("Namespaced", false, with_cluster_name(old_widget_spec(), true), widget_status());
@@ -472,25 +631,37 @@ mod tests {
         );
     }
 
+    // preserve-unknown-fields keeps a field the API server does not know; it
+    // does not check its type, so it does not stand in for declaring the fields
+    // the controller reads and writes. Their absence is a failing row wherever
+    // it appears.
     #[test]
-    fn a_preserve_unknown_fields_status_passes_the_status_rows() {
+    fn a_preserve_unknown_fields_status_must_still_declare_the_fields() {
         let status = json!({ "type": "object", "x-kubernetes-preserve-unknown-fields": true });
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
-        assert_eq!(check_shape(&crd, &by_field()), Ok(()));
+        let errors = check_shape(&crd, &by_field()).unwrap_err();
+        assert_eq!(
+            errors,
+            vec![
+                ShapeError::StatusObservedGeneration("observedGeneration is not declared".to_string()),
+                ShapeError::StatusConditions("conditions is not declared".to_string()),
+            ]
+        );
 
-        // Declared fields are still checked: a string observedGeneration would
-        // reject the controller's integer.
+        // Declared with the wrong type is refused as it was: a string
+        // observedGeneration would reject the controller's integer.
         let status = json!({
             "type": "object", "x-kubernetes-preserve-unknown-fields": true,
             "properties": { "observedGeneration": { "type": "string" } }
         });
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
         let errors = check_shape(&crd, &by_field()).unwrap_err();
-        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert_eq!(errors.len(), 2, "{:?}", errors);
         assert!(matches!(errors[0], ShapeError::StatusObservedGeneration(_)), "{:?}", errors);
 
-        // So is a conditions item that preserves unknown fields but declares
-        // only type and status.
+        // A conditions item that preserves unknown fields but declares only
+        // type and status: the fields the controller reads off a condition are
+        // still required.
         let status = json!({
             "type": "object",
             "properties": {
@@ -503,6 +674,15 @@ mod tests {
                 } }
             }
         });
+        let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
+        let errors = check_shape(&crd, &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].to_string().contains("reason is not declared"), "{}", errors[0]);
+
+        // The whole status declared, with preserve-unknown-fields for the rest
+        // the controller mirrors verbatim, passes.
+        let mut status = widget_status();
+        status["x-kubernetes-preserve-unknown-fields"] = json!(true);
         let crd = good_crd(with_cluster_name(old_widget_spec(), true), status);
         assert_eq!(check_shape(&crd, &by_field()), Ok(()));
     }

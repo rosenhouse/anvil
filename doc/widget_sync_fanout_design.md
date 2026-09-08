@@ -49,9 +49,11 @@ A configured kind carries a **cluster selector**, one of:
 - `field:<path>`: a string field of the spec, for example
   `spec.clusterName`. The CRD must declare the field as a required string
   and guard it with an immutability rule, `x-kubernetes-validations:
-  [{rule: "self == oldSelf"}]` on the field, or the equivalent rule on
-  `spec` naming the field. The controller reads the CRD at boot and refuses
-  the kind without the rule.
+  [{rule: "self == oldSelf"}]` on the field, or the equivalent rule naming
+  the field on the object that holds it or on `spec`. The controller reads
+  the CRD at boot and refuses the kind without the rule; it requires the rule
+  in every *served* version of the CRD, since an update sent through another
+  served version is an update.
 - `name`: the object's `metadata.name` is the cluster name. This is the
   shape of Cluster API's `Cluster` object itself, and it is immutable by
   construction.
@@ -85,15 +87,31 @@ A **binding** is a pair `b = (namespace, clusterName)`. Its inner cluster is
 reached through the Secret `<clusterName>-kubeconfig` in `namespace`, key
 `value`, a self-contained kubeconfig (certificate data or an inline
 token). This is the Cluster API convention, so a management cluster
-provides the Secret without any help from us.
+provides the Secret without any help from us; the convention is taken whole,
+so the Secret must also be of type `cluster.x-k8s.io/secret` and carry the
+label `cluster.x-k8s.io/cluster-name`, whose value is the cluster name and
+must agree with the name minus the suffix. A Secret merely named
+`<something>-kubeconfig` is not a binding.
 
-The controller watches Secrets in all namespaces and keeps one pair of
-clients (requests, watch; section 5.3 of the main design) per binding whose
-Secret exists. A Secret that changes (a rotated credential; Cluster API
+The controller watches the labelled Secrets in all namespaces (the label is a
+selector on the watch; the type and the label's value are checked on each
+event) and keeps one pair of clients (requests, watch; section 5.3 of the main
+design) per binding whose Secret exists. A Secret that changes (a rotated credential; Cluster API
 rewrites the Secret) rebuilds the binding's clients; a Secret that goes
 away drops the binding, its janitors included. The `tokenFile` mechanism of
 the single-pair deployment is not used: a Cluster API kubeconfig is inline
 and rotation is the Secret changing.
+
+A kubeconfig is code as much as it is a credential — `exec`, `auth-provider`,
+`tokenFile`, `proxy-url`, `insecure-skip-tls-verify` all direct the client
+library to run or read or trust something — so before a client is built the
+document is held to the shape a Cluster API kubeconfig has: exactly one
+cluster, user and context, an `https://` server, credentials as data and never
+as a path or a command, no proxy and no skipped verification (`validate_kubeconfig`,
+`shim_layer::bindings`); whoever may create such a Secret in a namespace
+otherwise decides what the controller does there. A Secret the check refuses is
+logged with the rule it broke and its binding stays unbound until the Secret
+changes.
 
 A parent whose binding has no Secret, or whose Secret does not parse, has no
 entry in the process's client map, so it is not one of the bindings a reconcile
@@ -191,8 +209,12 @@ The controller reads and writes exactly these fields of an object:
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
 At boot the controller fetches each kind's CRD in the outer cluster and
-checks the table. A CRD whose status is `x-kubernetes-preserve-unknown-fields`
-passes the status rows. A kind that fails any row is refused with a usage
+checks the table. The status rows are required as declarations of those
+types even on a status that carries `x-kubernetes-preserve-unknown-fields`:
+that setting keeps a field the API server does not know, it does not check
+it, and the installed type of the kind (section 2.3) says that every stored
+status unmarshals — which, for what other writers store, only the CRD's
+schema makes true. A kind that fails any row is refused with a usage
 error naming the row. Inner clusters are not checked for schema parity
 beyond serving the kind with the status subresource (discovery at bind
 time); parity stays an operational assumption, as today.
@@ -248,8 +270,27 @@ plus the cluster tag, whose `unmarshal`, `marshal`, `has_kind` and
 today's wrapper macro, restated over the **registry** (section 2.4)
 instead of a compiled type. The status accessors and `outer_status_for`
 are `external_body` over `serde_json::Value`, as they are today over the
-typed status. The exec hygiene script's `external_body` inventory is
-updated in the same change.
+typed status.
+
+The trusted surface of the shape is therefore no longer under the
+controller, and the exec hygiene script pins it where it is, file by
+file (`doc/widget_sync_design.md`, section 3, lists the items):
+
+- `kubernetes_api_objects/spec/synced_object.rs`: the uninterpreted
+  `unmarshal_status`, `marshal_status`, `spec_field` and
+  `status_rest_ok`, and the axiom `marshal_status_preserves_integrity`.
+- `kubernetes_api_objects/spec/model_kind.rs`: nothing — `model_kind`
+  and its injectivity are proved, and the hypotheses injectivity rests
+  on are checked on the exec side (boot check and Secret watch).
+- `kubernetes_api_objects/exec/synced_object.rs`: the wrappers above,
+  the free `marshal_status` and `cluster_of_dynamic`, `empty_rest`, and
+  the two equality decisions `RawValue::eq` and `SyncedStatus::eq`,
+  trusted as *iffs* over the view.
+- `kubernetes_api_objects/exec/registry.rs`: `crd_name` and
+  `api_resource`, the routing the model trusts.
+- `widget_sync_controller/trusted/`: `outer_status_for`, the three
+  `Marshallable` instances of the reconcile states, and the
+  uninterpreted `default_status_rest()`.
 
 The installed type of a kind of the shape is a function of the schema, not
 of a type:
@@ -416,7 +457,11 @@ fault-injection hook are unchanged; both act per process.
   namespace bound to different clusters; a Gadget named `a`; a Secret in a
   second namespace copied from `a-kubeconfig`, whose parents report
   `Forbidden` while the mirrors of namespace `default` survive; a Secret
-  removed and re-added; a kind refused at boot for a missing rule.
+  removed and re-added; a Secret whose `value` is replaced by an equivalent
+  kubeconfig with other bytes, after which the bound objects keep their
+  mirrors and a new edit still propagates; the claim of a bound binding
+  deleted by hand and written again at the next re-check; a kind refused at
+  boot for a missing rule.
 
 ## 5. What is proved, what is assumed
 
