@@ -19,13 +19,14 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use verifiable_controllers::crds::Widget;
 use verifiable_controllers::external_shim_layer::VoidExternalShimLayer;
-use verifiable_controllers::kubernetes_api_objects::exec::api_resource::ClusterId;
+use verifiable_controllers::kubernetes_api_objects::exec::api_resource::{ClusterBound, ClusterId};
 use verifiable_controllers::shim_layer::controller_runtime::{
     remote_clients_from_kubeconfig, run_controller_in_clusters, run_controller_with_same_name_watch,
     ClusterClients,
 };
 use verifiable_controllers::widget_sync_controller::exec::janitor_reconciler::WidgetJanitorReconciler;
 use verifiable_controllers::widget_sync_controller::exec::sync_reconciler::WidgetSyncReconciler;
+use verifiable_controllers::widget_sync_controller::trusted::exec_types::InnerWidget;
 
 const USAGE: &str = "usage: widget_sync_controller <export|run|crash>
   export  print the Widget CRD as YAML
@@ -141,7 +142,14 @@ async fn main() -> Result<()> {
             let primary = Client::try_default().await?;
             let remote = remote_clients_from_kubeconfig(&remote_kubeconfig, REMOTE_REQUEST_TIMEOUT).await?;
             check_remote_access(&remote.requests).await?;
-            let clusters = ClusterClients { primary, remote: Some(remote) };
+            // The mirrors' wrapper is bound to the pair's one binding; the remote
+            // clients are registered under it so that its requests find them.
+            let inner_cluster = <InnerWidget as ClusterBound>::cluster();
+            let inner_ref = match &inner_cluster {
+                ClusterId::Remote(r) => r.clone(),
+                ClusterId::Primary => bail!("the inner Widget wrapper is bound to the primary cluster"),
+            };
+            let clusters = ClusterClients::with_remote(primary, inner_ref, remote).await;
             if let Some(path) = &ready_file {
                 match fs::write(path, b"") {
                     Ok(()) => info!("ready: created {}", path),
@@ -154,7 +162,7 @@ async fn main() -> Result<()> {
             // holds for every Delete this process could send.
             let sync = run_controller_with_same_name_watch::<Widget, WidgetSyncReconciler, VoidExternalShimLayer, Widget>(
                 clusters.clone(),
-                ClusterId::Remote,
+                inner_cluster,
                 Some(FIELD_MANAGER.to_string()),
                 janitor_pause_file.clone(),
                 fault_injection,

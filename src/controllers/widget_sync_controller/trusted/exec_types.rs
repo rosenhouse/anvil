@@ -1,9 +1,10 @@
 // Exec wrappers of the Widget custom resource for the two clusters.
 //
 // OuterWidget and InnerWidget wrap the same kube type (crds::Widget). They are
-// bound to different clusters (ClusterId::Primary and ClusterId::Remote), so
-// their views have different kinds and the shim routes their requests to the
-// matching cluster. See kubernetes_api_objects::exec::api_resource::ClusterId.
+// bound to different clusters (ClusterId::Primary and the one binding of the
+// pair, inner_cluster()), so their views have different kinds and the shim
+// routes their requests to the matching cluster. See
+// kubernetes_api_objects::exec::api_resource::ClusterId.
 use crate::kubernetes_api_objects::error::UnmarshalError;
 use crate::kubernetes_api_objects::exec::{api_resource::*, prelude::*};
 use crate::kubernetes_api_objects::spec::resource::*;
@@ -13,6 +14,14 @@ use kube::Resource;
 use vstd::prelude::*;
 
 verus! {
+
+// The binding the pair's mirrors live in. The single pair has one inner
+// cluster, so its ClusterRef is fixed here; the binary registers the remote
+// clients under the same ref, which is what routes InnerWidget requests to
+// them. The names are only a tag: nothing reads them back.
+pub fn inner_cluster() -> ClusterId {
+    ClusterId::remote("widget-sync".to_string(), "inner".to_string())
+}
 
 implement_object_wrapper_type!(
     OuterWidget,
@@ -24,7 +33,7 @@ implement_object_wrapper_type!(
     InnerWidget,
     crate::crds::Widget,
     spec_types::InnerWidgetView,
-    ClusterId::Remote
+    inner_cluster()
 );
 
 implement_field_wrapper_type!(
@@ -332,9 +341,10 @@ mod tests {
     #[test]
     fn has_kind_follows_tag_and_kube_kind() {
         assert!(OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
-        assert!(!OuterWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
-        assert!(InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Remote)));
+        assert!(!OuterWidget::has_kind(&widget(Some("Widget"), inner_cluster())));
+        assert!(InnerWidget::has_kind(&widget(Some("Widget"), inner_cluster())));
         assert!(!InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::Primary)));
+        assert!(!InnerWidget::has_kind(&widget(Some("Widget"), ClusterId::remote("widget-sync".to_string(), "other".to_string()))));
         assert!(!OuterWidget::has_kind(&widget(Some("widget"), ClusterId::Primary)));
         assert!(!OuterWidget::has_kind(&widget(Some("Pod"), ClusterId::Primary)));
         assert!(!OuterWidget::has_kind(&widget(None, ClusterId::Primary)));

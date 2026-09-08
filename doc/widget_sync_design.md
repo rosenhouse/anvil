@@ -220,7 +220,8 @@ name)`. The cluster is folded into the *model* kind at the exec boundary: the
 outer copy has kind `widget`, the mirror `widget@inner`. `OuterWidgetView` and
 `InnerWidgetView` are two view types with the same spec and status, differing
 only in `kind()`; on the exec side `OuterWidget` and `InnerWidget` wrap the
-same kube type and are bound to `ClusterId::Primary` and `ClusterId::Remote`.
+same kube type and are bound to `ClusterId::Primary` and the pair's one
+binding, `ClusterId::Remote(ClusterRef)` (`exec_types::inner_cluster()`).
 Both kinds are installed in one `Cluster`; the two reconcilers are two
 controller ids. `schedule_controller_reconcile` fires for a reconciler's own
 kind, so outer copies schedule the sync reconciler and inner copies the
@@ -399,7 +400,7 @@ The trusted specification is `src/controllers/widget_sync_controller/trusted/`:
 `spec_types.rs` (views and the mirror relation), `rely_guarantee.rs`,
 `liveness_theorem.rs` (R1, R2, R3, R3s, D3), `step.rs` (the reconcilers' step
 types) and `exec_types.rs` (the exec wrappers, bound to `ClusterId::Primary`
-and `ClusterId::Remote`; this binding is the routing the model trusts, section
+and `inner_cluster()`; this binding is the routing the model trusts, section
 2.2). `π` is `WidgetStatusView::mirrored()`.
 
 Trusted beyond the specification, all under `widget_sync_controller/`: the
@@ -638,9 +639,14 @@ no-op patch.
 
 ### 5.3 Cluster tag and routing
 
-`ApiResource` and `DynamicObject` carry a `ClusterId`; a wrapper type is bound
-to one cluster (`ClusterBound`) and its view kind is the tagged kind. The shim
-holds one client per cluster, routes each request by the tag of its
+`ApiResource` and `DynamicObject` carry a `ClusterId`, `Primary` or
+`Remote(ClusterRef)` with the binding's namespace and cluster name as data;
+a wrapper type is bound to one cluster (`ClusterBound`) and its view kind is
+the tagged kind. The shim holds the primary client and a map from `ClusterRef`
+to a remote cluster's clients (`ClusterClients`), shared by every controller of
+the process and changed while they run; a request to a `ClusterRef` with no
+clients fails with `Timeout`, as one to an unreachable cluster does. It
+routes each request by the tag of its
 `ApiResource`, tags the objects it returns (and stamps list items, which carry
 no type metadata of their own, with the listed resource's), and derives a
 controller's primary watch cluster from its wrapper type. Two controllers can

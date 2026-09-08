@@ -43,7 +43,7 @@ impl std::clone::Clone for DynamicObject {
     fn clone(&self) -> (res: DynamicObject)
         ensures res@ == self@
     {
-        DynamicObject { inner: self.inner.clone(), cluster: self.cluster }
+        DynamicObject { inner: self.inner.clone(), cluster: self.cluster.clone() }
     }
 }
 
@@ -58,7 +58,7 @@ impl DynamicObject {
     // cluster has no spec-level meaning on its own; see ApiResource::cluster.
     #[verifier(external_body)]
     pub fn cluster(&self) -> ClusterId {
-        self.cluster
+        self.cluster.clone()
     }
 }
 
