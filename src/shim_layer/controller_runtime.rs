@@ -337,7 +337,7 @@ where
     info!("starting controller");
     Controller::new(crs, watcher::Config::default()) // The controller's reconcile is triggered when a CR is created/updated
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new() })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -389,7 +389,7 @@ where
         .owns(Api::<Pod>::all(client.clone()), watcher::Config::default()) // Watch owned Pods
         .owns(Api::<O>::all(client.clone()), watcher::Config::default()) // Watch owned CRs of type O
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new() })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -445,7 +445,7 @@ where
     info!("starting controller (custom resource in {:?} cluster)", cr_cluster);
     Controller::new(crs, watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -513,7 +513,7 @@ where
                 .map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
         })
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -575,7 +575,7 @@ where
     info!("starting controller for {} (custom resource in {:?} cluster)", api_resource.kind, cr_cluster);
     Controller::new_with(crs, watcher::Config::default(), api_resource.clone())
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -638,7 +638,7 @@ where
     Controller::new_with(crs, watcher::Config::default(), api_resource.clone())
         .reconcile_on(triggers)
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -699,7 +699,7 @@ where
                 .map(|ns| ObjectRef::<KubeDynamicObject>::new_with(&o.name_any(), mapped_resource.clone()).within(&ns))
         })
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -763,23 +763,33 @@ where
 }
 
 // The outcome of the quorum read of the triggering object: the object, or the
-// action the reconcile ends with instead.
+// reason the reconcile ends without one. The two ways of ending are told apart
+// because they mean opposite things for the object's retry state: an object
+// that is gone has none to keep, while a read that failed is a fault the next
+// failure of this object should go on counting from.
 enum Fetched<K> {
     Object(K),
-    End(Action),
+    // The object is gone.
+    Gone,
+    // The read failed; the reconcile ends with this action.
+    Failed(Action),
 }
 
 // fetch_outcome turns the answer of the quorum read into what the reconcile does
 // next: a NotFound ends it (the object is gone), any other error retries it.
+// The retry here is the fixed one of a management cluster that did not answer,
+// not the per-object backoff of error_policy: this read never reached the
+// reconciler, so kube-runtime sees the reconcile succeed and error_policy is
+// not consulted.
 fn fetch_outcome<K>(result: kube::Result<K>, log_header: &str, cr_name: &str) -> Fetched<K> {
     match result {
         Err(kube_client::error::Error::Api(ErrorResponse { reason, .. })) if &reason == "NotFound" => {
             warn!("{} Custom resource {} not found, end reconcile", log_header, cr_name);
-            Fetched::End(Action::await_change())
+            Fetched::Gone
         }
         Err(err) => {
             warn!("{} Get custom resource {} failed with error: {}, will retry reconcile", log_header, cr_name, err);
-            Fetched::End(Action::requeue(Duration::from_secs(60)))
+            Fetched::Failed(Action::requeue(Duration::from_secs(60)))
         }
         Ok(cr) => Fetched::Object(cr),
     }
@@ -830,11 +840,17 @@ where
     let cr_key = format!("{}/{}/{}", cr_kind, cr_namespace, cr_name);
     let log_header = format!("Reconciling {}:", cr_key);
 
+    let retry_key = (cr_namespace.clone(), cr_name.clone());
+
     let cr_api = Api::<K>::namespaced(cr_client, &cr_namespace);
     // Get the custom resource by a quorum read to Kubernetes' storage (etcd) to get the most updated custom resource
     let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name) {
         Fetched::Object(cr) => cr,
-        Fetched::End(action) => return Ok(action),
+        Fetched::Gone => {
+            ctx.retry_backoff.forget(&retry_key);
+            return Ok(Action::await_change());
+        }
+        Fetched::Failed(action) => return Ok(action),
     };
     info!(
         object = %cr_key,
@@ -851,7 +867,12 @@ where
 
     // Wrap the custom resource with Verus-friendly wrapper type (which has a ghost version, i.e., view)
     let cr_wrapper = R::K::from_kube(cr);
-    run_reconcile::<StaticDriver<R>, E>(&StaticDriver::<R>(PhantomData), cr_wrapper, &ctx, &cr_key, &log_header, fault_injection).await
+    let action = run_reconcile::<StaticDriver<R>, E>(&StaticDriver::<R>(PhantomData), cr_wrapper, &ctx, &cr_key, &log_header, fault_injection).await?;
+    // The reconcile succeeded: this object's next failure starts the schedule
+    // again at RETRY_BASE. A failure returns above without forgetting, and
+    // error_policy counts it.
+    ctx.retry_backoff.forget(&retry_key);
+    Ok(action)
 }
 
 // reconcile_dyn_with is reconcile_with for a DynReconciler over the shape: the
@@ -883,10 +904,16 @@ where
     let cr_key = format!("{}/{}/{}", cr_kind, cr_namespace, cr_name);
     let log_header = format!("Reconciling {}:", cr_key);
 
+    let retry_key = (cr_namespace.clone(), cr_name.clone());
+
     let cr_api = Api::<KubeDynamicObject>::namespaced_with(cr_client, &cr_namespace, entry.kube_api_resource());
     let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name) {
         Fetched::Object(cr) => cr,
-        Fetched::End(action) => return Ok(action),
+        Fetched::Gone => {
+            ctx.retry_backoff.forget(&retry_key);
+            return Ok(Action::await_change());
+        }
+        Fetched::Failed(action) => return Ok(action),
     };
     info!(
         object = %cr_key,
@@ -909,10 +936,16 @@ where
                 "{} the object's status is outside the shape the controller reconciles; it is left alone until it changes",
                 log_header
             );
+            // Nothing will be retried until the object changes, so it keeps no
+            // retry state.
+            ctx.retry_backoff.forget(&retry_key);
             return Ok(Action::await_change());
         }
     };
-    run_reconcile::<DynDriver<R>, E>(&DynDriver(reconciler), cr_wrapper, &ctx, &cr_key, &log_header, fault_injection).await
+    let action = run_reconcile::<DynDriver<R>, E>(&DynDriver(reconciler), cr_wrapper, &ctx, &cr_key, &log_header, fault_injection).await?;
+    // The reconcile succeeded: see reconcile_with.
+    ctx.retry_backoff.forget(&retry_key);
+    Ok(action)
 }
 
 // api_of builds the API handle a request goes through: the namespaced handle of
@@ -1522,27 +1555,136 @@ fn json_patch_with_tests(tests: &PatchTests, path: &str, value: serde_json::Valu
     json_patch::Patch(ops)
 }
 
+// The retry schedule of a failed reconcile: the first failure of an object is
+// retried after RETRY_BASE, and every further failure of the same object after
+// twice the last delay, up to RETRY_CAP.
+//
+// A fixed delay makes the objects of a binding that is down or refused a steady
+// load on the API server they are read from: every reconcile of such an object
+// fails, so a namespace of a thousand objects retried every ten seconds is a
+// hundred Gets a second that cannot succeed until the binding comes back. The
+// doubling turns that into a load that falls off while the fault lasts, and the
+// cap keeps the recovery, once the binding is back, within five minutes of it
+// even for an object that has been failing for hours.
+const RETRY_BASE: Duration = Duration::from_secs(10);
+const RETRY_CAP: Duration = Duration::from_secs(300);
+
+// retry_delay is the schedule itself: the delay after the `failures`-th
+// consecutive failure of an object, counting the first failure as 0. It is
+// RETRY_BASE doubled `failures` times and clamped to RETRY_CAP, so the schedule
+// is 10, 20, 40, 80, 160, 300, 300, ... seconds. The shift is guarded because
+// `failures` counts up without bound while a fault lasts.
+fn retry_delay(failures: u32) -> Duration {
+    let base = RETRY_BASE.as_secs();
+    // The base can be doubled `leading_zeros` times before the shift drops bits
+    // off the top; that is far past the cap, so anything at or beyond it is the
+    // cap.
+    if failures >= base.leading_zeros() {
+        return RETRY_CAP;
+    }
+    Duration::from_secs((base << failures).min(RETRY_CAP.as_secs()))
+}
+
+// RetryKey identifies the object whose consecutive failures are being counted.
+// The map lives in a Data, and a Data belongs to exactly one runner which
+// watches exactly one kind (the secondary watches of the same-name runners map
+// their objects onto that kind before the reconcile is triggered), so the
+// namespace and name of the triggering object identify it; a kube-runtime
+// ObjectRef, which is what a runner keys its own queue by, is generic over the
+// kind and could not be held in the non-generic Data.
+type RetryKey = (String, String);
+
+// retry_key reads the RetryKey of an object. An object with no namespace or no
+// name never reaches a reconcile (cr_identity refuses it), so the empty string
+// stands in for a key that is never counted against.
+fn retry_key<K: Resource>(object: &K) -> RetryKey {
+    let meta = object.meta();
+    (
+        meta.namespace.clone().unwrap_or_default(),
+        meta.name.clone().unwrap_or_default(),
+    )
+}
+
+// RetryBackoff counts the consecutive failed reconciles of each object of a
+// runner, so that error_policy can retry each object on its own schedule
+// (retry_delay) rather than all of them at one fixed delay.
+//
+// The count of an object is dropped when a reconcile of it succeeds, and when
+// the object turns out to be gone or outside the shape, so the map holds an
+// entry only for an object that is failing now: it is bounded by the number of
+// objects the runner is currently failing on, and empties itself as they
+// recover. The lock is a std Mutex and is never held across an await; every
+// method takes it, touches one entry and drops it.
+#[derive(Default)]
+pub struct RetryBackoff {
+    failures: std::sync::Mutex<HashMap<RetryKey, u32>>,
+}
+
+impl RetryBackoff {
+    pub fn new() -> Self { Self::default() }
+
+    // failed records one more consecutive failure of `key` and returns the
+    // delay to retry it after.
+    fn failed(&self, key: RetryKey) -> Duration {
+        let mut failures = self.failures.lock().unwrap_or_else(|e| e.into_inner());
+        let count = failures.entry(key).or_insert(0);
+        let delay = retry_delay(*count);
+        *count = count.saturating_add(1);
+        delay
+    }
+
+    // forget drops the retry state of `key`, so that its next failure is
+    // retried after RETRY_BASE again. It is called when a reconcile of the
+    // object succeeds and when the object is gone.
+    fn forget(&self, key: &RetryKey) {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+
+    // The number of objects with retry state, for the tests.
+    #[cfg(test)]
+    fn tracked(&self) -> usize {
+        self.failures.lock().unwrap_or_else(|e| e.into_inner()).len()
+    }
+}
+
 // error_policy defines the controller's behavior when the reconcile ends with an error.
-pub fn error_policy<K>(_object: Arc<K>, _error: &Error, _ctx: Arc<Data>) -> Action
+// Each object is retried on its own schedule: the delay doubles with the
+// object's consecutive failures, up to RETRY_CAP, and starts again at
+// RETRY_BASE once a reconcile of that object succeeds (run_reconcile's callers
+// forget it). The state is in the runner's Data, so the static and the dynamic
+// runners, which all hand this function their own Data, each back off their own
+// objects and no runner's failures slow another's retries.
+pub fn error_policy<K>(object: Arc<K>, _error: &Error, ctx: Arc<Data>) -> Action
 where
     K: Clone + Resource + DeserializeOwned + Debug + Send + Sync + 'static,
     K::DynamicType: Eq + Hash + Clone + Debug + Unpin,
 {
-    Action::requeue(Duration::from_secs(10))
+    let key = retry_key(object.as_ref());
+    let delay = ctx.retry_backoff.failed(key.clone());
+    warn!(
+        namespace = %key.0,
+        name = %key.1,
+        delay_secs = delay.as_secs(),
+        "reconcile failed, retrying after {}s",
+        delay.as_secs()
+    );
+    Action::requeue(delay)
 }
 
 // Data is passed to reconcile_with.
 // It carries the clients that communicate with the Kubernetes API servers,
 // the cluster that hosts the custom resource this controller reconciles, the
 // fieldManager the controller's writes are sent with (None: unset, so the API
-// server records them under the client's default manager name), and the path
+// server records them under the client's default manager name), the path
 // of the pause file that withholds the controller's Delete requests (None: no
-// gate; see `deletes_withheld`).
+// gate; see `deletes_withheld`), and the per-object retry state error_policy
+// backs off with.
 pub struct Data {
     pub clusters: ClusterClients,
     pub cr_cluster: ClusterId,
     pub field_manager: Option<String>,
     pub delete_pause_file: Option<String>,
+    pub retry_backoff: RetryBackoff,
 }
 
 // deletes_withheld is the delete-withholding gate: true when a pause file is
@@ -1587,6 +1729,61 @@ mod tests {
         assert!(!deletes_withheld(Some(pause_path)));
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn secs(d: Duration) -> u64 { d.as_secs() }
+
+    // The schedule is RETRY_BASE doubled per consecutive failure and clamped to
+    // RETRY_CAP, and stays at the cap however long the fault lasts.
+    #[test]
+    fn retry_delay_doubles_up_to_the_cap() {
+        let schedule: Vec<u64> = (0..8).map(|n| secs(retry_delay(n))).collect();
+        assert_eq!(schedule, vec![10, 20, 40, 80, 160, 300, 300, 300]);
+        // A count that has been climbing for a very long time still gives the
+        // cap rather than overflowing the shift.
+        assert_eq!(secs(retry_delay(63)), 300);
+        assert_eq!(secs(retry_delay(u32::MAX)), 300);
+    }
+
+    // Each object walks the schedule on its own, and a success puts that object
+    // back at the base delay without disturbing the others.
+    #[test]
+    fn retry_backoff_is_per_object_and_reset_by_success() {
+        let backoff = RetryBackoff::new();
+        let a: RetryKey = ("ns".to_string(), "a".to_string());
+        let b: RetryKey = ("ns".to_string(), "b".to_string());
+
+        // a fails its way to the cap and stays there.
+        let walked: Vec<u64> = (0..7).map(|_| secs(backoff.failed(a.clone()))).collect();
+        assert_eq!(walked, vec![10, 20, 40, 80, 160, 300, 300]);
+
+        // b is a different object in the same namespace and starts at the base.
+        assert_eq!(secs(backoff.failed(b.clone())), 10);
+        assert_eq!(secs(backoff.failed(b.clone())), 20);
+
+        // A success on a forgets a's count only.
+        backoff.forget(&a);
+        assert_eq!(secs(backoff.failed(a.clone())), 10);
+        assert_eq!(secs(backoff.failed(b.clone())), 40);
+
+        // Both are tracked while they are failing, and neither once they have
+        // succeeded, so the map does not grow with objects that are healthy.
+        assert_eq!(backoff.tracked(), 2);
+        backoff.forget(&a);
+        backoff.forget(&b);
+        assert_eq!(backoff.tracked(), 0);
+        // Forgetting an object that is not failing is harmless.
+        backoff.forget(&a);
+        assert_eq!(backoff.tracked(), 0);
+    }
+
+    // The key an object is counted under is its namespace and name.
+    #[test]
+    fn retry_key_reads_the_namespace_and_name() {
+        let mut pod = Pod::default();
+        pod.metadata.namespace = Some("ns".to_string());
+        pod.metadata.name = Some("p".to_string());
+        assert_eq!(retry_key(&pod), ("ns".to_string(), "p".to_string()));
     }
 }
 
