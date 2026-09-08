@@ -10,17 +10,20 @@
 // The verified pair is parameterized by a kind and a binding
 // (doc/widget_sync_fanout_design.md, sections 2.1 and 3.4): the sync reconciler
 // is one controller per kind and the janitor one controller per (kind, binding).
-// This binary instantiates them at one kind and one binding; the kind flags of
-// section 2.1 and the binding manager of section 3.4 are the follow-up issues.
-// Two verified reconcilers run in one process: the sync reconciler (triggered by
-// outer objects, and by same-named mirrors as a latency optimization) and the
-// janitor reconciler (triggered by the binding's mirrors).
+// This binary instantiates them at the kinds of the `--kind` flags and at one
+// binding; the binding manager of section 3.4 is the follow-up issue. Two kinds
+// of verified reconciler run in one process, one pair per configured kind: the
+// sync reconciler (triggered by outer objects, and by same-named mirrors as a
+// latency optimization) and the janitor reconciler (triggered by the binding's
+// mirrors).
 use anyhow::{bail, Result};
 use k8s_openapi::api::authorization::v1::{ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec};
 use kube::api::{Api, PostParams};
 use kube::Client;
 use std::env;
 use std::fs;
+use std::future::Future;
+use std::pin::Pin;
 use std::process;
 use std::time::Duration;
 use tracing::{error, info, warn};
@@ -32,21 +35,23 @@ use verifiable_controllers::shim_layer::controller_runtime::{
     discover_kinds, remote_clients_from_kubeconfig, run_dyn_controller, run_dyn_controller_with_same_name_watch,
     ClusterClients,
 };
-use verifiable_controllers::shim_layer::crd_shape::check_crd;
+use verifiable_controllers::shim_layer::crd_shape::{check_crd, CrdCheckError};
 use verifiable_controllers::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use verifiable_controllers::widget_sync_controller::exec::janitor_reconciler::JanitorReconciler;
 use verifiable_controllers::widget_sync_controller::exec::sync_reconciler::SyncReconciler;
 use verifiable_controllers::widget_sync_controller::trusted::exec_types::SyncKindExec;
 
-const USAGE: &str = "usage: widget_sync_controller <export|run|crash>
+const USAGE: &str = "usage: widget_sync_controller export
+       widget_sync_controller <run|crash> --kind <group>/<version>/<Kind>:<selector> ...
   export  print the demo CRDs as YAML
-  run     run the sync and janitor reconcilers
-  crash   run them in crash-testing mode (fault injection)";
-
-// The one kind this binary is built for, in the syntax of the `--kind` flag of
-// doc/widget_sync_fanout_design.md, section 2.1. Taking it from the command line
-// is issue #41; until then the pair is instantiated here.
-const KIND: &str = "anvil.dev/v1/Widget:field:spec.clusterName";
+  run     run one sync and one janitor reconciler per configured kind
+  crash   run them in crash-testing mode (fault injection)
+  --kind  a kind and the field that names an object's cluster, repeated; at
+          least one is required. The selector is `name` (metadata.name is the
+          cluster name) or `field:<path>` (a required, immutable string field of
+          the spec), for example
+            --kind anvil.dev/v1/Widget:field:spec.clusterName
+            --kind anvil.dev/v1/Gadget:name";
 
 // The one binding this binary is built for: the inner cluster named `inner` of
 // the namespace `default`. Its credential is $REMOTE_KUBECONFIG. Discovering
@@ -125,6 +130,55 @@ async fn check_remote_access(remote: &Client, group: &str, plural: &str) -> Resu
     Ok(())
 }
 
+// The `--kind` flag values of `run` and `crash`, in the order they were given.
+// Both `--kind <value>` and `--kind=<value>` are accepted, as for the echo
+// controller, so one list can be pasted between the two binaries. Anything else
+// on the command line is a usage error; so is an empty list, because a process
+// with no kind would watch nothing.
+fn kind_flags(args: &[String]) -> Result<Vec<String>, String> {
+    let mut flags = Vec::new();
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--kind" => {
+                i += 1;
+                match args.get(i) {
+                    Some(value) => flags.push(value.clone()),
+                    None => return Err("--kind needs a value".to_string()),
+                }
+            }
+            arg if arg.starts_with("--kind=") => flags.push(arg["--kind=".len()..].to_string()),
+            arg => return Err(format!("unexpected argument {:?}", arg)),
+        }
+        i += 1;
+    }
+    if flags.is_empty() {
+        return Err("no --kind given; at least one kind is required".to_string());
+    }
+    Ok(flags)
+}
+
+// The configured kinds: the flags, parsed (shim_layer::kind_config). A malformed
+// flag and a repeated kind are both usage errors; a kind named twice would start
+// two sync controllers on the same objects, which the proofs exclude.
+fn configured_kinds(args: &[String]) -> Result<Vec<KindConfig>, String> {
+    let kinds = KindConfig::parse_all(kind_flags(args)?).map_err(|e| e.to_string())?;
+    for (i, kind) in kinds.iter().enumerate() {
+        if kinds[..i].iter().any(|earlier| earlier.gvk() == kind.gvk()) {
+            return Err(format!("kind {}/{}/{} is configured twice", kind.group, kind.version, kind.kind));
+        }
+    }
+    Ok(kinds)
+}
+
+// What a refused kind prints: the flag it came from and, for a shape failure,
+// one line per failing row of the table of doc/widget_sync_fanout_design.md,
+// section 2.2. The boot check runs before any controller starts, so a refused
+// kind is a usage error and the process exits with status 2.
+fn refused_kind(kind: &KindConfig, err: &CrdCheckError) -> String {
+    format!("--kind {}: {}", kind, err)
+}
+
 // The exec twin of the configured kind: the discovered registry entry, which
 // ties the kind and a cluster to a model kind, and the cluster selector the
 // reconcilers read an object's cluster with. Built afresh per reconciler so
@@ -165,7 +219,15 @@ async fn main() -> Result<()> {
             } else {
                 info!("running widget-sync-controller");
             }
-            let kind_config: KindConfig = KIND.parse()?;
+            // The kinds come from the command line; a bad or missing flag is a
+            // usage error, reported before any client is built.
+            let kinds = match configured_kinds(&args[2..]) {
+                Ok(kinds) => kinds,
+                Err(message) => {
+                    eprintln!("{}\n{}", message, USAGE);
+                    process::exit(2);
+                }
+            };
             let remote_kubeconfig =
                 env::var("REMOTE_KUBECONFIG").unwrap_or_else(|_| DEFAULT_REMOTE_KUBECONFIG.to_string());
             let ready_file = env::var(READY_FILE_ENV).ok();
@@ -186,14 +248,29 @@ async fn main() -> Result<()> {
             // (doc/widget_sync_fanout_design.md, section 2.2). Both are boot
             // errors: a kind that is not there, or whose CRD is the wrong shape,
             // can never be reconciled.
-            let registry = discover_kinds(&primary, &[kind_config.gvk()]).await?;
-            let entry = registry.entry(0).clone();
-            let plural = entry.kube_api_resource().plural.clone();
-            check_crd(&primary, &kind_config, &plural).await?;
-            info!("kind {} has the shape the sync controller needs", kind_config);
+            let gvks: Vec<_> = kinds.iter().map(|k| k.gvk()).collect();
+            let registry = discover_kinds(&primary, &gvks).await?;
+            // (kind, its registry entry, its plural), in configuration order.
+            let mut configured = Vec::with_capacity(kinds.len());
+            for (i, kind) in kinds.iter().enumerate() {
+                let entry = registry.entry(i).clone();
+                let plural = entry.kube_api_resource().plural.clone();
+                if let Err(e) = check_crd(&primary, kind, &plural).await {
+                    // Nothing has been started yet: print the failing rows and
+                    // exit as on any other usage error.
+                    let message = refused_kind(kind, &e);
+                    error!("{}", message);
+                    eprintln!("{}", message);
+                    process::exit(2);
+                }
+                info!("kind {} has the shape the sync controller needs", kind);
+                configured.push((kind.clone(), entry, plural));
+            }
 
             let remote = remote_clients_from_kubeconfig(&remote_kubeconfig, REMOTE_REQUEST_TIMEOUT).await?;
-            check_remote_access(&remote.requests, &kind_config.group, &plural).await?;
+            for (kind, _, plural) in &configured {
+                check_remote_access(&remote.requests, &kind.group, plural).await?;
+            }
             // The mirrors are bound to the pair's one binding; the remote clients
             // are registered under it so that requests tagged with it find them.
             let binding = ClusterRef::new(BINDING_NAMESPACE.to_string(), BINDING_NAME.to_string());
@@ -206,7 +283,7 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // One shutdown signal for both controllers: on SIGINT each stops
+            // One shutdown signal for every controller: on SIGINT each stops
             // taking new work and drains, as `shutdown_on_signal` did.
             let (tx, shutdown_rx) = tokio::sync::watch::channel(false);
             tokio::spawn(async move {
@@ -215,44 +292,48 @@ async fn main() -> Result<()> {
                 }
                 let _ = tx.send(true);
             });
-            let mut sync_shutdown_rx = shutdown_rx.clone();
-            let sync_shutdown = async move {
-                let _ = sync_shutdown_rx.changed().await;
-            };
-            let mut janitor_shutdown_rx = shutdown_rx;
-            let janitor_shutdown = async move {
-                let _ = janitor_shutdown_rx.changed().await;
-            };
-
-            // The sync reconciler runs on the outer copies and is woken by a
+            // One sync reconciler and one janitor per configured kind: the sync
+            // reconciler runs on the outer copies of its kind and is woken by a
             // same-named mirror of the binding as well; the janitor runs on the
-            // binding's mirrors. The sync reconciler never deletes (its
-            // guarantee), so the pause file only ever acts on the janitor; it is
-            // given to both so that the gate holds for every Delete this process
-            // could send.
-            let sync = run_dyn_controller_with_same_name_watch::<SyncReconciler, VoidExternalShimLayer>(
-                clusters.clone(),
-                SyncReconciler { kind: sync_kind(&entry, &kind_config) },
-                entry.clone(),
-                ClusterId::Primary,
-                entry.clone(),
-                inner_cluster.clone(),
-                Some(FIELD_MANAGER.to_string()),
-                janitor_pause_file.clone(),
-                fault_injection,
-                sync_shutdown,
-            );
-            let janitor = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
-                clusters,
-                JanitorReconciler { kind: sync_kind(&entry, &kind_config), binding },
-                entry,
-                inner_cluster,
-                Some(FIELD_MANAGER.to_string()),
-                janitor_pause_file,
-                fault_injection,
-                janitor_shutdown,
-            );
-            tokio::try_join!(sync, janitor)?;
+            // binding's mirrors of that kind. The sync reconciler never deletes
+            // (its guarantee), so the pause file only ever acts on the janitors;
+            // it is given to every runner so that the gate holds for every
+            // Delete this process could send. Each runner gets its own receiver
+            // on the one shutdown signal, so a SIGINT drains all of them.
+            let mut runners: Vec<Pin<Box<dyn Future<Output = Result<()>> + Send>>> = Vec::new();
+            for (kind, entry, _) in &configured {
+                let mut sync_shutdown_rx = shutdown_rx.clone();
+                let sync_shutdown = async move {
+                    let _ = sync_shutdown_rx.changed().await;
+                };
+                runners.push(Box::pin(run_dyn_controller_with_same_name_watch::<SyncReconciler, VoidExternalShimLayer>(
+                    clusters.clone(),
+                    SyncReconciler { kind: sync_kind(entry, kind) },
+                    entry.clone(),
+                    ClusterId::Primary,
+                    entry.clone(),
+                    inner_cluster.clone(),
+                    Some(FIELD_MANAGER.to_string()),
+                    janitor_pause_file.clone(),
+                    fault_injection,
+                    sync_shutdown,
+                )));
+                let mut janitor_shutdown_rx = shutdown_rx.clone();
+                let janitor_shutdown = async move {
+                    let _ = janitor_shutdown_rx.changed().await;
+                };
+                runners.push(Box::pin(run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
+                    clusters.clone(),
+                    JanitorReconciler { kind: sync_kind(entry, kind), binding: binding.clone() },
+                    entry.clone(),
+                    inner_cluster.clone(),
+                    Some(FIELD_MANAGER.to_string()),
+                    janitor_pause_file.clone(),
+                    fault_injection,
+                    janitor_shutdown,
+                )));
+            }
+            futures::future::try_join_all(runners).await?;
         }
         other => {
             eprintln!("unknown command {:?}\n{}", other, USAGE);
@@ -260,4 +341,93 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
+    use verifiable_controllers::shim_layer::crd_shape::{check_shape, crd_name};
+
+    fn args(values: &[&str]) -> Vec<String> {
+        values.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn kinds_come_from_repeated_flags_in_order() {
+        let kinds = configured_kinds(&args(&[
+            "--kind",
+            "anvil.dev/v1/Widget:field:spec.clusterName",
+            "--kind=anvil.dev/v1/Gadget:name",
+        ]))
+        .unwrap();
+        let names: Vec<String> = kinds.iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            names,
+            vec!["anvil.dev/v1/Widget:field:spec.clusterName", "anvil.dev/v1/Gadget:name"]
+        );
+        // The gvks handed to discover_kinds line up with `kinds` index by index,
+        // which is what lets the registry entry of kind i be entry(i).
+        assert_eq!(kinds[1].gvk().kind, "Gadget");
+    }
+
+    #[test]
+    fn a_missing_or_malformed_flag_is_a_usage_error() {
+        for bad in [
+            vec![],
+            args(&["--kind"]),
+            args(&["--bogus", "x"]),
+            args(&["anvil.dev/v1/Widget:name"]),
+            args(&["--kind", "anvil.dev/v1/widget:name"]),
+            // The same kind twice would start two sync controllers on the same
+            // objects, which the proofs exclude.
+            args(&["--kind", "anvil.dev/v1/Widget:name", "--kind", "anvil.dev/v1/Widget:field:spec.clusterName"]),
+        ] {
+            assert!(configured_kinds(&bad).is_err(), "{:?} should be a usage error", bad);
+        }
+        assert!(configured_kinds(&args(&["--kind"])).unwrap_err().contains("needs a value"));
+        assert!(configured_kinds(&[]).unwrap_err().contains("at least one"));
+    }
+
+    // Everything but the CEL immutability rules of the demo's Widget CRD, which
+    // is what applying a rule-less variant installs on the testbed
+    // (deploy/widget_sync/README.md, "Kinds and their shape").
+    fn widget_crd_without_the_rule() -> CustomResourceDefinition {
+        fn strip(value: &mut serde_yaml::Value) {
+            match value {
+                serde_yaml::Value::Mapping(map) => {
+                    map.remove(serde_yaml::Value::String("x-kubernetes-validations".to_string()));
+                    for (_, v) in map.iter_mut() {
+                        strip(v);
+                    }
+                }
+                serde_yaml::Value::Sequence(seq) => seq.iter_mut().for_each(strip),
+                _ => {}
+            }
+        }
+        let mut value: serde_yaml::Value =
+            serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd.yaml")).unwrap();
+        strip(&mut value);
+        serde_yaml::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_field_selector_without_the_immutability_rule_is_refused() {
+        let kind: KindConfig = "anvil.dev/v1/Widget:field:spec.clusterName".parse().unwrap();
+        let crd = widget_crd_without_the_rule();
+        let errors = check_shape(&crd, &kind).unwrap_err();
+        let message = refused_kind(&kind, &CrdCheckError::Shape { name: crd_name(&kind, "widgets"), errors });
+        // The flag that has to be fixed, the CRD, the row of the table of design
+        // section 2.2 that failed, and the rule that is missing.
+        assert!(message.starts_with("--kind anvil.dev/v1/Widget:field:spec.clusterName: "), "{}", message);
+        assert!(message.contains("CRD widgets.anvil.dev does not have the shape"), "{}", message);
+        assert!(message.contains("spec: selector field spec.clusterName"), "{}", message);
+        assert!(message.contains("self == oldSelf"), "{}", message);
+
+        // Only the selector row fails: the same CRD is fine for a `name`
+        // selector, which needs no rule, so the reproduction on the testbed
+        // isolates the rule.
+        let by_name: KindConfig = "anvil.dev/v1/Widget:name".parse().unwrap();
+        assert_eq!(check_shape(&crd, &by_name), Ok(()));
+    }
 }
