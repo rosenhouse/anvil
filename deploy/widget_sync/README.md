@@ -267,14 +267,18 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 | The binding's Secret | What its objects report | What the controller does |
 |---|---|---|
 | missing, not of type `cluster.x-k8s.io/secret`, not labelled with its cluster name, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
-| present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; it is retried when the Secret changes |
+| present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; nothing retries it on a timer, only a change of the Secret's `value` |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
-| present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
+| present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes, or at once when the Secret's `value` changes |
 | present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it; its access and its claim are re-checked every minute |
 
-A changed Secret (a rotated credential; Cluster API rewrites the Secret)
-rebuilds the binding's clients and restarts its janitors, with no restart of
-the pod.
+A changed Secret rebuilds the binding's clients and restarts its janitors,
+with no restart of the pod. What counts as changed is the `value` itself: a
+rotated credential, which is how Cluster API rotates one, or the Secret deleted
+and created again. Editing a label or another key of the same Secret, or a
+relist of the watch, leaves a bound binding running and an unbound one on its
+existing retry schedule — nothing is rebuilt and no janitor of the process is
+restarted by a relist.
 
 **What a kubeconfig may contain.** A kubeconfig is a program as much as it is a
 credential: the client library it is handed to will run the command a `users[].user.exec`
@@ -316,7 +320,20 @@ patch and delete the kind, and whether it may `get` and `create` configmaps in
 `kube-system` for the claim. A denial marks that one binding degraded — its
 requests are answered `Forbidden` — and is logged; an error means the cluster
 did not answer, which leaves the binding unbound and retried. Neither ever
-exits the process: one bad inner cluster must not stop the others.
+exits the process: one bad inner cluster must not stop the others. The reviews
+of one check are sent together, not one after another.
+
+Creating a `SelfSubjectAccessReview` is itself a right, and the credential is
+not granted it by `rbac_inner.yaml`: it comes from the default ClusterRoleBinding
+`system:basic-user`, which every Kubernetes cluster binds to
+`system:authenticated` and which allows `create` on
+`selfsubjectaccessreviews` and `selfsubjectrulesreviews`. A cluster whose
+administrator has removed or narrowed that binding answers the reviews with
+`Forbidden`, which the controller reports as an error of the check rather than
+as a denial, so the binding stays unbound and retried with backoff and the log
+line names the review that failed. Grant the credential
+`create` on `authorization.k8s.io/selfsubjectaccessreviews` explicitly in such
+a cluster.
 
 **The claim.** On first contact the controller creates, in the inner cluster,
 the ConfigMap `kube-system/anvil-sync-claim` with
