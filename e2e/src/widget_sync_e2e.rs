@@ -46,14 +46,14 @@ use verifiable_controllers::crds::{Widget, WidgetCondition, WidgetSpec, WidgetSt
 
 use crate::common::*;
 
-const OUTER_CONTEXT: &str = "kind-widget-sync-outer";
-const INNER_CONTEXT: &str = "kind-widget-sync-inner";
-const MANAGED_BY_KEY: &str = "anvil.dev/managed-by";
-const MANAGED_BY_VALUE: &str = "widget-sync";
-const PARENT_UID_KEY: &str = "anvil.dev/parent-uid";
-const POLL: Duration = Duration::from_secs(3);
+pub(crate) const OUTER_CONTEXT: &str = "kind-widget-sync-outer";
+pub(crate) const INNER_CONTEXT: &str = "kind-widget-sync-inner";
+pub(crate) const MANAGED_BY_KEY: &str = "anvil.dev/managed-by";
+pub(crate) const MANAGED_BY_VALUE: &str = "widget-sync";
+pub(crate) const PARENT_UID_KEY: &str = "anvil.dev/parent-uid";
+pub(crate) const POLL: Duration = Duration::from_secs(3);
 // The generous bound for convergence that also involves the echo controller.
-const TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(300);
 
 // Intervals of the controller under test, from src/shim_layer/controller_runtime.rs.
 // reconcile_with requeues a finished reconcile after 60s: that is the sync
@@ -61,21 +61,21 @@ const TIMEOUT: Duration = Duration::from_secs(300);
 // and error_policy requeues a failed reconcile after 10s. A remote request times
 // out after 10s (src/bin/widget_sync_controller.rs), so one failed attempt costs
 // at most REMOTE_TIMEOUT + ERROR_REQUEUE before the next.
-const REQUEUE: Duration = Duration::from_secs(60);
-const ERROR_REQUEUE: Duration = Duration::from_secs(10);
-const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const REQUEUE: Duration = Duration::from_secs(60);
+pub(crate) const ERROR_REQUEUE: Duration = Duration::from_secs(10);
+pub(crate) const REMOTE_TIMEOUT: Duration = Duration::from_secs(10);
 // Slack for the reconcile itself, the watch latency and the poll period.
-const MARGIN: Duration = Duration::from_secs(30);
+pub(crate) const MARGIN: Duration = Duration::from_secs(30);
 // Within this bound a healthy controller has run at least one full reconcile of an
 // object after any trigger, even if the first attempt failed once: the requeue,
 // one failed attempt, and slack.
-const ONE_RECONCILE: Duration = Duration::from_secs(
+pub(crate) const ONE_RECONCILE: Duration = Duration::from_secs(
     REQUEUE.as_secs() + REMOTE_TIMEOUT.as_secs() + ERROR_REQUEUE.as_secs() + MARGIN.as_secs(),
 );
 // A window in which the janitor has certainly resynced a mirror at least once.
-const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
+pub(crate) const JANITOR_WINDOW: Duration = Duration::from_secs(REQUEUE.as_secs() + MARGIN.as_secs());
 
-async fn client_for_context(context: &str) -> Result<Client, Error> {
+pub(crate) async fn client_for_context(context: &str) -> Result<Client, Error> {
     let options = KubeConfigOptions { context: Some(context.to_string()), ..Default::default() };
     let config = Config::from_kubeconfig(&options).await.map_err(|e| {
         error!("cannot load kubeconfig context {}: {}", context, e);
@@ -122,7 +122,7 @@ impl Widgets {
     }
 }
 
-fn failed(what: &str) -> impl FnOnce(kube::Error) -> Error + '_ {
+pub(crate) fn failed(what: &str) -> impl FnOnce(kube::Error) -> Error + '_ {
     move |e| {
         error!("{} failed: {}", what, e);
         Error::WidgetSyncFailed
@@ -228,7 +228,7 @@ fn not_synced_to_stale_mirror(outer: &Widget) -> Result<(), Error> {
 }
 
 // Poll `check` every POLL until it yields a value, or `timeout` elapses.
-async fn wait_for<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<T, Error>
+pub(crate) async fn wait_for<T, F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<T, Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Option<T>, Error>>,
@@ -248,7 +248,7 @@ where
     }
 }
 
-async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<(), Error>
+pub(crate) async fn wait_until<F, Fut>(what: &str, timeout: Duration, mut check: F) -> Result<(), Error>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<bool, Error>>,
