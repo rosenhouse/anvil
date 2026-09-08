@@ -13,9 +13,10 @@ use k8s_openapi::api::authorization::v1::{ResourceAttributes, SelfSubjectAccessR
 use kube::api::{Api, PostParams};
 use kube::{Client, CustomResourceExt};
 use std::env;
+use std::fs;
 use std::process;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use verifiable_controllers::crds::Widget;
 use verifiable_controllers::external_shim_layer::VoidExternalShimLayer;
 use verifiable_controllers::kubernetes_api_objects::exec::api_resource::ClusterId;
@@ -40,6 +41,13 @@ const FIELD_MANAGER: &str = "widget-sync";
 // Requests to the remote cluster time out quickly so that a partition surfaces as
 // a failed reconcile (which is retried) instead of a hung one.
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+// If READY_FILE is set, the file is created once the remote credential has
+// passed check_remote_access and the reconcilers are about to start, and is
+// removed before the check so that a restarted container does not inherit the
+// previous run's signal. deploy/widget_sync/deploy_local.yaml probes it as the
+// pod's readiness. Nothing else is signalled: the binary has no health endpoint.
+const READY_FILE_ENV: &str = "READY_FILE";
 
 // The verbs the sync and janitor reconcilers issue on Widgets in the remote
 // cluster (see deploy/widget_sync/rbac_inner.yaml).
@@ -111,10 +119,21 @@ async fn main() -> Result<()> {
             }
             let remote_kubeconfig =
                 env::var("REMOTE_KUBECONFIG").unwrap_or_else(|_| DEFAULT_REMOTE_KUBECONFIG.to_string());
+            let ready_file = env::var(READY_FILE_ENV).ok();
+            if let Some(path) = &ready_file {
+                // Ignore a missing file; anything else is reported when it is created.
+                let _ = fs::remove_file(path);
+            }
             let primary = Client::try_default().await?;
             let remote = remote_clients_from_kubeconfig(&remote_kubeconfig, REMOTE_REQUEST_TIMEOUT).await?;
             check_remote_access(&remote.requests).await?;
             let clusters = ClusterClients { primary, remote: Some(remote) };
+            if let Some(path) = &ready_file {
+                match fs::write(path, b"") {
+                    Ok(()) => info!("ready: created {}", path),
+                    Err(e) => warn!("could not create ready file {}: {}; the pod will not become ready", path, e),
+                }
+            }
 
             let sync = run_controller_with_same_name_watch::<Widget, WidgetSyncReconciler, VoidExternalShimLayer, Widget>(
                 clusters.clone(),

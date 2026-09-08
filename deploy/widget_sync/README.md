@@ -13,8 +13,8 @@ copies the inner status back onto the outer copy. Design and proofs:
 | outer | `widget-sync-outer` / `kind-widget-sync-outer` | the Widget CRD; users' `Widget`s; the verified sync controller (namespace `widget-sync`, one replica, sync reconciler and janitor in one process) |
 | inner | `widget-sync-inner` / `kind-widget-sync-inner` | the same CRD; the mirrors; the unverified echo controller (namespace `widget-echo`), which writes only status |
 
-The controller reaches the inner cluster through a kubeconfig built from a
-service-account token, mounted from the Secret `widget-sync-remote-kubeconfig`.
+The controller reaches the inner cluster through a kubeconfig mounted from the
+Secret `widget-sync-remote-kubeconfig`; see "Operating the controller" below.
 
 ## Run
 
@@ -63,3 +63,54 @@ ours.
 - Disconnect `widget-sync-inner-control-plane` from the `kind` docker network,
   edit the outer spec, reconnect. `observedGeneration` lags while the inner
   cluster is unreachable and catches up after the heal.
+
+## Operating the controller
+
+Manifests: `rbac_inner.yaml` (inner cluster), `rbac.yaml` and
+`deploy_local.yaml` (outer cluster).
+
+**Remote credential.** The Secret `widget-sync-remote-kubeconfig` in the outer
+cluster has two keys, mounted into one directory: `kubeconfig`, which names the
+inner API server and its CA, and `token`, the bearer token of the inner
+service account `widget-sync/widget-sync-remote`. The kubeconfig refers to the
+token as `tokenFile: token` (relative to the kubeconfig's directory); kube
+re-reads a token file at least once a minute, whereas an inline `token:` is
+read once. To rotate, write the new token into the `token` key of the Secret;
+the kubelet refreshes the mounted directory and the controller picks it up
+within about two minutes with no restart. The testbed uses the inner cluster's
+long-lived service-account token Secret (`widget-sync-remote-token`); a
+production deployment would rather feed a bound token (`kubectl create token
+widget-sync-remote --duration ...`) into the same key on a schedule. At
+startup the binary asks the inner cluster, with one `SelfSubjectAccessReview`
+per verb, whether the credential may get, list, watch, create, patch and
+delete `widgets.anvil.dev`; a 401, 403 or denied verb is logged and the
+process exits, so a wrong credential shows up as a crash-looping, never-ready
+pod rather than as failing reconciles.
+
+**Probes.** Readiness is `test -f /run/widget-sync/ready`, a file the binary
+creates (path from `READY_FILE`, on a small emptyDir) once the access check
+has passed and just before the reconcilers start; it is removed at startup so
+a restarted container does not inherit it. There is no liveness probe: the
+binary exposes no health endpoint and nothing else that says whether the
+reconcilers are still making progress, and a probe that does not measure that
+would only restart healthy pods.
+
+**One replica is not at-most-one.** The proofs assume a single active sync
+controller. `replicas: 1` with `strategy: Recreate` keeps the Deployment from
+running two pods on purpose, but Kubernetes does not guarantee it: a node that
+stops reporting keeps its pod running while the controller-manager, after the
+eviction timeout, starts a replacement elsewhere, and a `kubectl delete pod`
+during a slow shutdown overlaps the old and new process briefly. Leader
+election, which would close that gap, is not implemented.
+
+**Pod hardening.** The image runs as uid 65532 and the pod repeats it with
+`runAsNonRoot`; the container drops all capabilities, forbids privilege
+escalation, uses the `RuntimeDefault` seccomp profile and a read-only root
+filesystem (the ready file's emptyDir is the only writable mount), and has
+CPU and memory requests and limits sized for the demo.
+
+**RBAC.** In the outer cluster the controller reads `widgets` and patches
+`widgets/status`. `rbac.yaml` also binds, in namespace `default`, `get` and
+`update` on the single ConfigMap `fault-injection-config`, which only the
+crash-testing mode (`controller crash`) touches; `run` mode never uses it. No
+`events` verbs: the controller emits none.

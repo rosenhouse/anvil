@@ -5,7 +5,12 @@
 # relative tokenFile (key "token"); tools/two-cluster-test.sh creates it. Both
 # keys land in the same mounted directory. kube re-reads the token file at
 # least once a minute, so rotating the Secret takes effect without a restart.
-# No probes: the binary exposes no health endpoint.
+# Readiness is the file the binary creates at $READY_FILE once the remote
+# credential has passed its SelfSubjectAccessReview check (a denial makes the
+# process exit instead, so the pod crash-loops and never becomes ready). There
+# is no liveness probe: the binary exposes nothing that reflects whether the
+# reconcilers are still making progress, and a probe that does not measure that
+# would only restart a healthy pod.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,8 +32,8 @@ spec:
     spec:
       # The in-cluster token is how the controller reaches the outer API server.
       automountServiceAccountToken: true
-      # The shared controller image runs as root by default and defines no
-      # non-root user, so the uid is set here.
+      # The image declares the same uid; it is repeated here so that
+      # runAsNonRoot holds even for an image built without it.
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -42,6 +47,17 @@ spec:
           env:
             - name: REMOTE_KUBECONFIG
               value: /etc/widget-sync/remote-kubeconfig/kubeconfig
+            - name: READY_FILE
+              value: /run/widget-sync/ready
+          readinessProbe:
+            exec:
+              command:
+                - test
+                - -f
+                - /run/widget-sync/ready
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            failureThreshold: 3
           resources:
             requests:
               cpu: 50m
@@ -59,8 +75,15 @@ spec:
             - name: remote-kubeconfig
               mountPath: /etc/widget-sync/remote-kubeconfig
               readOnly: true
+            # The only writable path; it holds the ready file.
+            - name: run
+              mountPath: /run/widget-sync
       volumes:
         - name: remote-kubeconfig
           secret:
             secretName: widget-sync-remote-kubeconfig
+        - name: run
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
       serviceAccountName: widget-sync-controller

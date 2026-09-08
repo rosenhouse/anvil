@@ -73,8 +73,8 @@ spec:
     spec:
       # The in-cluster token is how the controller reaches the API server.
       automountServiceAccountToken: true
-      # The shared controller image runs as root by default and defines no
-      # non-root user, so the uid is set here.
+      # The image declares the same uid; it is repeated here so that
+      # runAsNonRoot holds even for an image built without it.
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
