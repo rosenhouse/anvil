@@ -263,8 +263,27 @@ plus the cluster tag, whose `unmarshal`, `marshal`, `has_kind` and
 today's wrapper macro, restated over the **registry** (section 2.4)
 instead of a compiled type. The status accessors and `outer_status_for`
 are `external_body` over `serde_json::Value`, as they are today over the
-typed status. The exec hygiene script's `external_body` inventory is
-updated in the same change.
+typed status.
+
+The trusted surface of the shape is therefore no longer under the
+controller, and the exec hygiene script pins it where it is, file by
+file (`doc/widget_sync_design.md`, section 3, lists the items):
+
+- `kubernetes_api_objects/spec/synced_object.rs`: the uninterpreted
+  `unmarshal_status`, `marshal_status`, `spec_field` and
+  `status_rest_ok`, and the axiom `marshal_status_preserves_integrity`.
+- `kubernetes_api_objects/spec/model_kind.rs`: nothing — `model_kind`
+  and its injectivity are proved, and the hypotheses injectivity rests
+  on are checked on the exec side (boot check and Secret watch).
+- `kubernetes_api_objects/exec/synced_object.rs`: the wrappers above,
+  the free `marshal_status` and `cluster_of_dynamic`, `empty_rest`, and
+  the two equality decisions `RawValue::eq` and `SyncedStatus::eq`,
+  trusted as *iffs* over the view.
+- `kubernetes_api_objects/exec/registry.rs`: `crd_name` and
+  `api_resource`, the routing the model trusts.
+- `widget_sync_controller/trusted/`: `outer_status_for`, the three
+  `Marshallable` instances of the reconcile states, and the
+  uninterpreted `default_status_rest()`.
 
 The installed type of a kind of the shape is a function of the schema, not
 of a type:

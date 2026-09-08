@@ -422,20 +422,32 @@ routing the model trusts (section 2.2) is now `RegistryEntry::api_resource`,
 which names the model kind of a configured kind in a cluster. `π` is
 `SyncedStatusView::mirrored()`.
 
-Trusted beyond the specification, all under `widget_sync_controller/`: one
+Trusted beyond the specification, under `widget_sync_controller/`: one
 `external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
 which builds the outer status, its three conditions included, by hand to match
-the spec's definition — and the three `Marshallable` instances of the
-reconcile states in `model/install.rs`. Everything the pair used to trust
-about its own wrappers is now the shape's, in
-`kubernetes_api_objects/exec/synced_object.rs` and
-`kubernetes_api_objects/exec/registry.rs`. From the framework the pair relies
-on `SyncedObject`'s `unmarshal`, `marshal`, `has_kind` and accessor
-postconditions and on `RegistryEntry::api_resource`, on `UidToken`, on the
-`PatchTests` and `Preconditions` setters, and on the shim's construction of
-the JSON `test` operations, which is where "patches test uid and generation"
-becomes real. `tools/check-widget-exec-hygiene.sh` fails when an
-`external_body` appears anywhere else under `widget_sync_controller/`.
+the spec's definition — the three `Marshallable` instances of the reconcile
+states in `model/install.rs`, and one uninterpreted spec function,
+`default_status_rest()` in `trusted/spec_types.rs`, the mirrored remainder of a
+status that was never written.
+
+Everything the pair used to trust about its own wrappers is now the shape's,
+and lives in `kubernetes_api_objects`, where anything else generic over kinds
+shares it. That inventory, which
+`tools/check-widget-exec-hygiene.sh` pins file by file:
+
+| File | What is trusted there |
+|---|---|
+| `exec/synced_object.rs` | the wrappers of the shape: `SyncedObject`'s `unmarshal`, `marshal`, `has_kind`, `new` and accessors; `SyncedStatus`'s and `SyncedCondition`'s constructors and accessors, `SyncedStatus::rest` and `RawValue::empty_rest` (whose values satisfy `status_rest_ok`, the precondition of `SyncedStatus::new`); the free `marshal_status` and `cluster_of_dynamic`, the latter being the selector read off a stored object that a `List` response gives; and the two equalities `RawValue::eq` and `SyncedStatus::eq`, whose postconditions are *iffs* — `b == (self@ == other@)` — so each is trusted to decide equality of the view in both directions, which is what makes "the specs differ" and "the status differs" decisions of the reconcilers rather than approximations |
+| `exec/registry.rs` | `RegistryEntry::crd_name` and `RegistryEntry::api_resource`, the routing the model trusts (section 2.2): the model kind of a configured kind in a cluster |
+| `spec/synced_object.rs` | the uninterpreted `unmarshal_status`, `marshal_status`, `spec_field` and `status_rest_ok`, and the axiom `marshal_status_preserves_integrity` (`unmarshal_status(marshal_status(s)) == Ok(s)`). `unmarshal`, `marshal` and their lemmas are proved over these, not assumed |
+| `spec/model_kind.rs` | nothing: `model_kind` and its injectivity are proved. The hypotheses that injectivity rests on — no `@` in a kind name, none in a binding's parts and no `/` in its namespace — are checked on the exec side at boot (`crd_shape::check_kind_name`) and when a Secret is read (`bindings::binding_of_secret`) |
+
+From the framework the pair also relies on `UidToken`, on the `PatchTests` and
+`Preconditions` setters, and on the shim's construction of the JSON `test`
+operations, which is where "patches test uid and generation" becomes real.
+`tools/check-widget-exec-hygiene.sh` fails when an `external_body` appears
+anywhere else under `widget_sync_controller/`, and when the counts of the four
+files above change.
 
 ### 3.1 Guarantees
 

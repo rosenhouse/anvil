@@ -78,8 +78,12 @@ Pass extra Verus flags after `--`. Replace `--lib` with `--bin <name>` to verify
   literals need `reveal_strlit`; a lemma that exceeds its budget is better
   split than given an `rlimit`.
 - `tools/check-widget-exec-hygiene.sh` (run by CI) pins the Widget pair's
-  trusted exec surface; a new `external_body` under that controller must be
-  added to the design doc and to the script deliberately.
+  trusted surface: the `external_body` items under that controller, and the
+  `external_body`, `verifier(external)` and `uninterp` counts of the shape's
+  wrappers in `kubernetes_api_objects` (`exec/synced_object.rs`,
+  `exec/registry.rs`, `spec/synced_object.rs`, `spec/model_kind.rs`). A new
+  trusted item in any of them must be added to the design doc and to the
+  script deliberately.
 
 ## Build and test
 
