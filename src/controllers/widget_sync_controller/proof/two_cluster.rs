@@ -959,7 +959,6 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
 // The delete clause of the premise, pulled back: a Delete of the mirror key misses
 // the relabeled mirror exactly when its preimage misses the mirror in the remote
 // store, since uids of one side are relabeled injectively.
-#[verifier(spinoff_prover)]
 proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
     requires
         widget_relabeling(cluster, r),
