@@ -60,6 +60,18 @@ spec:
         - image: local/widget-sync-controller:v0.1.0
           imagePullPolicy: IfNotPresent
           name: controller
+          # The image's entrypoint is `controller run`; these follow it. One
+          # --kind per kind the controller takes on, each with the field that
+          # names an object's cluster: Widget's is spec.clusterName (a required,
+          # immutable string), Gadget's is its own metadata.name. Adding a kind
+          # here means its CRD in both clusters and its rules in rbac.yaml and
+          # rbac_inner.yaml; a CRD without the shape of the design's section 2.2
+          # is refused at boot and the pod never becomes ready.
+          args:
+            - --kind
+            - anvil.dev/v1/Widget:field:spec.clusterName
+            - --kind
+            - anvil.dev/v1/Gadget:name
           env:
             - name: READY_FILE
               value: /run/widget-sync/ready

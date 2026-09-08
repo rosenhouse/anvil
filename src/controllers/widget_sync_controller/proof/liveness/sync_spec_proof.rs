@@ -1341,35 +1341,26 @@ proof fn lemma_sync_patch_req_handled(k: SyncKind, b: Binding, bs: Set<Binding>,
         assert(updated_rv.spec == cr_outer.spec);
         assert(cr_outer.spec == outer.spec);
         assert(updated_rv.metadata.name == old_obj.metadata.name);
-        // TODO (the one obligation of the port left open; see the report and
-        // doc/widget_sync_fanout_design.md, section 5.2).
-        //
-        // For a `name` selector this is trivial: an update never changes
-        // metadata.name. For a `field` selector the installed type's transition
-        // validation (the CEL immutability rule, section 2.3) asks that the patch
-        // not change the value at the selector path. It does not: the mirror was
-        // created from an outer copy at this key, and that copy's own selector
-        // field is immutable, so the mirror already holds cluster_of(outer). What
-        // is missing is that fact as an invariant. The shape it wants is per outer
-        // copy, alongside the other conjuncts of sync_step_ctx:
-        //
-        //   s.resources().contains_key(inner_key(k, outer))
-        //     ==> cluster_of_dynamic(k.selector, s.resources()[inner_key(k, outer)])
-        //         == cluster_of(k.selector, outer)
-        //
-        // Its update case is Cluster::lemma_api_server_step_preserves_cluster_of
-        // (kubernetes_cluster/proof/synced_objects.rs) and its create case is
-        // mirror_create_req plus lemma_inner_kind_same_namespace_injective (the
-        // two mirror keys share a namespace, so the mirror kinds' cluster names
-        // agree without any assumption on the strings). The create case needs one
-        // more conjunct on mirror_create_req, `cluster_of(k.selector, outer) is
-        // Some` — true of the model, since the Init step reports Rejected and ends
-        // for an outer copy that names no cluster, but establishing it in
-        // widget_sync_guarantee needs the reconcile's local state at
-        // AfterCreateInner to remember it, which the step types do not record
-        // today. Without it the corner case cluster_of(outer) == Some(""@) is
-        // indistinguishable from cluster_of(outer) == None, which is what
-        // binding_of collapses them to.
+        // The patch does not change the cluster the mirror names, which is what the
+        // installed type's transition validation asks (the CEL immutability rule of
+        // section 2.3; for a Name selector nothing is asked, the name is untouched).
+        // The stored mirror is of the binding of `outer`, so it already selects that
+        // binding's cluster (every_mirror_selects_its_cluster), and the patch writes
+        // the outer copy's own spec, which selects the same one.
+        assert(every_mirror_selects_its_cluster(k, b)(s));
+        assert(ikey.kind == inner_kind(k, b) && ikey.namespace == b.namespace);
+        assert(cluster_of_dynamic(k.selector, old_obj) == Some(b.name));
+        assert(cluster_of(k.selector, outer) == Some(b.name));
+        assert(cluster_of_dynamic(k.selector, updated_rv) == Some(b.name)) by {
+            match k.selector {
+                ClusterSelector::Name => {
+                    assert(updated_rv.metadata.name == old_obj.metadata.name);
+                },
+                ClusterSelector::Field(path) => {
+                    assert(updated_rv.spec == outer.spec);
+                },
+            }
+        }
         assert(valid_transition(updated_rv, old_obj, cluster.installed_types));
         assert(updated_object_validity_check(updated_rv, old_obj, cluster.installed_types) is None);
         assert(s_prime.resources()[ikey] == updated_rv);

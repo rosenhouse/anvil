@@ -171,6 +171,113 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
 }
 
 // ---------------------------------------------------------------------------
+// A reconcile that has left Init for the mirror holds a snapshot that names an
+// inner cluster.
+// ---------------------------------------------------------------------------
+
+// The steps at which the sync reconciler is working on the mirror: the Get of the
+// mirror and the two writes that can follow it. The Init step reaches AfterGetInner
+// only when its snapshot's selector names a cluster (the other outcome of Init is
+// the status write that reports the rejection), and the snapshot of a reconcile
+// never changes, so at these three steps the selection is a name. This is what the
+// Create of a mirror needs: without it, an outer copy naming no cluster and one
+// naming the empty cluster name are indistinguishable, which is what binding_of
+// collapses them to.
+pub open spec fn sync_step_works_on_the_mirror(step: WidgetSyncStepView) -> bool {
+    ||| step is AfterGetInner
+    ||| step is AfterCreateInner
+    ||| step is AfterPatchInner
+}
+
+pub open spec fn sync_reconciles_at_the_mirror_select_a_cluster(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |key: ObjectRef| #[trigger] s.ongoing_reconciles(controller_id).contains_key(key)
+            && sync_step_works_on_the_mirror(WidgetSyncReconcileState::unmarshal(s.ongoing_reconciles(controller_id)[key].local_state)->Ok_0.reconcile_step)
+            ==> cluster_of(k.selector, unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[key].triggering_cr)->Ok_0) is Some
+    }
+}
+
+pub proof fn lemma_always_sync_reconciles_at_the_mirror_select_a_cluster(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, controller_id: int)
+    requires
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
+    ensures spec.entails(always(lift_state(sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)))),
+{
+    let inv = sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id);
+    cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
+    let stronger_next = |s: ClusterState, s_prime: ClusterState| {
+        &&& cluster.next()(s, s_prime)
+        &&& Cluster::there_is_the_controller_state(controller_id)(s)
+    };
+    combine_spec_entails_always_n!(
+        spec, lift_action(stronger_next),
+        lift_action(cluster.next()),
+        lift_state(Cluster::there_is_the_controller_state(controller_id))
+    );
+    assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
+        unmarshal_of_marshal();
+        WidgetSyncReconcileState::marshal_preserves_integrity();
+        assert forall |key: ObjectRef| #[trigger] s_prime.ongoing_reconciles(controller_id).contains_key(key)
+            && sync_step_works_on_the_mirror(WidgetSyncReconcileState::unmarshal(s_prime.ongoing_reconciles(controller_id)[key].local_state)->Ok_0.reconcile_step)
+        implies cluster_of(k.selector, unmarshal(k.outer_kind, s_prime.ongoing_reconciles(controller_id)[key].triggering_cr)->Ok_0) is Some by {
+            let step = choose |step| cluster.next_step(s, s_prime, step);
+            match step {
+                Step::ControllerStep(input) => {
+                    let (id, resp_msg_opt, cr_key_opt) = input;
+                    if id == controller_id && cr_key_opt == Some(key) && s.ongoing_reconciles(controller_id).contains_key(key)
+                        && s_prime.ongoing_reconciles(controller_id)[key] != s.ongoing_reconciles(controller_id)[key] {
+                        let reconcile = s.ongoing_reconciles(controller_id)[key];
+                        let reconcile_prime = s_prime.ongoing_reconciles(controller_id)[key];
+                        assert(reconcile_prime.triggering_cr == reconcile.triggering_cr);
+                        let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
+                        let state = WidgetSyncReconcileState::unmarshal(reconcile.local_state)->Ok_0;
+                        let resp_o = if resp_msg_opt is Some {
+                            if resp_msg_opt->0.content is APIResponse {
+                                Some(ResponseView::<VoidERespView>::KResponse(resp_msg_opt->0.content->APIResponse_0))
+                            } else {
+                                Some(ResponseView::<VoidERespView>::ExternalResponse(VoidERespView::unmarshal(resp_msg_opt->0.content->ExternalResponse_0)->Ok_0))
+                            }
+                        } else {
+                            None
+                        };
+                        let (state_prime, req_o) = sync_reconciler::reconcile_core(k, outer, resp_o, state);
+                        assert(reconcile_prime.local_state == state_prime.marshal());
+                        assert(WidgetSyncReconcileState::unmarshal(reconcile_prime.local_state)->Ok_0 == state_prime);
+                        match state.reconcile_step {
+                            // Init leaves for the Get of the mirror only when the snapshot names a cluster.
+                            WidgetSyncStepView::Init => {
+                                assert(cluster_of(k.selector, outer) is Some);
+                            },
+                            // Past Init the snapshot is the same one, and the invariant already holds of it.
+                            WidgetSyncStepView::AfterGetInner => {},
+                            WidgetSyncStepView::AfterCreateInner => {},
+                            WidgetSyncStepView::AfterPatchInner => {},
+                            // No other step leads to one that works on the mirror.
+                            _ => { assert(false); },
+                        }
+                    } else if s.ongoing_reconciles(controller_id).contains_key(key) {
+                        assert(s_prime.ongoing_reconciles(controller_id)[key] == s.ongoing_reconciles(controller_id)[key]);
+                    } else {
+                        // A reconcile that just started is at Init.
+                        assert(WidgetSyncReconcileState::unmarshal(s_prime.ongoing_reconciles(controller_id)[key].local_state)->Ok_0 == sync_reconciler::reconcile_init_state());
+                        assert(false);
+                    }
+                },
+                Step::RestartControllerStep(id) => {
+                    assert(id != controller_id);
+                    assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
+                },
+                _ => {
+                    assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
+                },
+            }
+        }
+    }
+    init_invariant(spec, cluster.init(), stronger_next, inv);
+}
+
+// ---------------------------------------------------------------------------
 // The status the sync reconciler writes has exactly three conditions: Synced,
 // Ready and Stalled, in that order.
 // ---------------------------------------------------------------------------
@@ -225,16 +332,19 @@ pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cl
     let inv = widget_sync_guarantee(k, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, controller_id);
+    lemma_always_sync_reconciles_at_the_mirror_select_a_cluster(spec, cluster, k, controller_id);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
         &&& sync_triggering_crs_are_bound(k, controller_id)(s)
+        &&& sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
         lift_action(cluster.next()),
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
-        lift_state(sync_triggering_crs_are_bound(k, controller_id))
+        lift_state(sync_triggering_crs_are_bound(k, controller_id)),
+        lift_state(sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id))
     );
     assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
         marshal_status_preserves_integrity();
@@ -315,6 +425,7 @@ proof fn lemma_sync_request_guarantee_is_preserved(k: SyncKind, msg: Message, s:
                 &&& outer.kind == k.outer_kind
                 &&& outer.object_ref() == outer_key
                 &&& outer.metadata.uid is Some
+                &&& cluster_of(k.selector, outer) is Some
                 &&& req.namespace == outer_key.namespace
                 &&& req.obj == #[trigger] marshal(make_inner(k, outer))
                 &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
@@ -339,6 +450,7 @@ proof fn lemma_sync_new_request_is_guaranteed(
         cluster.next_step(s, s_prime, Step::ControllerStep(input)),
         Cluster::there_is_the_controller_state(controller_id)(s),
         sync_triggering_crs_are_bound(k, controller_id)(s),
+        sync_reconciles_at_the_mirror_select_a_cluster(k, controller_id)(s),
         input.0 == controller_id,
         input.2 is Some,
         s.ongoing_reconciles(controller_id).contains_key(input.2->0),
@@ -399,6 +511,9 @@ proof fn lemma_sync_new_request_is_guaranteed(
                 APIRequest::CreateRequest(create_req) => {
                     assert(create_req.obj == marshal(make_inner(k, outer)));
                     assert(create_req.namespace == cr_key.namespace);
+                    // The reconcile is at AfterGetInner, so its snapshot names a cluster.
+                    assert(sync_step_works_on_the_mirror(state.reconcile_step));
+                    assert(cluster_of(k.selector, outer) is Some);
                     assert(mirror_create_req(k, create_req, cr_key)(s_prime));
                 },
                 APIRequest::PatchRequest(patch_req) => {

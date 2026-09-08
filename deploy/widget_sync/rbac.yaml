@@ -1,9 +1,13 @@
 # RBAC for the widget sync controller in the outer (primary) cluster.
-# The controller reads Widgets and writes only their status subresource here;
-# its access to an inner cluster comes from the kubeconfig in that binding's
-# Secret `<clusterName>-kubeconfig` (see rbac_inner.yaml for what the credential
-# in it must be allowed to do).
-# Beyond the kinds it is configured with, it reads:
+# One pair of rules per configured kind (deploy_local.yaml's --kind flags):
+# `<plural>` get, list, watch and `<plural>/status` patch, as
+# doc/widget_sync_fanout_design.md, section 4, prescribes. The demo configures
+# Widget and Gadget.
+# The controller reads them and writes only their status subresource here; its
+# access to an inner cluster comes from the kubeconfig in that binding's Secret
+# `<clusterName>-kubeconfig` (see rbac_inner.yaml for what the credential in it
+# must be allowed to do).
+# Beyond the configured kinds it reads:
 #   - secrets, in every namespace: the binding manager watches the ones named
 #     `*-kubeconfig` and builds a binding's clients from them
 #     (doc/widget_sync_fanout_design.md, sections 1.2 and 4). This is a wide
@@ -39,12 +43,12 @@ metadata:
     app.kubernetes.io/name: widget-sync-controller
   name: widget-sync-controller-role
 rules:
-  # One pair of rules per configured kind. The second demo kind, Gadget, is
-  # added here with the kinds work (issue #41).
+  # One pair of rules per configured kind.
   - apiGroups:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list
@@ -53,6 +57,7 @@ rules:
       - anvil.dev
     resources:
       - widgets/status
+      - gadgets/status
     verbs:
       - patch
   # The bindings: the manager watches every namespace for `*-kubeconfig`.
@@ -64,7 +69,9 @@ rules:
       - get
       - list
       - watch
-  # The boot shape check of each configured kind.
+  # The boot shape check reads each configured kind's CRD
+  # (doc/widget_sync_fanout_design.md, sections 2.2 and 4). Read-only, and only
+  # get: the CRDs are fetched by name, never listed or watched.
   - apiGroups:
       - apiextensions.k8s.io
     resources:

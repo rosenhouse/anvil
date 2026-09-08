@@ -7,6 +7,7 @@
 // premises (what in-flight creates and updates of mirrors look like) from its own
 // rely and guarantee; this file works from those premises.
 #![allow(unused_imports)]
+use crate::kubernetes_api_objects::spec::api_resource::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::proof::api_server::*;
@@ -206,6 +207,140 @@ pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cl
     init_invariant(spec, cluster.init(), stronger_next, inv);
 }
 
+// ---------------------------------------------------------------------------
+// Every stored mirror of a binding names that binding's cluster.
+// ---------------------------------------------------------------------------
+
+// A mirror of the binding `b`, in `b`'s namespace, has `b.name` as the cluster its
+// selector reads. Two steps make it inductive. A create of a mirror kind is a
+// mirror create (the relies), and the mirror it creates carries the outer copy's
+// spec and name, so its selector reads the cluster the outer copy named; the
+// mirror's kind then determines that name, because the two kinds are of the same
+// namespace (lemma_inner_kind_same_namespace_injective) and the outer copy's
+// selection is a name (a conjunct of mirror_create_req). Every other write is an
+// update, a patch or a delete, and none of them changes the selected cluster: for
+// a Field selector that is the installed type's transition validation, the CRD's
+// immutability rule, and for a Name selector the name is the key's
+// (Cluster::lemma_api_server_step_preserves_cluster_of).
+pub open spec fn every_mirror_selects_its_cluster(k: SyncKind, b: Binding) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        forall |key: ObjectRef| #[trigger] s.resources().contains_key(key)
+            && key.kind == inner_kind(k, b) && key.namespace == b.namespace
+            ==> cluster_of_dynamic(k.selector, s.resources()[key]) == Some(b.name)
+    }
+}
+
+pub proof fn lemma_always_every_mirror_selects_its_cluster(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool)
+    requires
+        spec.entails(lift_state(cluster.init())),
+        spec.entails(always(lift_action(cluster.next()))),
+        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
+        spec.entails(always(lift_state(every_in_flight_inner_create_is_a_mirror_create(k)))),
+    ensures spec.entails(always(lift_state(every_mirror_selects_its_cluster(k, b)))),
+{
+    let inv = every_mirror_selects_its_cluster(k, b);
+    cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
+    always_to_always_later(spec, lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()));
+    let stronger_next = |s: ClusterState, s_prime: ClusterState| {
+        &&& cluster.next()(s, s_prime)
+        &&& every_in_flight_inner_create_is_a_mirror_create(k)(s)
+        &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
+        &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s_prime)
+    };
+    combine_spec_entails_always_n!(
+        spec, lift_action(stronger_next),
+        lift_action(cluster.next()),
+        lift_state(every_in_flight_inner_create_is_a_mirror_create(k)),
+        lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
+        later(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()))
+    );
+    assert forall |s, s_prime: ClusterState| inv(s) && #[trigger] stronger_next(s, s_prime) implies inv(s_prime) by {
+        assert forall |key: ObjectRef| #[trigger] s_prime.resources().contains_key(key)
+            && key.kind == inner_kind(k, b) && key.namespace == b.namespace
+        implies cluster_of_dynamic(k.selector, s_prime.resources()[key]) == Some(b.name) by {
+            let step = choose |step| cluster.next_step(s, s_prime, step);
+            match step {
+                Step::APIServerStep(input) => {
+                    let msg = input->0;
+                    if s.resources().contains_key(key) {
+                        Cluster::lemma_api_server_step_preserves_cluster_of(cluster, inner_kind(k, b), spec_ok, k.selector, s, s_prime, msg, key);
+                    } else {
+                        lemma_mirror_selects_its_cluster_when_created(cluster, k, b, s, s_prime, msg, key);
+                    }
+                },
+                _ => {
+                    assert(s_prime.api_server == s.api_server);
+                    assert(s.resources().contains_key(key));
+                },
+            }
+        }
+    }
+    init_invariant(spec, cluster.init(), stronger_next, inv);
+}
+
+// The create case: the object at `key` was not there before, so the request that
+// put it there is a create, and by the relies it is a mirror create.
+proof fn lemma_mirror_selects_its_cluster_when_created(cluster: Cluster, k: SyncKind, b: Binding, s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef)
+    requires
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+        every_in_flight_inner_create_is_a_mirror_create(k)(s),
+        Cluster::each_object_in_etcd_is_weakly_well_formed()(s_prime),
+        !s.resources().contains_key(key),
+        s_prime.resources().contains_key(key),
+        key.kind == inner_kind(k, b),
+        key.namespace == b.namespace,
+    ensures cluster_of_dynamic(k.selector, s_prime.resources()[key]) == Some(b.name),
+{
+    marshal_preserves_metadata();
+    lemma_new_object_comes_from_create(cluster, s, s_prime, msg, key);
+    let req = msg.content.get_create_request();
+    let created = s_prime.resources()[key];
+    assert(s.in_flight().contains(msg));
+    assert(is_inner_kind(k, req.obj.kind)) by {
+        assert(req.obj.kind == inner_kind(k, b));
+    }
+    let outer_key = ObjectRef { kind: k.outer_kind, namespace: req.namespace, name: req.obj.metadata.name->0 };
+    assert(mirror_create_req(k, req, outer_key)(s));
+    let outer = choose |outer: SyncedObjectView| {
+        &&& outer.kind == k.outer_kind
+        &&& outer.object_ref() == outer_key
+        &&& outer.metadata.uid is Some
+        &&& cluster_of(k.selector, outer) is Some
+        &&& req.namespace == outer_key.namespace
+        &&& req.obj == #[trigger] marshal(make_inner(k, outer))
+        &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
+    };
+    // The created object's kind is the mirror kind of the outer copy's own binding,
+    // and its namespace is the outer copy's, which is `b`'s.
+    let bo = binding_of(k, outer);
+    assert(req.obj.metadata == make_inner(k, outer).metadata);
+    assert(bo.namespace == b.namespace) by {
+        assert(outer.metadata.namespace->0 == outer.object_ref().namespace);
+        assert(key.namespace == req.namespace);
+    }
+    assert(inner_kind(k, ClusterRefView { namespace: b.namespace, name: b.name }) == inner_kind(k, ClusterRefView { namespace: b.namespace, name: bo.name })) by {
+        assert(b == ClusterRefView { namespace: b.namespace, name: b.name });
+        assert(bo == ClusterRefView { namespace: b.namespace, name: bo.name });
+        assert(req.obj.kind == inner_kind(k, bo));
+    }
+    lemma_inner_kind_same_namespace_injective(k, b.namespace, b.name, bo.name);
+    assert(bo.name == cluster_of(k.selector, outer)->0);
+    // The created object carries the outer copy's spec and its name, so either
+    // selector reads the outer copy's cluster off it.
+    match k.selector {
+        ClusterSelector::Name => {
+            assert(Cluster::etcd_object_is_weakly_well_formed(key)(s_prime));
+            assert(created.metadata.name == Some(key.name));
+            assert(key.name == outer.metadata.name->0);
+            assert(cluster_of(k.selector, outer) == outer.metadata.name);
+        },
+        ClusterSelector::Field(path) => {
+            assert(created.spec == req.obj.spec);
+            assert(req.obj.spec == outer.spec);
+        },
+    }
+}
+
 // The metadata fields a mirror's identity is read from.
 pub open spec fn same_identity_and_owners(m1: ObjectMetaView, m2: ObjectMetaView) -> bool {
     &&& m1.labels == m2.labels
@@ -272,6 +407,7 @@ proof fn lemma_mirror_is_bound_preserved_by_create(cluster: Cluster, k: SyncKind
             &&& outer.kind == k.outer_kind
             &&& outer.object_ref() == outer_key
             &&& outer.metadata.uid is Some
+            &&& cluster_of(k.selector, outer) is Some
             &&& req.namespace == outer_key.namespace
             &&& req.obj == #[trigger] marshal(make_inner(k, outer))
             &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)

@@ -5,11 +5,15 @@
 # Secret `<clusterName>-kubeconfig`, the Cluster API convention; a rotation is
 # that Secret changing, which rebuilds the binding's clients.
 # The controller creates, patches (spec) and deletes the mirrors it owns and
-# reads every Widget; it never writes Widget status in the inner cluster. It
-# also settles the claim of this cluster (ConfigMap kube-system/anvil-sync-claim,
-# doc/widget_sync_fanout_design.md, section 1.3): it creates it on first contact
-# and reads it afterwards, and it never updates or deletes it — releasing a
-# claim is an operator's decision, made with a credential of their own.
+# reads every object of the configured kinds; it never writes their status in
+# the inner cluster. One rule per kind the controller is given
+# (deploy_local.yaml's --kind flags): the demo configures Widget and Gadget, and
+# the per-binding access check asks for exactly these verbs on each plural.
+# The controller also settles the claim of this cluster (ConfigMap
+# kube-system/anvil-sync-claim, doc/widget_sync_fanout_design.md, section 1.3):
+# it creates it on first contact and reads it afterwards, and it never updates
+# or deletes it — releasing a claim is an operator's decision, made with a
+# credential of their own.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -45,6 +49,7 @@ rules:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list

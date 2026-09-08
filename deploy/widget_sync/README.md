@@ -1,10 +1,12 @@
 # Widget sync demo
 
 The Widget sync controller runs in an *outer* cluster and keeps, for every
-`Widget` created there, a mirror `Widget` with the same namespace, name and spec
-in an *inner* cluster, where a real `Widget` implementation acts on it. It
-copies the inner status back onto the outer copy. Design and proofs:
-`doc/widget_sync_design.md`.
+object of a configured kind created there, a mirror with the same namespace,
+name and spec in an *inner* cluster, where a real implementation of that kind
+acts on it. It copies the inner status back onto the outer copy. The kinds are
+given at boot, not compiled in ("Kinds and their shape" below); the demo runs
+`Widget` and `Gadget`. Design and proofs: `doc/widget_sync_design.md` and, for
+the kinds and the bindings, `doc/widget_sync_fanout_design.md`.
 
 ## Clusters
 
@@ -91,24 +93,120 @@ ours.
   outer copy reports `Synced=False/InnerUnreachable` at the new generation;
   after the heal it reaches `Synced=True`.
 
+## Kinds and their shape
+
+The controller is not compiled against a kind: it runs for the kinds it is
+given at boot (`doc/widget_sync_fanout_design.md`, section 2). The demo
+configures two, in `deploy_local.yaml`:
+
+```
+widget_sync_controller run \
+  --kind anvil.dev/v1/Widget:field:spec.clusterName \
+  --kind anvil.dev/v1/Gadget:name
+```
+
+`--kind <group>/<version>/<Kind>:<selector>`, repeated; at least one is
+required and the same kind twice is refused (two sync controllers on the same
+objects is what the proofs exclude). Each kind gets its own sync reconciler
+and, per binding, its own janitor. `widget_sync_controller export` prints the
+demo CRDs.
+
+The **selector** is the field that says which inner cluster an object belongs
+to:
+
+| Selector | The object's cluster is | What the CRD must carry |
+|---|---|---|
+| `name` | `metadata.name` | nothing; `metadata.name` is immutable by construction |
+| `field:spec.<path>` (the `field:` prefix may be dropped) | the string at that path | the field, required and a string, guarded by `x-kubernetes-validations: [{rule: "self == oldSelf"}]` on the field, or the equivalent rule `self.<path> == oldSelf.<path>` on `spec` |
+
+`Widget` uses `field:spec.clusterName`, `Gadget` uses `name` — its own name is
+the cluster, the shape of Cluster API's `Cluster` object. Immutability matters
+beyond the operational point that editing the field would tear a workload
+cluster down and rebuild it: the janitor's delete-soundness invariant rests on
+a listed outer object staying selected for the binding it was seen in
+(`doc/widget_sync_fanout_design.md`, section 1.1).
+
+**The shape.** The controller reads and writes exactly these fields, and at
+boot it fetches each configured kind's CRD in the outer cluster and checks
+them:
+
+| Field | Read or written | Requirement on the CRD |
+|---|---|---|
+| `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
+| `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
+| `status.observedGeneration` | read on the inner copy, written on the outer copy | integer |
+| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer) |
+| every other status field | mirrored verbatim inner to outer while `Synced` | none |
+| the status subresource | | enabled, so `metadata.generation` follows the spec |
+
+A status (or a `conditions` item) declared with
+`x-kubernetes-preserve-unknown-fields` passes the rows it does not declare;
+what it does declare is still checked, since a declared string
+`observedGeneration` would reject the integer the controller writes. Anything
+outside the table is opaque: `Gadget`'s `spec.size` is copied without the
+controller knowing it exists, and its `status.observedSize` comes back on the
+outer copy as part of the mirrored remainder.
+
+Inner clusters are not checked for schema parity beyond serving the kind;
+parity stays an operational assumption. So does this, for now: **fields are
+not removed from a CRD while the controller runs**, so the boot check, once it
+passes, stays true. Adding fields is fine. A later pass can watch the CRDs and
+stop a kind whose shape breaks.
+
+**A refused kind.** A kind that is not served, is cluster-scoped, or whose CRD
+fails a row is a usage error: the controller prints the failing rows and exits
+with status 2 before it builds a client or starts a single controller, so the
+pod crash-loops and never becomes ready. To see it on the testbed, install a
+`Widget` CRD without the immutability rule and restart the controller:
+
+```sh
+# The demo CRD minus every x-kubernetes-validations block.
+python3 -c 'import sys,yaml
+d=yaml.safe_load(open("deploy/widget_sync/crd.yaml"))
+def strip(x):
+    if isinstance(x,dict): x.pop("x-kubernetes-validations",None); [strip(v) for v in x.values()]
+    elif isinstance(x,list): [strip(v) for v in x]
+strip(d); yaml.safe_dump(d,sys.stdout)' > /tmp/crd-no-rule.yaml
+kubectl --context kind-widget-sync-outer apply -f /tmp/crd-no-rule.yaml
+kubectl --context kind-widget-sync-outer -n widget-sync rollout restart deployment/widget-sync-controller
+kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-controller
+```
+
+The log ends with
+
+```
+--kind anvil.dev/v1/Widget:field:spec.clusterName: CRD widgets.anvil.dev does not have the shape the sync controller needs:
+  - spec: selector field spec.clusterName: must carry the x-kubernetes-validations rule `self == oldSelf` (or spec the rule `self.clusterName == oldSelf.clusterName`)
+```
+
+and the container exits 2. `kubectl apply -f deploy/widget_sync/crd.yaml`
+puts the rule back; the next restart boots. The same CRD is accepted for a
+`name` selector, which needs no rule, so the reproduction isolates exactly
+the row it removes. `cargo test --bin widget_sync_controller` checks that
+message without a cluster.
+
+**Adding a kind.** Its CRD in both clusters, one `--kind` flag in
+`deploy_local.yaml`, its `<plural>` and `<plural>/status` rules in
+`rbac.yaml`, its `<plural>` rules in `rbac_inner.yaml`, and — for the demo —
+one `--kind` and the matching rules for the echo controller in
+`echo_inner.yaml`, plus a line in that binary's `ECHOES` table if the kind
+should report a payload of its own.
+
 ## Operating the controller
 
 Manifests: `rbac_inner.yaml` (inner cluster), `rbac.yaml` and
 `deploy_local.yaml` (outer cluster).
 
-**The kind and the binding.** The reconcilers are parameterized by a kind and
-a binding (`doc/widget_sync_fanout_design.md`, sections 2.1 and 3.4). This
-binary instantiates them at one of each, named in
-`src/bin/widget_sync_controller.rs`: the kind
-`anvil.dev/v1/Widget:field:spec.clusterName` — an object's cluster is the
-string at `spec.clusterName` — and the binding `default/inner`, whose
+**The binding.** The reconcilers are parameterized by a kind and a binding
+(`doc/widget_sync_fanout_design.md`, sections 2.1 and 3.4). The kinds come
+from the `--kind` flags ("Kinds and their shape" above); the binding is still
+one, named in `src/bin/widget_sync_controller.rs`: `default/inner`, whose
 credential is the kubeconfig at `$REMOTE_KUBECONFIG` (default
-`/etc/widget-sync/remote-kubeconfig/kubeconfig`). At boot the binary
-discovers the kind in the outer cluster and checks that its CRD has the shape
-the reconcilers need (`doc/widget_sync_fanout_design.md`, section 2.2); a kind
-that is not served, or a CRD of the wrong shape, is a startup error. Taking
-the kinds from `--kind` flags and the bindings from Secrets are the follow-up
-issues. `widget_sync_controller export` prints the demo CRDs.
+`/etc/widget-sync/remote-kubeconfig/kubeconfig`). An object whose selector
+names any other cluster has no binding, so every request for it is answered as
+if the inner cluster were unreachable and the outer copy reports
+`Synced=False/InnerUnreachable`. Discovering the bindings from Secrets is the
+follow-up issue.
 
 **Remote credential.** The Secret `widget-sync-remote-kubeconfig` in the outer
 cluster has two keys, mounted into one directory: `kubeconfig`, which names the
@@ -123,8 +221,8 @@ long-lived service-account token Secret (`widget-sync-remote-token`); a
 production deployment would rather feed a bound token (`kubectl create token
 widget-sync-remote --duration ...`) into the same key on a schedule. At
 startup the binary asks the inner cluster, with one `SelfSubjectAccessReview`
-per verb, whether the credential may get, list, watch, create, patch and
-delete `widgets.anvil.dev`; a 401, 403 or denied verb is logged and the
+per verb and configured kind, whether the credential may get, list, watch,
+create, patch and delete it; a 401, 403 or denied verb is logged and the
 process exits, so a wrong credential shows up as a crash-looping, never-ready
 pod rather than as failing reconciles.
 
@@ -191,8 +289,9 @@ filesystem (the ready file's emptyDir is the only writable mount; the pause
 gate's ConfigMap is mounted read-only), and has CPU and memory requests and
 limits sized for the demo.
 
-**RBAC.** In the outer cluster the controller reads `widgets` and patches
-`widgets/status`. `rbac.yaml` also binds, in namespace `default`, `get` and
+**RBAC.** In the outer cluster the controller reads `<plural>` and patches
+`<plural>/status` for each configured kind, and gets the CRD of each at boot
+for the shape check. `rbac.yaml` also binds, in namespace `default`, `get` and
 `update` on the single ConfigMap `fault-injection-config`, which only the
 crash-testing mode (`controller crash`) touches; `run` mode never uses it. No
 `events` verbs: the controller emits none.

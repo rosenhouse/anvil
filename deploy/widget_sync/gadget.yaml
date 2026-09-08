@@ -1,10 +1,10 @@
 # A sample Gadget. Its cluster selector is `name`, so the object's name is the
 # binding whose cluster receives the mirror: create it in the outer cluster and
-# the sync controller mirrors it into the cluster of binding `inner`.
+# the sync controller mirrors it into the cluster of binding `a`.
 apiVersion: anvil.dev/v1
 kind: Gadget
 metadata:
-  name: inner
+  name: a
 spec:
   size: 2
   labels:

@@ -280,6 +280,8 @@ jobs:
           ./tools/two-cluster-test.sh --build
       - name: Run widget sync e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync
+      - name: Run widget sync e2e tests for the configured kinds
+        run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync-kinds
       - name: Run widget sync bindings e2e tests
         run: . "$HOME/.cargo/env" && cd e2e && cargo run -- widget-sync-bindings
       - name: Collect controller logs
@@ -304,6 +306,12 @@ jobs:
           kubectl --context kind-widget-sync-outer get widgets -A -o yaml || true
           for cluster in a b; do
             kubectl --context "kind-widget-sync-inner-$cluster" get widgets -A -o yaml || true
+          done
+          echo "::endgroup::"
+          echo "::group::gadgets"
+          kubectl --context kind-widget-sync-outer get gadgets -A -o yaml || true
+          for cluster in a b; do
+            kubectl --context "kind-widget-sync-inner-$cluster" get gadgets -A -o yaml || true
           done
           echo "::endgroup::"
 

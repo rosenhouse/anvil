@@ -32,13 +32,17 @@ pub open spec fn parent_uid_is_bound_to_key(parent_uid: Uid, outer_key: ObjectRe
 
 // A Create of a mirror: the object the sync reconciler of `k` builds for some
 // outer copy at `outer_key`, whose uid is bound to that key. The mirror's kind
-// names the binding the outer copy's selector picks.
+// names the binding the outer copy's selector picks, and that selection is a
+// name: an outer copy that names no inner cluster is rejected before any
+// request is sent, so the mirror's kind determines the cluster name it holds
+// (proof::helper_invariants::every_mirror_selects_its_cluster).
 pub open spec fn mirror_create_req(k: SyncKind, req: CreateRequest, outer_key: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
         exists |outer: SyncedObjectView| {
             &&& outer.kind == k.outer_kind
             &&& outer.object_ref() == outer_key
             &&& outer.metadata.uid is Some
+            &&& cluster_of(k.selector, outer) is Some
             &&& req.namespace == outer_key.namespace
             &&& req.obj == #[trigger] marshal(make_inner(k, outer))
             &&& parent_uid_is_bound_to_key(outer.metadata.uid->0, outer_key)(s)
