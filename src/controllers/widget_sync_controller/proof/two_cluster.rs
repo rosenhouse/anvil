@@ -442,13 +442,68 @@ pub proof fn lemma_janitor_model_commutes(cluster: Cluster, r: Relabeling, cr: D
     lemma_janitor_core_commutes(cluster, r, inner, resp_um, state);
 }
 
-
 // ---------------------------------------------------------------------------
-// The hypotheses of the refinement, for the Widget pair.
+// The hypotheses of the refinement, for the Widget pair and whoever runs
+// beside it.
 // ---------------------------------------------------------------------------
 
-// A cluster running exactly the sync reconciler and the janitor, with the two
-// Widget types installed, and with installed types the refinement can follow.
+// The clause of models_ok for one controller model: no external system, and
+// every request it sends is one the refinement handles.
+pub open spec fn other_model_ok(tc: TwoCluster, m: ControllerModel) -> bool {
+    &&& m.external_model is None
+    &&& forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
+        let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
+        req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+    }
+}
+
+// The clause of models_commute for one controller model.
+pub open spec fn other_model_commutes(tc: TwoCluster, r: Relabeling, m: ControllerModel) -> bool {
+    let rm = m.reconcile_model;
+    let t = rm.transition;
+    forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
+        cr.kind == rm.kind && stored_object_ok(tc, cr)
+        ==> #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
+            == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
+}
+
+// The pair's relies on the controller at `id`, as invariants of the one-store
+// model: what a Welder composition of that controller with the pair
+// establishes from its guarantee (composition/widget_disturber_reconciler.rs
+// for the disturber). Relies are safety, so init and next are all that is
+// asked; no fairness of the other controller is assumed anywhere.
+pub open spec fn widget_relies_hold_of(cluster: Cluster, id: int) -> bool {
+    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
+    &&& base.entails(always(lift_state(widget_sync_rely(id))))
+    &&& base.entails(always(lift_state(widget_janitor_rely(id))))
+}
+
+// A controller other than the pair that the two-store theorem admits: its model
+// meets the per-controller hypotheses of the refinement (hypotheses 1 and 3 of
+// doc/widget_sync_design.md section 2.2, under the Widget hook), and the pair's
+// relies hold of it.
+pub open spec fn widget_other_controller_ok(cluster: Cluster, id: int) -> bool {
+    let tc = widget_two_cluster(cluster);
+    let m = cluster.controller_models[id];
+    &&& other_model_ok(tc, m)
+    &&& forall |r: Relabeling| widget_relabeling(cluster, r) ==> #[trigger] other_model_commutes(tc, r, m)
+    &&& widget_relies_hold_of(cluster, id)
+}
+
+// A cluster running the sync reconciler and the janitor, with the two Widget
+// types installed, installed types the refinement can follow, and any number of
+// other controllers, each admitted by widget_other_controller_ok.
+pub open spec fn widget_cluster_with_others(cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
+    &&& sync_membership(cluster, sync_id, janitor_id)
+    &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model())
+    &&& installed_types_ignore_metadata(cluster.installed_types)
+    &&& installed_types_coherent(cluster.installed_types)
+    &&& forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
+        ==> widget_other_controller_ok(cluster, id)
+}
+
+// A cluster running exactly the sync reconciler and the janitor: the special
+// case with no other controller.
 pub open spec fn widget_pair_cluster(cluster: Cluster, sync_id: int, janitor_id: int) -> bool {
     &&& sync_membership(cluster, sync_id, janitor_id)
     &&& cluster.controller_models.contains_pair(janitor_id, widget_janitor_controller_model())
@@ -457,8 +512,19 @@ pub open spec fn widget_pair_cluster(cluster: Cluster, sync_id: int, janitor_id:
     &&& installed_types_coherent(cluster.installed_types)
 }
 
-pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: int)
+pub proof fn lemma_pair_cluster_is_cluster_with_others(cluster: Cluster, sync_id: int, janitor_id: int)
     requires widget_pair_cluster(cluster, sync_id, janitor_id),
+    ensures widget_cluster_with_others(cluster, sync_id, janitor_id),
+{
+    assert forall |id: int| #[trigger] cluster.controller_models.contains_key(id) && id != sync_id && id != janitor_id
+        implies widget_other_controller_ok(cluster, id) by {
+        assert(cluster.controller_models.dom().contains(id));
+        assert(false);
+    }
+}
+
+pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: int)
+    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
     ensures models_ok(widget_two_cluster(cluster)),
 {
     let tc = widget_two_cluster(cluster);
@@ -471,39 +537,43 @@ pub proof fn lemma_widget_models_ok(cluster: Cluster, sync_id: int, janitor_id: 
             req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
         }
     } by {
-        assert(id == sync_id || id == janitor_id);
         let m = tc.cluster.controller_models[id];
-        assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
-            let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
-            req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
-        } by {
-            let req_o = (m.reconcile_model.transition)(cr, resp, ls).1;
-            if req_o is Some && req_o->0 is KubernetesRequest {
-                let req = req_o->0->KubernetesRequest_0;
-                if id == sync_id {
-                    let outer = OuterWidgetView::unmarshal(cr)->Ok_0;
-                    let state = sync_reconciler::WidgetSyncReconcileState::unmarshal(ls)->Ok_0;
-                    match state.reconcile_step {
-                        WidgetSyncStepView::AfterGetInner => {
-                            // A Create of the mirror: named, of the inner kind, without owner references.
-                            if req is CreateRequest {
-                                let obj = make_inner(outer).marshal();
-                                assert(req->CreateRequest_0.obj == obj);
-                                assert(obj.metadata.owner_references is None);
-                                assert(obj.kind == InnerWidgetView::kind());
-                            }
-                        },
-                        _ => {},
+        if id == sync_id || id == janitor_id {
+            assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
+                let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
+                req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+            } by {
+                let req_o = (m.reconcile_model.transition)(cr, resp, ls).1;
+                if req_o is Some && req_o->0 is KubernetesRequest {
+                    let req = req_o->0->KubernetesRequest_0;
+                    if id == sync_id {
+                        let outer = OuterWidgetView::unmarshal(cr)->Ok_0;
+                        let state = sync_reconciler::WidgetSyncReconcileState::unmarshal(ls)->Ok_0;
+                        match state.reconcile_step {
+                            WidgetSyncStepView::AfterGetInner => {
+                                // A Create of the mirror: named, of the inner kind, without owner references.
+                                if req is CreateRequest {
+                                    let obj = make_inner(outer).marshal();
+                                    assert(req->CreateRequest_0.obj == obj);
+                                    assert(obj.metadata.owner_references is None);
+                                    assert(obj.kind == InnerWidgetView::kind());
+                                }
+                            },
+                            _ => {},
+                        }
                     }
                 }
             }
+        } else {
+            assert(widget_other_controller_ok(cluster, id));
+            assert(other_model_ok(tc, m));
         }
     }
 }
 
 pub proof fn lemma_widget_models_commute(cluster: Cluster, sync_id: int, janitor_id: int, r: Relabeling)
     requires
-        widget_pair_cluster(cluster, sync_id, janitor_id),
+        widget_cluster_with_others(cluster, sync_id, janitor_id),
         widget_relabeling(cluster, r),
     ensures models_commute(widget_two_cluster(cluster), r),
 {
@@ -516,24 +586,28 @@ pub proof fn lemma_widget_models_commute(cluster: Cluster, sync_id: int, janitor
             ==> #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
                 == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1))
     } by {
-        assert(id == sync_id || id == janitor_id);
         let m = tc.cluster.controller_models[id].reconcile_model;
         let t = m.transition;
-        assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
-            cr.kind == m.kind && stored_object_ok(tc, cr)
-            implies #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
-                == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1)) by {
-            if id == sync_id {
-                lemma_sync_model_commutes(cluster, r, cr, resp, ls);
-            } else {
-                lemma_janitor_model_commutes(cluster, r, cr, resp, ls);
+        if id == sync_id || id == janitor_id {
+            assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState|
+                cr.kind == m.kind && stored_object_ok(tc, cr)
+                implies #[trigger] t(relabel_obj(tc, r, cr), relabel_resp_content(tc, r, resp), ls)
+                    == (t(cr, resp, ls).0, relabel_req_content(tc, r, t(cr, resp, ls).1)) by {
+                if id == sync_id {
+                    lemma_sync_model_commutes(cluster, r, cr, resp, ls);
+                } else {
+                    lemma_janitor_model_commutes(cluster, r, cr, resp, ls);
+                }
             }
+        } else {
+            assert(widget_other_controller_ok(cluster, id));
+            assert(other_model_commutes(tc, r, tc.cluster.controller_models[id]));
         }
     }
 }
 
 pub proof fn lemma_widget_refinement_hyps(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_pair_cluster(cluster, sync_id, janitor_id),
+    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
     ensures refinement_hyps(widget_two_cluster(cluster), widget_hook()),
 {
     let tc = widget_two_cluster(cluster);
@@ -830,7 +904,6 @@ proof fn lemma_outer_stable_pull_back(cluster: Cluster, r: Relabeling, s: TwoClu
 // The delete clause of the premise, pulled back: a Delete of the mirror key misses
 // the relabeled mirror exactly when its preimage misses the mirror in the remote
 // store, since uids of one side are relabeled injectively.
-#[verifier(rlimit(200))]
 #[verifier(spinoff_prover)]
 proof fn lemma_mirror_undeleted_pull_back(cluster: Cluster, r: Relabeling, s: TwoClusterState, outer: OuterWidgetView, uid_next: Uid, rv_next: ResourceVersion)
     requires
@@ -1539,9 +1612,12 @@ pub open spec fn widget_one_cluster_spec(cluster: Cluster, sync_id: int, janitor
     .and(inner_releases_terminating_objects())
 }
 
-// R1, R2, R3s and the janitor's ESR, for a cluster running exactly the pair.
+// R1, R2, R3s and the janitor's ESR, for a cluster running the pair beside
+// controllers the pair's relies hold of. The relies on the pair's members are
+// their guarantees; the relies on everyone else are the invariants
+// widget_relies_hold_of provides, taken under the spec, which has init and next.
 pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_pair_cluster(cluster, sync_id, janitor_id),
+    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
     ensures ({
         let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
         &&& spec.entails(widget_spec_eventually_synced())
@@ -1551,27 +1627,40 @@ pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: i
     }),
 {
     let spec = widget_one_cluster_spec(cluster, sync_id, janitor_id);
+    let base = lift_state(cluster.init()).and(always(lift_action(cluster.next())));
     assert(spec.entails(lift_state(cluster.init())));
     assert(spec.entails(sync_next_with_wf(cluster, sync_id)));
     assert(spec.entails(janitor_next_with_wf(cluster, janitor_id)));
     assert(spec.entails(inner_releases_terminating_objects()));
     assert(sync_next_with_wf(cluster, sync_id).entails(always(lift_action(cluster.next()))));
     entails_trans(spec, sync_next_with_wf(cluster, sync_id), always(lift_action(cluster.next())));
+    entails_and(spec, lift_state(cluster.init()), always(lift_action(cluster.next())));
     lemma_always_widget_sync_guarantee(spec, cluster, sync_id);
     lemma_always_widget_janitor_guarantee(spec, cluster, janitor_id);
-    // The janitor's rely: the sync reconciler's guarantee.
+    // The janitor's rely: the sync reconciler's guarantee, and the invariants of the others.
     assert forall |other_id: int| cluster.controller_models.remove(janitor_id).contains_key(other_id)
         implies spec.entails(always(lift_state(#[trigger] widget_janitor_rely(other_id)))) by {
-        assert(other_id == sync_id);
-        sync_guarantee_implies_janitor_rely(sync_id);
-        always_weaken(spec, lift_state(widget_sync_guarantee(sync_id)), lift_state(widget_janitor_rely(sync_id)));
+        if other_id == sync_id {
+            sync_guarantee_implies_janitor_rely(sync_id);
+            always_weaken(spec, lift_state(widget_sync_guarantee(sync_id)), lift_state(widget_janitor_rely(sync_id)));
+        } else {
+            assert(cluster.controller_models.contains_key(other_id));
+            assert(widget_other_controller_ok(cluster, other_id));
+            entails_trans(spec, base, always(lift_state(widget_janitor_rely(other_id))));
+        }
     }
     janitor_rely_facts_imply_lifted_condition(spec, cluster, janitor_id);
     janitor_satisfies_its_spec(spec, cluster, janitor_id);
-    // The sync reconciler's rely: the janitor's guarantee.
+    // The sync reconciler's rely: the janitor's guarantee, and the invariants of the others.
     assert forall |other_id: int| cluster.controller_models.remove(sync_id).contains_key(other_id)
         implies spec.entails(#[trigger] widget_sync_partial_rely(janitor_id)(other_id)) by {
-        assert(other_id == janitor_id);
+        if other_id == janitor_id {
+        } else {
+            assert(cluster.controller_models.contains_key(other_id));
+            assert(widget_other_controller_ok(cluster, other_id));
+            entails_trans(spec, base, always(lift_state(widget_sync_rely(other_id))));
+            assert(widget_sync_partial_rely(janitor_id)(other_id) == always(lift_state(widget_sync_rely(other_id))));
+        }
     }
     sync_rely_facts_imply_lifted_condition(spec, cluster, sync_id, janitor_id);
     sync_eventually_synced(spec, cluster, sync_id, janitor_id);
@@ -1579,9 +1668,11 @@ pub proof fn lemma_one_cluster_esr(cluster: Cluster, sync_id: int, janitor_id: i
     sync_mirrors_stably_collected(spec, cluster, sync_id, janitor_id);
 }
 
-// R1, R2, R3s and R3 hold of every execution of the two-store model that runs the pair.
+// R1, R2, R3s and R3 hold of every execution of the two-store model that runs
+// the pair, whatever else runs beside it under widget_cluster_with_others. The
+// fairness assumed is the pair's alone.
 pub proof fn widget_two_cluster_theorem(cluster: Cluster, sync_id: int, janitor_id: int)
-    requires widget_pair_cluster(cluster, sync_id, janitor_id),
+    requires widget_cluster_with_others(cluster, sync_id, janitor_id),
     ensures ({
         let tc = widget_two_cluster(cluster);
         widget_two_cluster_spec(cluster, sync_id, janitor_id).entails(
@@ -1747,17 +1838,24 @@ pub proof fn lemma_janitor_sound_transfer(cluster: Cluster, r: Relabeling, ex: E
 // The concrete cluster of the pair satisfies the hypotheses.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_widget_instance_is_pair_cluster()
-    ensures widget_pair_cluster(widget_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+// A cluster with the two Widget types installed and nothing else: both types
+// are installed, validation reads the spec only, and the default statuses
+// unmarshal. Shared by the concrete clusters of the pair and of the pair with
+// the disturber, whose installed types are the same map.
+pub proof fn lemma_widget_instance_types(cluster: Cluster)
+    requires cluster.installed_types == widget_cluster_instance().installed_types,
+    ensures
+        cluster.type_is_installed_in_cluster::<OuterWidgetView>(),
+        cluster.type_is_installed_in_cluster::<InnerWidgetView>(),
+        installed_types_ignore_metadata(cluster.installed_types),
+        installed_types_coherent(cluster.installed_types),
 {
-    let cluster = widget_cluster_instance();
     let it = cluster.installed_types;
     let outer_name = OuterWidgetView::kind()->CustomResourceKind_0;
     let inner_name = InnerWidgetView::kind()->CustomResourceKind_0;
     reveal_strlit("widget");
     reveal_strlit("widget@inner");
     assert(outer_name != inner_name) by { assert(outer_name.len() != inner_name.len()); }
-    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(widget_sync_id()).insert(widget_janitor_id()));
     assert(it.contains_key(outer_name) && it[outer_name] == Cluster::installed_type::<OuterWidgetView>());
     assert(it.contains_key(inner_name) && it[inner_name] == Cluster::installed_type::<InnerWidgetView>());
     // Validation reads the spec only; transition validation is trivial.
@@ -1793,6 +1891,14 @@ pub proof fn lemma_widget_instance_is_pair_cluster()
     }
 }
 
+pub proof fn lemma_widget_instance_is_pair_cluster()
+    ensures widget_pair_cluster(widget_cluster_instance(), widget_sync_id(), widget_janitor_id()),
+{
+    let cluster = widget_cluster_instance();
+    lemma_widget_instance_types(cluster);
+    assert(cluster.controller_models.dom() =~= Set::<int>::empty().insert(widget_sync_id()).insert(widget_janitor_id()));
+}
+
 // The theorem for the concrete cluster: the sync reconciler at widget_sync_id()
 // and the janitor at widget_janitor_id(), with both Widget types installed.
 pub proof fn widget_instance_two_cluster_theorem()
@@ -1809,6 +1915,7 @@ pub proof fn widget_instance_two_cluster_theorem()
     }),
 {
     lemma_widget_instance_is_pair_cluster();
+    lemma_pair_cluster_is_cluster_with_others(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
     widget_two_cluster_theorem(widget_cluster_instance(), widget_sync_id(), widget_janitor_id());
 }
 
