@@ -137,11 +137,11 @@ pub proof fn lemma_well_formed_inner_unmarshals(cluster: Cluster, kind: Kind, sp
     assert(unmarshallable_object(obj, cluster.installed_types));
 }
 
-pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector)
+pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, selector),
+        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
         spec.entails(always(lift_state(every_in_flight_inner_create_is_a_mirror_create(k)))),
         spec.entails(always(lift_state(every_in_flight_inner_update_preserves_identity(k)))),
     ensures spec.entails(always(lift_state(every_mirror_is_bound(k, b)))),
@@ -149,7 +149,7 @@ pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cl
     let kind = inner_kind(k, b);
     let inv = every_mirror_is_bound(k, b);
     cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
-    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, kind, spec_ok, selector);
+    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, kind, spec_ok, k.selector);
     always_to_always_later(spec, lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()));
     always_to_always_later(spec, lift_state(cluster.each_synced_object_in_etcd_is_well_formed(kind)));
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
@@ -175,7 +175,7 @@ pub proof fn lemma_always_every_mirror_is_bound(spec: TempPred<ClusterState>, cl
         int_to_string_view_injectivity();
         assert forall |key: ObjectRef| #[trigger] s_prime.resources().contains_key(key) && key.kind == inner_kind(k, b)
         implies mirror_is_bound(k, key)(s_prime) by {
-            lemma_well_formed_inner_unmarshals(cluster, kind, spec_ok, selector, s_prime, key);
+            lemma_well_formed_inner_unmarshals(cluster, kind, spec_ok, k.selector, s_prime, key);
             let step = choose |step| cluster.next_step(s, s_prime, step);
             match step {
                 Step::APIServerStep(input) => {

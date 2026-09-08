@@ -11,6 +11,7 @@
 use crate::kubernetes_api_objects::error::UnmarshalError;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
+use crate::kubernetes_cluster::proof::api_server::*;
 use crate::reconciler::spec::io::*;
 use crate::kubernetes_cluster::spec::{
     api_server::{state_machine::*, types::*},
@@ -183,6 +184,55 @@ pub proof fn lemma_always_synced_objects_in_reconcile_are_valid(
         lift_state(Self::there_is_the_controller_state(controller_id))
     );
     init_invariant(spec, self.init(), stronger_next, inv);
+}
+
+// A stored object of an installed synced kind never changes the inner cluster its
+// selector names while it stays at its key: for a Field selector that is the
+// installed type's transition validation (the CRD's immutability rule, design
+// section 1.1); for a Name selector the name is the key's. This is what makes
+// "the parent named this binding" a stable fact.
+pub proof fn lemma_api_server_step_preserves_cluster_of(
+    cluster: Cluster, kind: Kind, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector,
+    s: ClusterState, s_prime: ClusterState, msg: Message, key: ObjectRef
+)
+    requires
+        cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
+        cluster.synced_type_is_installed(kind, spec_ok, selector),
+        Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
+        Cluster::each_object_in_etcd_is_weakly_well_formed()(s_prime),
+        s.resources().contains_key(key),
+        s_prime.resources().contains_key(key),
+        key.kind == kind,
+    ensures cluster_of_dynamic(selector, s_prime.resources()[key]) == cluster_of_dynamic(selector, s.resources()[key]),
+{
+    lemma_weakly_well_formed_implies_kinds_match(s);
+    lemma_weakly_well_formed_implies_kinds_match(s_prime);
+    let old_obj = s.resources()[key];
+    let new_obj = s_prime.resources()[key];
+    match selector {
+        ClusterSelector::Name => {
+            assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
+            assert(Cluster::etcd_object_is_weakly_well_formed(key)(s_prime));
+            assert(old_obj.metadata.name == Some(key.name));
+            assert(new_obj.metadata.name == Some(key.name));
+        },
+        ClusterSelector::Field(path) => {
+            if new_obj != old_obj {
+                let name = kind->CustomResourceKind_0;
+                assert(new_obj.kind == kind && old_obj.kind == kind);
+                // Every request that replaces a stored object runs it through
+                // updated_object_validity_check, whose transition rule is the
+                // installed type's; the two deleting requests only stamp a
+                // deletion timestamp and leave the spec alone.
+                if msg.content.is_delete_request() || msg.content.is_get_then_delete_request() {
+                    assert(new_obj.spec == old_obj.spec);
+                } else {
+                    assert(valid_transition(new_obj, old_obj, cluster.installed_types));
+                    assert((cluster.installed_types[name].valid_transition)(new_obj, old_obj));
+                }
+            }
+        },
+    }
 }
 
 // The local state of every ongoing reconcile of a data-driven controller

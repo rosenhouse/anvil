@@ -48,18 +48,18 @@ pub open spec fn builtin_deletes_never_target_mirrors(k: SyncKind, b: Binding) -
     }
 }
 
-pub proof fn lemma_always_builtin_deletes_never_target_mirrors(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector)
+pub proof fn lemma_always_builtin_deletes_never_target_mirrors(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, selector),
+        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
         spec.entails(always(lift_state(every_mirror_is_bound(k, b)))),
     ensures spec.entails(always(lift_state(builtin_deletes_never_target_mirrors(k, b)))),
 {
     let inv = builtin_deletes_never_target_mirrors(k, b);
     cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
     cluster.lemma_always_etcd_objects_have_unique_uids(spec);
-    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, inner_kind(k, b), spec_ok, selector);
+    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, inner_kind(k, b), spec_ok, k.selector);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)

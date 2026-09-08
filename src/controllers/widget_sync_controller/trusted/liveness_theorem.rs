@@ -283,12 +283,15 @@ pub open spec fn snapshot_parent(kind: Kind, cr: DynamicObjectView) -> StringVie
     parent_uid_annotation(unmarshal(kind, cr)->Ok_0)
 }
 
-// No object that names this binding's inner cluster carries the parent uid
-// `parent`, and none ever will.
+// No outer copy of `k` that names this binding's inner cluster carries the parent
+// uid `parent`, and none ever will. A parent that named another binding is absent
+// for this one; the selector field's immutability rule (the installed type's
+// transition validation) is what keeps that stable.
 pub open spec fn parent_absent_forever(k: SyncKind, b: Binding, parent: StringView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& forall |u: int| u >= s.api_server.uid_counter ==> #[trigger] int_to_string_view(u) != parent
-        &&& forall |key: ObjectRef| #[trigger] s.resources().contains_key(key) && s.resources()[key].metadata.uid is Some
+        &&& forall |key: ObjectRef| #[trigger] s.resources().contains_key(key) && key.kind == k.outer_kind
+            && s.resources()[key].metadata.uid is Some
             && cluster_of_dynamic(k.selector, s.resources()[key]) == Some(b.name)
             ==> int_to_string_view(s.resources()[key].metadata.uid->0) != parent
     }

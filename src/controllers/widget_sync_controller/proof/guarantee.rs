@@ -53,11 +53,11 @@ pub open spec fn sync_triggering_crs_are_bound(k: SyncKind, controller_id: int) 
     }
 }
 
-pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector, controller_id: int)
+pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.synced_type_is_installed(k.outer_kind, spec_ok, selector),
+        cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
         cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
     ensures
         spec.entails(always(lift_state(sync_scheduled_crs_are_bound(k, controller_id)))),
@@ -69,7 +69,7 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
     };
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_each_object_in_etcd_is_weakly_well_formed(spec);
-    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, k.outer_kind, spec_ok, selector);
+    cluster.lemma_always_each_synced_object_in_etcd_is_well_formed(spec, k.outer_kind, spec_ok, k.selector);
     cluster.lemma_always_etcd_objects_have_unique_uids(spec);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
@@ -214,17 +214,17 @@ pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: 
 // The sync guarantee.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector, controller_id: int)
+pub proof fn lemma_always_widget_sync_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.synced_type_is_installed(k.outer_kind, spec_ok, selector),
+        cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector),
         cluster.controller_models.contains_pair(controller_id, widget_sync_controller_model(k)),
     ensures spec.entails(always(lift_state(widget_sync_guarantee(k, controller_id)))),
 {
     let inv = widget_sync_guarantee(k, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
-    lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, selector, controller_id);
+    lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, controller_id);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
@@ -474,7 +474,7 @@ pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, s
 // ---------------------------------------------------------------------------
 
 // The body of widget_janitor_guarantee for one message.
-pub open spec fn janitor_request_is_guaranteed(k: SyncKind, msg: Message) -> bool {
+pub open spec fn janitor_request_is_guaranteed(k: SyncKind, b: Binding, msg: Message) -> bool {
     let inner_key = msg.src->Controller_1;
     match msg.content->APIRequest_0 {
         APIRequest::ListRequest(req) => {
@@ -483,24 +483,24 @@ pub open spec fn janitor_request_is_guaranteed(k: SyncKind, msg: Message) -> boo
         },
         APIRequest::DeleteRequest(req) => {
             &&& req.key == inner_key
-            &&& mirror_delete_req(k, req)
+            &&& mirror_delete_req(k, b, req)
         },
         _ => false,
     }
 }
 
-pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, selector: ClusterSelector, controller_id: int)
+pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>, cluster: Cluster, k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int)
     requires
         spec.entails(lift_state(cluster.init())),
         spec.entails(always(lift_action(cluster.next()))),
-        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, selector),
+        cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
         cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
     ensures spec.entails(always(lift_state(widget_janitor_guarantee(k, b, controller_id)))),
 {
     let inv = widget_janitor_guarantee(k, b, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_each_object_in_reconcile_has_consistent_key_and_valid_metadata(spec, controller_id);
-    cluster.lemma_always_synced_objects_in_reconcile_are_valid(spec, inner_kind(k, b), spec_ok, selector, controller_id);
+    cluster.lemma_always_synced_objects_in_reconcile_are_valid(spec, inner_kind(k, b), spec_ok, k.selector, controller_id);
     cluster.lemma_always_objects_in_reconcile_have_kind(spec, inner_kind(k, b), controller_id);
     let stronger_next = |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
@@ -525,9 +525,9 @@ pub proof fn lemma_always_widget_janitor_guarantee(spec: TempPred<ClusterState>,
             &&& #[trigger] s_prime.in_flight().contains(msg)
             &&& msg.content is APIRequest
             &&& msg.src.is_controller_id(controller_id)
-        } implies janitor_request_is_guaranteed(k, msg) by {
+        } implies janitor_request_is_guaranteed(k, b, msg) by {
             if s.in_flight().contains(msg) {
-                assert(janitor_request_is_guaranteed(k, msg));
+                assert(janitor_request_is_guaranteed(k, b, msg));
             } else {
                 match step {
                     Step::ControllerStep(input) => {
@@ -566,7 +566,7 @@ proof fn lemma_janitor_new_request_is_guaranteed(
         !s.in_flight().contains(msg),
         s_prime.in_flight().contains(msg),
         msg.content is APIRequest,
-    ensures janitor_request_is_guaranteed(k, msg),
+    ensures janitor_request_is_guaranteed(k, b, msg),
 {
     unmarshal_of_marshal();
     janitor_reconciler::WidgetJanitorReconcileState::marshal_preserves_integrity();
@@ -607,7 +607,7 @@ proof fn lemma_janitor_new_request_is_guaranteed(
             match req {
                 APIRequest::DeleteRequest(delete_req) => {
                     assert(delete_req.key == inner.object_ref());
-                    assert(is_inner_kind(k, delete_req.key.kind));
+                    assert(delete_req.key.kind == inner_kind(k, b));
                     assert(delete_req.preconditions == Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)));
                     assert(delete_req.preconditions->0.uid == inner.metadata.uid);
                 },

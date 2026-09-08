@@ -49,8 +49,8 @@ pub open spec fn mirror_create_req(k: SyncKind, req: CreateRequest, outer_key: O
 // A Delete of a mirror the janitor's way: with a uid precondition. That such a
 // delete never removes a mirror whose parent exists holds only under the janitor's
 // rely and is part of the janitor's ESR (janitor_deletes_are_sound).
-pub open spec fn mirror_delete_req(k: SyncKind, req: DeleteRequest) -> bool {
-    &&& is_inner_kind(k, req.key.kind)
+pub open spec fn mirror_delete_req(k: SyncKind, b: Binding, req: DeleteRequest) -> bool {
+    &&& req.key.kind == inner_kind(k, b)
     &&& req.preconditions is Some
     &&& req.preconditions->0.uid is Some
 }
@@ -240,7 +240,7 @@ pub open spec fn widget_janitor_guarantee(k: SyncKind, b: Binding, controller_id
                 },
                 APIRequest::DeleteRequest(req) => {
                     &&& req.key == inner_key
-                    &&& mirror_delete_req(k, req)
+                    &&& mirror_delete_req(k, b, req)
                 },
                 _ => false,
             }
