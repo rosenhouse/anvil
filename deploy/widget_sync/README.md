@@ -128,7 +128,22 @@ to:
 | Selector | The object's cluster is | What the CRD must carry |
 |---|---|---|
 | `name` | `metadata.name` | nothing; `metadata.name` is immutable by construction |
-| `field:spec.<path>` (the `field:` prefix may be dropped) | the string at that path | the field, required and a string, guarded by `x-kubernetes-validations: [{rule: "self == oldSelf"}]` on the field, or the equivalent rule `self.<path> == oldSelf.<path>` on `spec` |
+| `field:spec.<path>` (the `field:` prefix may be dropped) | the string at that path | the field, required and a string, and every step of the path required in its parent, guarded by `x-kubernetes-validations: [{rule: "self == oldSelf"}]` on the field itself, or the equivalent rule naming the field on `spec` or on the object that holds it (see below) |
+
+The rule is matched as text, so only these spellings count, on the field, on
+the object holding it, and on `spec` — with `oldSelf` allowed on either side
+and any spacing (`self==oldSelf` is the rule `self  ==  oldSelf` is):
+
+| Where the rule sits | Accepted spellings, for the selector `field:spec.placement.clusterName` |
+|---|---|
+| the field itself | `self == oldSelf`, `oldSelf == self` |
+| the object that holds the field (`spec.placement`) | `self.clusterName == oldSelf.clusterName`, `oldSelf.clusterName == self.clusterName` |
+| `spec` | `self.placement.clusterName == oldSelf.placement.clusterName`, and the same with the sides swapped |
+
+Anything else — a rule that says the same thing another way, a rule with a
+`has()` guard — is refused: recognising it would mean evaluating CEL. A CRD
+whose rule is written differently is not wrong, but this controller will not
+run against it until the rule is spelled one of these ways.
 
 `Widget` uses `field:spec.clusterName`, `Gadget` uses `name` — its own name is
 the cluster, the shape of Cluster API's `Cluster` object. Immutability matters

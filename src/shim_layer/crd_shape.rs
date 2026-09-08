@@ -217,24 +217,51 @@ fn check_selector_field(schema: &JSONSchemaProps, path: &[String]) -> Result<(),
         return Err(format!("has type {}, must be string", type_of(field)));
     }
     let dotted = path.join(".");
-    let on_field = has_rule(field, "self == oldSelf");
-    let on_spec = has_rule(spec, &format!("self.{} == oldSelf.{}", dotted, dotted));
-    if on_field || on_spec {
+    // The rule may sit on the field itself, on the object that holds it, or on
+    // `spec`; on an object it names the field by the path from that object.
+    // `parent` is `spec` for a one-segment path, so the two coincide there.
+    let last = path[path.len() - 1].as_str();
+    let on_field = has_immutability_rule(field, "");
+    let on_parent = has_immutability_rule(parent, last);
+    let on_spec = has_immutability_rule(spec, &dotted);
+    if on_field || on_parent || on_spec {
         Ok(())
     } else {
         Err(format!(
             "must carry the x-kubernetes-validations rule `self == oldSelf` \
-             (or spec the rule `self.{0} == oldSelf.{0}`)",
+             (or spec the rule `self.{0} == oldSelf.{0}`; either side may come \
+             first and the spacing does not matter)",
             dotted
         ))
     }
 }
 
-fn has_rule(schema: &JSONSchemaProps, rule: &str) -> bool {
-    schema
-        .x_kubernetes_validations
-        .as_ref()
-        .is_some_and(|rules| rules.iter().any(|r| r.rule.trim() == rule))
+// Whether `schema` carries an immutability rule for the field at `field_path`
+// relative to it; the empty path is the field itself, whose rule is
+// `self == oldSelf`.
+//
+// A CEL rule is text, and the same rule has several spellings: the two sides
+// may be written either way round and the spacing is free (`self==oldSelf` is
+// the rule that `self  ==  oldSelf` is). Comparing the text as written refused
+// CRDs that are in fact guarded, which matters more than the brittleness of a
+// text comparison suggests: this rule is what the janitor's delete-soundness
+// invariant rests on (design section 1.1), so whether a kind is accepted must
+// not depend on how a person typed it. Everything beyond these spellings is
+// still refused: recognising an arbitrary CEL expression would mean evaluating
+// CEL, which this deliberately does not.
+fn has_immutability_rule(schema: &JSONSchemaProps, field_path: &str) -> bool {
+    let (new, old) = if field_path.is_empty() {
+        ("self".to_string(), "oldSelf".to_string())
+    } else {
+        (format!("self.{}", field_path), format!("oldSelf.{}", field_path))
+    };
+    let accepted = [format!("{}=={}", new, old), format!("{}=={}", old, new)];
+    schema.x_kubernetes_validations.as_ref().is_some_and(|rules| {
+        rules.iter().any(|r| {
+            let written: String = r.rule.chars().filter(|c| !c.is_whitespace()).collect();
+            accepted.contains(&written)
+        })
+    })
 }
 
 /// What `check_crd` can report: the CRD could not be read, or it has the wrong shape.
@@ -399,6 +426,50 @@ mod tests {
             json!([{ "rule": "  self.clusterName == oldSelf.clusterName ", "message": "immutable" }]);
         let crd = good_crd(spec, widget_status());
         assert_eq!(check_shape(&crd, &by_field()), Ok(()));
+    }
+
+    // The same rule, spelled the other ways a person writes it: either side
+    // first, and any spacing. All of them guard the field, so all of them are
+    // accepted, on the field and on the object that holds it.
+    #[test]
+    fn the_rule_is_recognised_however_it_is_spelled() {
+        for rule in ["self == oldSelf", "oldSelf == self", "self==oldSelf", "oldSelf\t==\n self"] {
+            let mut spec = with_cluster_name(old_widget_spec(), false);
+            spec["properties"]["clusterName"]["x-kubernetes-validations"] = json!([{ "rule": rule }]);
+            assert_eq!(check_shape(&good_crd(spec, widget_status()), &by_field()), Ok(()), "{:?}", rule);
+        }
+        for rule in [
+            "self.clusterName == oldSelf.clusterName",
+            "oldSelf.clusterName == self.clusterName",
+            "self.clusterName==oldSelf.clusterName",
+        ] {
+            let mut spec = with_cluster_name(old_widget_spec(), false);
+            spec["x-kubernetes-validations"] = json!([{ "rule": rule }]);
+            assert_eq!(check_shape(&good_crd(spec, widget_status()), &by_field()), Ok(()), "{:?}", rule);
+        }
+    }
+
+    // For a nested field the rule may also sit on the object that holds it,
+    // where it names the field by that object's path, not spec's.
+    #[test]
+    fn the_rule_may_sit_on_the_field_s_own_object() {
+        let kind: KindConfig = "anvil.dev/v1/Widget:field:spec.placement.clusterName".parse().unwrap();
+        let mut spec = old_widget_spec();
+        spec["properties"]["placement"] = json!({
+            "type": "object",
+            "required": ["clusterName"],
+            "x-kubernetes-validations": [{ "rule": "oldSelf.clusterName == self.clusterName" }],
+            "properties": { "clusterName": { "type": "string" } }
+        });
+        spec["required"] = json!(["count", "placement"]);
+        assert_eq!(check_shape(&good_crd(spec.clone(), widget_status()), &kind), Ok(()));
+
+        // The path is the one from that object: spec's spelling on the parent
+        // guards nothing here and is refused.
+        spec["properties"]["placement"]["x-kubernetes-validations"] =
+            json!([{ "rule": "self.placement.clusterName == oldSelf.placement.clusterName" }]);
+        let errors = check_shape(&good_crd(spec, widget_status()), &kind).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
     }
 
     #[test]
