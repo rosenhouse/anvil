@@ -1,6 +1,8 @@
 # The widget echo controller, deployed in the inner (remote) cluster as the
-# demo's stand-in for a real Widget implementation. It writes Widget status
-# (observedGeneration, ready, observedCount, a Ready condition) and nothing else.
+# demo's stand-in for a real implementation of the demo kinds. For each kind
+# it is given it writes status (observedGeneration, a Ready condition, and the
+# kind's own echo of its spec) and nothing else. Adding a kind here means one
+# more --kind argument and its two RBAC rules; the CRD must be installed first.
 # No probes: the binary exposes no health endpoint.
 apiVersion: v1
 kind: Namespace
@@ -28,6 +30,7 @@ rules:
       - anvil.dev
     resources:
       - widgets
+      - gadgets
     verbs:
       - get
       - list
@@ -36,6 +39,7 @@ rules:
       - anvil.dev
     resources:
       - widgets/status
+      - gadgets/status
     verbs:
       - patch
 ---
@@ -85,6 +89,12 @@ spec:
         - image: local/widget-echo-controller:v0.1.0
           imagePullPolicy: IfNotPresent
           name: controller
+          # The image's entrypoint is `controller run`; these follow it.
+          args:
+            - --kind
+            - anvil.dev/v1/Widget
+            - --kind
+            - anvil.dev/v1/Gadget
           env:
             # Seconds the echo controller waits before writing status; raise it in a
             # live demo to watch the outer copy's Synced condition pass through

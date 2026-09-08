@@ -64,9 +64,11 @@ done
 kind load docker-image local/widget-sync-controller:v0.1.0 --name "$outer_cluster"
 kind load docker-image local/widget-echo-controller:v0.1.0 --name "$inner_cluster"
 
-# The Widget CRD is installed in both clusters (same kind on both sides).
-kubectl --context "$outer_ctx" create -f "$manifests/crd.yaml"
-kubectl --context "$inner_ctx" create -f "$manifests/crd.yaml"
+# The demo CRDs are installed in both clusters (same kinds on both sides).
+for crd in crd.yaml crd_gadget.yaml; do
+    kubectl --context "$outer_ctx" create -f "$manifests/$crd"
+    kubectl --context "$inner_ctx" create -f "$manifests/$crd"
+done
 
 # Inner cluster: the echo controller, and the service account the sync controller uses.
 kubectl --context "$inner_ctx" apply -f "$manifests/echo_inner.yaml"
@@ -137,3 +139,5 @@ echo "Try:"
 echo "  kubectl --context ${outer_ctx} apply -f ${manifests}/widget.yaml"
 echo "  kubectl --context ${outer_ctx} get widget demo -o yaml"
 echo "  kubectl --context ${inner_ctx} get widget demo -o yaml"
+echo "The echo controller also serves Gadgets (${manifests}/gadget.yaml); the sync"
+echo "controller takes them on with the kinds work of the fan-out design."
