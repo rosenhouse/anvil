@@ -5,5 +5,7 @@ kind: Widget
 metadata:
   name: demo
 spec:
+  # The binding whose cluster receives the mirror; immutable once set.
+  clusterName: inner
   count: 3
   message: hello from the outer cluster

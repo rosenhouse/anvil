@@ -21,6 +21,12 @@ spec:
         properties:
           spec:
             properties:
+              clusterName:
+                description: The name of the binding whose cluster receives the mirror. Immutable.
+                type: string
+                x-kubernetes-validations:
+                - message: clusterName is immutable
+                  rule: self == oldSelf
               count:
                 format: int32
                 type: integer
@@ -28,6 +34,7 @@ spec:
                 nullable: true
                 type: string
             required:
+            - clusterName
             - count
             type: object
           status:

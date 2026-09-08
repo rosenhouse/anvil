@@ -172,6 +172,7 @@ impl VStatefulSetSpec {
 // controller. The same kind is installed in both clusters: the outer copy is
 // reconciled by the widget sync controller, the inner copy by whatever
 // implementation the inner cluster runs (in the demo, the widget echo controller).
+// `clusterName` selects the cluster (the kind's selector is `field:spec.clusterName`);
 // `count` and `message` are opaque payload as far as the sync controller is concerned.
 #[derive(
     kube::CustomResource,
@@ -187,6 +188,12 @@ impl VStatefulSetSpec {
 #[kube(shortname = "wdg", namespaced)]
 #[kube(status = "WidgetStatus")]
 pub struct WidgetSpec {
+    /// The name of the binding whose cluster receives the mirror. Immutable.
+    // The immutability is the CEL rule `self == oldSelf` on the field in
+    // deploy/widget_sync/crd.yaml; kube-derive 0.91 cannot express it, so the
+    // YAML is checked against the export by crd_manifest_tests below.
+    #[serde(rename = "clusterName")]
+    pub cluster_name: String,
     pub count: i32,
     pub message: Option<String>,
 }
@@ -334,4 +341,65 @@ pub struct RabbitmqClusterPersistenceSpec {
     pub storage_class_name: String,
     #[serde(default = "default_storage")]
     pub storage: k8s_openapi::apimachinery::pkg::api::resource::Quantity,
+}
+
+// The CRD manifests under deploy/widget_sync are the derive's export plus what
+// kube-derive 0.91 cannot express: the CEL immutability rule on the selector
+// field. These tests keep the two from drifting: the YAML, with every
+// x-kubernetes-validations block removed, must equal the export. On a
+// mismatch the message carries the export, to paste into the YAML and then
+// put the rule back.
+#[cfg(test)]
+mod crd_manifest_tests {
+    use kube::CustomResourceExt;
+    use serde_yaml::Value;
+
+    fn strip_validations(value: &mut Value) {
+        match value {
+            Value::Mapping(map) => {
+                map.remove(Value::String("x-kubernetes-validations".to_string()));
+                for (_, v) in map.iter_mut() {
+                    strip_validations(v);
+                }
+            }
+            Value::Sequence(seq) => seq.iter_mut().for_each(strip_validations),
+            _ => {}
+        }
+    }
+
+    fn assert_manifest_matches_export(
+        path: &str,
+        manifest: &str,
+        crd: &k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
+    ) {
+        let mut in_manifest: Value = serde_yaml::from_str(manifest).unwrap();
+        strip_validations(&mut in_manifest);
+        let exported = serde_yaml::to_value(crd).unwrap();
+        assert!(
+            in_manifest == exported,
+            "{} differs from the derive's export (x-kubernetes-validations ignored); \
+             the export is:\n{}",
+            path,
+            serde_yaml::to_string(crd).unwrap()
+        );
+    }
+
+    #[test]
+    fn widget_crd_yaml_matches_the_derive() {
+        assert_manifest_matches_export(
+            "deploy/widget_sync/crd.yaml",
+            include_str!("../deploy/widget_sync/crd.yaml"),
+            &super::Widget::crd(),
+        );
+    }
+
+    // The rule the design requires on the selector field (section 1.1) is in
+    // the YAML by hand; make sure it stays.
+    #[test]
+    fn widget_crd_yaml_has_the_immutability_rule() {
+        let manifest: Value = serde_yaml::from_str(include_str!("../deploy/widget_sync/crd.yaml")).unwrap();
+        let rules = &manifest["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["clusterName"]["x-kubernetes-validations"];
+        assert_eq!(rules[0]["rule"], Value::String("self == oldSelf".to_string()), "{:?}", rules);
+    }
 }

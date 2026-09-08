@@ -573,6 +573,15 @@ mod tests {
         );
     }
 
+    // The demo manifests must pass with the selectors the demo configures.
+    #[test]
+    fn the_demo_crd_manifests_have_the_shape() {
+        let widget: CustomResourceDefinition =
+            serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd.yaml")).unwrap();
+        assert_eq!(check_shape(&widget, &by_field()), Ok(()));
+        assert_eq!(check_shape(&widget, &by_name()), Ok(()));
+    }
+
     #[test]
     fn every_failing_row_is_reported() {
         let crd = crd("Cluster", false, old_widget_spec(), json!({ "type": "object", "properties": {} }));
