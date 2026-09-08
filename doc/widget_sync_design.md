@@ -477,7 +477,32 @@ holds one client per cluster, routes each request by the tag of its
 `ApiResource`, tags the objects it returns, and derives a controller's primary
 watch cluster from its wrapper type. Two controllers can run in one process.
 
-### 5.4 Not done
+### 5.4 Footprint
+
+Against upstream, `src/kubernetes_cluster` differs in 19 files, 4964 lines
+added and 13 removed. 4189 of the added lines are the two-store model and its
+refinement (`spec/two_cluster.rs` and the five files of `proof/two_cluster/`),
+423 are `proof/api_server.rs` (the `keeps_identity` family: what each request
+leaves alone, and the uid facts: the store only grows by fresh uids), 29 are
+`proof/temporal_rules.rs` (two rules of temporal logic that
+`verus_temporal_logic` lacks), 112 lines of `spec/api_server/state_machine.rs`
+are the generation rules and the JSON-patch handlers of 5.1 and 5.2, and 96 of
+`spec/message.rs` are the Patch plumbing. The remaining proof files gain the
+`Patch` and `PatchStatus` arms of their case splits. One invariant is
+strengthened: `etcd_object_is_well_formed` now records that a custom resource
+carries a generation and a built-in kind does not, which the no-op rule for an
+update carrying the stored object needs. Three framework lemmas gained a
+budget with the new request arms: `lemma_xor_preserves_during_api_server_step`
+(rlimit 100, spun off), `lemma_always_every_in_flight_msg_has_no_replicas_and_has_unique_id`
+(rlimit 50) and `lemma_always_each_object_in_etcd_has_at_most_one_controller_owner`
+(rlimit 200, spun off, its inductive step restated per key). In the four
+existing controllers the same arms added eight budgets (`rlimit(100)` on two
+VReplicaSet and two VDeployment lemmas and on two VStatefulSet lemmas,
+`rlimit(400)` on two VStatefulSet store invariants) and raised one from 20 to
+60 (`lemma_from_after_send_list_vrs_req_to_receive_list_vrs_resp_with_nv`).
+The Widget pair's own proofs carry no budget annotation.
+
+### 5.5 Not done
 
 An owner-less transactional update (`GetThenUpdate` without the hard-coded
 owner-reference check) would let a verified inner implementation write its
@@ -502,7 +527,11 @@ status without an owner reference, which composing against one requires.
 | Model reconcilers | `widget_sync_controller/model/` |
 | Exec reconcilers (proved to conform to the model) | `widget_sync_controller/exec/` |
 | Guarantees, store and message invariants | `widget_sync_controller/proof/{guarantee,helper_invariants,janitor_invariants,sync_invariants}.rs` |
-| Termination, R3, R1, R2, R3s | `widget_sync_controller/proof/liveness/` |
+| Assumptions, invariant bundles, stable specs, phase I, the sync reconciler's layers | `widget_sync_controller/proof/liveness/spec.rs` |
+| One step of the cluster at the mirror key and the outer copy | `widget_sync_controller/proof/liveness/api_actions.rs` |
+| Termination of both reconcilers | `widget_sync_controller/proof/liveness/terminate.rs` |
+| R1, R2, R3, R3s | `widget_sync_controller/proof/liveness/{sync_spec_proof,sync_status_proof,janitor_proof,cleanup_proof}.rs` |
+| Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
 | The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
 | Two-store model | `kubernetes_cluster/spec/two_cluster.rs` |
