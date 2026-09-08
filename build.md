@@ -51,6 +51,36 @@ cargo verus focus --lib -- --verify-module tla_demo
 
 Pass extra Verus flags after `--`. Replace `--lib` with `--bin <name>` to verify a specific binary's own source.
 
+### Working on the proofs
+
+- Several `--verify-only-module` flags can be combined in one `focus` run,
+  for example a proof file plus everything that imports it. Add
+  `--multiple-errors 8` to see more than the first failure.
+- `cargo verus focus` decides freshness by source checksums and does not
+  record the verifier flags of the previous run. After editing a proof and
+  changing the module set, delete the crate's fingerprint under the target
+  directory before re-running, or the previous output is replayed:
+  `find target -path '*fingerprint/verifiable-controllers-*' -exec rm -rf {} +`.
+  Separate `CARGO_TARGET_DIR`s for build-only, targeted and full runs avoid
+  lock contention and rebuilds.
+- The crate must also build with plain `cargo build --lib` (CI checks it,
+  and `cargo test --lib` runs the executable-model and wrapper unit tests on
+  that build). Spec and proof items are erased there, so import them with
+  glob imports, never by name.
+- A full `cargo verus verify --lib` takes about an hour on four cores; run
+  the touched modules first and the full run last.
+- Verus habits that mattered in this repository: two `choose` expressions
+  over extensionally equal predicates with different free variables are not
+  provably equal; to instantiate a `tla_forall`, restate its closure
+  literally and assert the instance; a struct literal in `ensures` or in an
+  `if` condition needs parentheses; `#[trigger]` is needed on `choose` and
+  `exists` bodies and arithmetic is not allowed in a trigger; distinct string
+  literals need `reveal_strlit`; a lemma that exceeds its budget is better
+  split than given an `rlimit`.
+- `tools/check-widget-exec-hygiene.sh` (run by CI) pins the Widget pair's
+  trusted exec surface; a new `external_body` under that controller must be
+  added to the design doc and to the script deliberately.
+
 ## Build and test
 
 ### Build a controller binary (fast, no verification)
