@@ -660,9 +660,9 @@ proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: i
         cluster.registry.contains_pair(vd_id(), vd_controller_spec(vd_id())),
         cluster.registry.contains_pair(vsts_id(), vsts_controller_spec(vsts_id())),
         cluster.registry.contains_pair(rmq_id(), rmq_controller_spec(rmq_id())),
-        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids)),
-        janitors_registered(k, k.bindings, spec_ok, cluster, ids),
-        (widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
+        janitors_registered(k, spec_ok, cluster, ids),
+        (widget_sync_controller_spec(k, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id),
         well_formed(cluster, vrs_core_set(vrs_id())),
         well_formed(cluster, vd_core_set(vd_id())),
         well_formed(cluster, vsts_core_set(vsts_id())),
@@ -677,7 +677,7 @@ proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: i
     let spec = cluster_model(cluster);
 
     vrs_vd_vsts_rmq_core_holds(cluster);
-    widget_fanout_core_holds(k, k.bindings, spec_ok, cluster, ids, sync_id);
+    widget_fanout_core_holds(k, spec_ok, cluster, ids, sync_id);
 
     assert(compatible(cluster, s1, s2)) by {
         let g_fn_s1 = |c: int| if s1.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() };
@@ -763,7 +763,7 @@ proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: i
                 } else {
                     lemma_janitor_id_is_a_binding(k.bindings, k.bindings, ids, sync_id, pair.1);
                     let b2 = binding_at(k.bindings, ids, pair.1);
-                    assert(cluster.registry.contains_pair(pair.1, widget_janitor_controller_spec(k, b2, k.bindings, spec_ok, pair.1)));
+                    assert(cluster.registry.contains_pair(pair.1, widget_janitor_controller_spec(k, b2, spec_ok, pair.1)));
                     assert(g_fn_s2(pair.1) == always(lift_state(widget_janitor_guarantee(k, b2, pair.1))));
                     widget_janitor_guarantee_implies_relies(k, b2, pair.1);
                     entails_preserved_by_always(lift_state(widget_janitor_guarantee(k, b2, pair.1)), lift_state(vrs_rely(pair.1)));
@@ -819,11 +819,11 @@ pub proof fn core_holds_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_i
         assert(inner_kind(k, b) == Kind::CustomResourceKind(remote_kind_name(k.name, b)));
     }
     assert(inner.controller_models.contains_pair(sync_id, widget_sync_controller_model(k)));
-    assert(cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids)));
-    assert(janitors_registered(k, k.bindings, spec_ok, cluster, ids)) by {
+    assert(cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)));
+    assert(janitors_registered(k, spec_ok, cluster, ids)) by {
         assert forall |b: Binding| #[trigger] k.bindings.contains(b) implies {
-            &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, k.bindings, spec_ok, ids[b]))
-            &&& (widget_janitor_controller_spec(k, b, k.bindings, spec_ok, ids[b]).membership)(inner, ids[b])
+            &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, spec_ok, ids[b]))
+            &&& (widget_janitor_controller_spec(k, b, spec_ok, ids[b]).membership)(inner, ids[b])
         } by {
             lemma_binding_id_is_a_member(k.bindings, k.bindings, ids, sync_id, b);
             assert(ids[b] != sync_id);
@@ -831,9 +831,9 @@ pub proof fn core_holds_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_i
             assert(inner.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector));
         }
     }
-    assert((widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids).membership)(inner, sync_id)) by {
+    assert((widget_sync_controller_spec(k, spec_ok, sync_id, ids).membership)(inner, sync_id)) by {
         assert forall |b: Binding| #[trigger] k.bindings.contains(b)
-            implies sync_membership(k, b, k.bindings, spec_ok, inner, sync_id, ids[b]) by {
+            implies sync_membership(k, b, spec_ok, inner, sync_id, ids[b]) by {
             lemma_binding_id_is_a_member(k.bindings, k.bindings, ids, sync_id, b);
             assert(ids[b] != sync_id);
             assert(inner.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector));

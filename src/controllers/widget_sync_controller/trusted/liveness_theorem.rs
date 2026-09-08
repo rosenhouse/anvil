@@ -247,21 +247,21 @@ pub open spec fn bound_parent_absent(k: SyncKind, b: Binding, key: ObjectRef, pa
 // finalizers to such an object; the API server rejects that anyway), after which
 // the API server removes the object. An axiom in this version; an inner
 // implementation verified in Anvil would discharge it in its own guarantee.
-pub open spec fn is_bound_inner_kind(k: SyncKind, bs: Set<Binding>, kind: Kind) -> bool {
-    exists |b: Binding| bs.contains(b) && kind == #[trigger] inner_kind(k, b)
+pub open spec fn is_bound_inner_kind(k: SyncKind, kind: Kind) -> bool {
+    exists |b: Binding| k.bindings.contains(b) && kind == #[trigger] inner_kind(k, b)
 }
 
-pub open spec fn inner_terminating_object(k: SyncKind, bs: Set<Binding>, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn inner_terminating_object(k: SyncKind, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& is_bound_inner_kind(k, bs, key.kind)
+        &&& is_bound_inner_kind(k, key.kind)
         &&& s.resources().contains_key(key)
         &&& s.resources()[key].metadata.uid == Some(uid)
         &&& s.resources()[key].metadata.deletion_timestamp is Some
     }
 }
 
-pub open spec fn inner_releases_terminating_objects(k: SyncKind, bs: Set<Binding>) -> TempPred<ClusterState> {
-    tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, bs, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
+pub open spec fn inner_releases_terminating_objects(k: SyncKind) -> TempPred<ClusterState> {
+    tla_forall(|i: (ObjectRef, Uid)| lift_state(inner_terminating_object(k, i.0, i.1)).leads_to(lift_state(object_is_gone(i.0, i.1))))
 }
 
 // The janitor's Deletes are sound: a Delete the janitor of `(k, b)` has in flight

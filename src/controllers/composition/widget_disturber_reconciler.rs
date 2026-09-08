@@ -90,8 +90,8 @@ pub proof fn widget_disturber_singleton_core_holds(k: SyncKind, b: Binding, spec
 
 pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, janitor_id: int, sync_id: int) -> CoreSet {
     union_coreset(
-        widget_janitor_core_set(k, b, Set::empty().insert(b), spec_ok, janitor_id),
-        widget_sync_core_set(k, Set::empty().insert(b), spec_ok, sync_id, Map::empty().insert(b, janitor_id)),
+        widget_janitor_core_set(k, b, spec_ok, janitor_id),
+        widget_sync_core_set(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id)),
         true_pred())
 }
 
@@ -103,14 +103,15 @@ pub open spec fn widget_disturbed_core_set(k: SyncKind, b: Binding, spec_ok: spe
 // and its guarantee implies both members' relies on it.
 pub proof fn widget_pair_with_disturber_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, janitor_id: int, sync_id: int, disturber_id: int)
     requires
-        cluster.registry.contains_pair(janitor_id, widget_janitor_controller_spec(k, b, Set::empty().insert(b), spec_ok, janitor_id)),
-        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, Set::empty().insert(b), spec_ok, sync_id, Map::empty().insert(b, janitor_id))),
+        k.bindings == Set::<Binding>::empty().insert(b),
+        cluster.registry.contains_pair(janitor_id, widget_janitor_controller_spec(k, b, spec_ok, janitor_id)),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id))),
         cluster.registry.contains_pair(disturber_id, widget_disturber_controller_spec(k, b, spec_ok, disturber_id)),
         janitor_id != sync_id,
         janitor_id != disturber_id,
         sync_id != disturber_id,
-        well_formed(cluster, widget_janitor_core_set(k, b, Set::empty().insert(b), spec_ok, janitor_id)),
-        well_formed(cluster, widget_sync_core_set(k, Set::empty().insert(b), spec_ok, sync_id, Map::empty().insert(b, janitor_id))),
+        well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, janitor_id)),
+        well_formed(cluster, widget_sync_core_set(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id))),
         well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, disturber_id)),
     ensures
         well_formed(cluster, widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
@@ -191,8 +192,8 @@ pub open spec fn widget_disturbed_core_cluster_for(k: SyncKind, b: Binding, spec
     CoreCluster {
         cluster: widget_disturbed_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
         registry: Map::empty()
-            .insert(janitor_id, widget_janitor_controller_spec(k, b, Set::empty().insert(b), spec_ok, janitor_id))
-            .insert(sync_id, widget_sync_controller_spec(k, Set::empty().insert(b), spec_ok, sync_id, Map::empty().insert(b, janitor_id)))
+            .insert(janitor_id, widget_janitor_controller_spec(k, b, spec_ok, janitor_id))
+            .insert(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id)))
             .insert(disturber_id, widget_disturber_controller_spec(k, b, spec_ok, disturber_id)),
     }
 }
@@ -228,11 +229,11 @@ pub proof fn widget_disturbed_core_holds_for(k: SyncKind, b: Binding, spec_ok: s
             assert(x == b && y == b);
         }
     }
-    assert(well_formed(cluster, widget_janitor_core_set(k, b, bs, spec_ok, janitor_id)));
+    assert(well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, janitor_id)));
     assert(well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, disturber_id)));
-    assert(well_formed(cluster, widget_sync_core_set(k, bs, spec_ok, sync_id, ids))) by {
+    assert(well_formed(cluster, widget_sync_core_set(k, spec_ok, sync_id, ids))) by {
         assert forall |b2: Binding| #[trigger] bs.contains(b2)
-            implies sync_membership(k, b2, bs, spec_ok, inner, sync_id, ids[b2]) by {
+            implies sync_membership(k, b2, spec_ok, inner, sync_id, ids[b2]) by {
             assert(b2 == b);
         }
     }

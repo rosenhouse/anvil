@@ -39,15 +39,15 @@ verus! {
 // without a deletion timestamp: a Delete of the mirror key misses it by uid (the
 // premise), a transactional delete skips an object without owner references, and
 // no other request removes an object or stamps it.
-proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, msg: Message, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
         Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
         cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s_prime),
@@ -55,7 +55,7 @@ proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, bs: Set<
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, bs, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -63,7 +63,7 @@ proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, bs: Set<
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s),
+        mirror_is_ours(k, b, spec_ok, outer)(s),
     ensures
         s_prime.resources().contains_key(inner_key(k, outer)),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
@@ -152,15 +152,15 @@ proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, bs: Set<
 }
 
 // The store facts a step of the API server keeps for our mirror.
-pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, msg: Message, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         cluster.next_step(s, s_prime, Step::APIServerStep(Some(msg))),
         Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
         cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s_prime),
@@ -168,7 +168,7 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, bs: Set<B
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, bs, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -176,9 +176,9 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, bs: Set<B
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s),
+        mirror_is_ours(k, b, spec_ok, outer)(s),
     ensures
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, spec_ok, outer)(s_prime),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
         s_prime.resources()[inner_key(k, outer)].metadata.generation == s.resources()[inner_key(k, outer)].metadata.generation
             || s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
@@ -202,7 +202,7 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, bs: Set<B
     assert(s.resources()[key].metadata.uid is Some);
     assert(outer.metadata.uid is Some);
     // Step 1: the object is still there, with its uid, and no deletion timestamp appeared.
-    lemma_ours_kept_after_api_server_step(k, b, bs, spec_ok, cluster, controller_id, janitor_id, s, s_prime, msg, outer);
+    lemma_ours_kept_after_api_server_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, msg, outer);
 
     // Step 2: identity is kept.
     assert(snapshot_is_mirror(inner_kind(k, b), cr));
@@ -233,15 +233,15 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, bs: Set<B
 }
 
 // Any step of the cluster keeps our mirror.
-pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         cluster.next()(s, s_prime),
         Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
         cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s_prime),
@@ -249,7 +249,7 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, sp
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, bs, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -257,9 +257,9 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, sp
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s),
+        mirror_is_ours(k, b, spec_ok, outer)(s),
     ensures
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, spec_ok, outer)(s_prime),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
         s_prime.resources()[inner_key(k, outer)].metadata.generation == s.resources()[inner_key(k, outer)].metadata.generation
             || s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
@@ -267,7 +267,7 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, sp
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
         Step::APIServerStep(input) => {
-            lemma_ours_after_api_server_step(k, b, bs, spec_ok, cluster, controller_id, janitor_id, s, s_prime, input->0, outer);
+            lemma_ours_after_api_server_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, input->0, outer);
         },
         _ => {
             assert(s_prime.api_server == s.api_server);
@@ -279,19 +279,19 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, sp
 // The mirror key after one step: our mirror stays ours; an absent mirror stays
 // absent or becomes ours (only the sync reconciler's current reconcile creates
 // one); an existing object is never replaced by another.
-pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, bs, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
+        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
     ensures
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s) ==> mirror_is_ours(k, b, bs, spec_ok, outer)(s_prime),
-        mirror_absent(k, b, bs, spec_ok, outer)(s) ==> mirror_absent(k, b, bs, spec_ok, outer)(s_prime) || mirror_is_ours(k, b, bs, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, spec_ok, outer)(s) ==> mirror_is_ours(k, b, spec_ok, outer)(s_prime),
+        mirror_absent(k, b, spec_ok, outer)(s) ==> mirror_absent(k, b, spec_ok, outer)(s_prime) || mirror_is_ours(k, b, spec_ok, outer)(s_prime),
         s.resources().contains_key(inner_key(k, outer)) && s_prime.resources().contains_key(inner_key(k, outer))
             ==> s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
 {
@@ -300,8 +300,8 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, bs: Set<Bindin
     unmarshal_of_marshal();
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    if mirror_is_ours(k, b, bs, spec_ok, outer)(s) {
-        lemma_ours_after_step(k, b, bs, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
+    if mirror_is_ours(k, b, spec_ok, outer)(s) {
+        lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     }
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
@@ -372,7 +372,7 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, bs: Set<Bindin
                                     assert(created.metadata.labels == make_inner(k, cr_outer).metadata.labels);
                                     assert(created.metadata.annotations == make_inner(k, cr_outer).metadata.annotations);
                                     assert(is_mirror_of(created_inner, outer));
-                                    assert(mirror_is_ours(k, b, bs, spec_ok, outer)(s_prime));
+                                    assert(mirror_is_ours(k, b, spec_ok, outer)(s_prime));
                                 } else if id == janitor_id {
                                     assert(janitor_request_is_guaranteed(k, b, msg));
                                     assert(false);
@@ -414,22 +414,22 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, bs: Set<Bindin
 // spec_synced is stable once reached.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_spec_synced_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_spec_synced_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, bs, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
+        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
         spec_synced(k, outer)(s),
     ensures spec_synced(k, outer)(s_prime),
 {
     let ikey = inner_key(k, outer);
-    assert(mirror_is_ours(k, b, bs, spec_ok, outer)(s));
-    lemma_ours_after_step(k, b, bs, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
+    assert(mirror_is_ours(k, b, spec_ok, outer)(s));
+    lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
         Step::APIServerStep(input) => {
@@ -481,22 +481,22 @@ pub proof fn lemma_spec_synced_after_step(k: SyncKind, b: Binding, bs: Set<Bindi
 }
 
 // While our mirror is there, its spec changes only by a write of the outer spec.
-pub proof fn lemma_spec_change_means_synced(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_spec_change_means_synced(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
     cluster: Cluster, controller_id: int, janitor_id: int, s: ClusterState, s_prime: ClusterState, outer: SyncedObjectView
 )
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         outer.kind == k.outer_kind,
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
-        sync_membership(k, b, bs, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, bs, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
-        mirror_is_ours(k, b, bs, spec_ok, outer)(s),
+        sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
+        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        mirror_is_ours(k, b, spec_ok, outer)(s),
         s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
     ensures spec_synced(k, outer)(s_prime),
 {
     let ikey = inner_key(k, outer);
-    lemma_ours_after_step(k, b, bs, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
+    lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
         Step::APIServerStep(input) => {
@@ -539,12 +539,12 @@ pub proof fn lemma_spec_change_means_synced(k: SyncKind, b: Binding, bs: Set<Bin
 // Stability of the object-level facts.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_gone_is_stable(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, key: ObjectRef, uid: Uid, s: ClusterState, s_prime: ClusterState)
+pub proof fn lemma_gone_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, key: ObjectRef, uid: Uid, s: ClusterState, s_prime: ClusterState)
     requires
-        bs.contains(b),
-        gone(k, b, bs, spec_ok, key, uid)(s),
+        k.bindings.contains(b),
+        gone(k, b, spec_ok, key, uid)(s),
         store_only_grows_by_fresh_uids(s, s_prime),
-    ensures gone(k, b, bs, spec_ok, key, uid)(s_prime),
+    ensures gone(k, b, spec_ok, key, uid)(s_prime),
 {
     if s_prime.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == Some(uid) {
         if s.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == s.resources()[key].metadata.uid {
@@ -557,9 +557,9 @@ pub proof fn lemma_gone_is_stable(k: SyncKind, b: Binding, bs: Set<Binding>, spe
 }
 
 // One step of the cluster keeps the mirror object as it is, or removes it.
-pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, s: ClusterState, s_prime: ClusterState, key: ObjectRef, parent_uid: Uid, uid: Uid)
+pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, s: ClusterState, s_prime: ClusterState, key: ObjectRef, parent_uid: Uid, uid: Uid)
     requires
-        bs.contains(b),
+        k.bindings.contains(b),
         cluster.next()(s, s_prime),
         cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector),
         Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
@@ -568,7 +568,7 @@ pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, bs: Set<Bin
         every_mirror_is_bound(k, b)(s),
         every_in_flight_inner_update_preserves_identity(k)(s),
         mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s),
-    ensures present_or_gone(k, b, bs, spec_ok, key, parent_uid, uid)(s_prime),
+    ensures present_or_gone(k, b, spec_ok, key, parent_uid, uid)(s_prime),
 {
     let cr = s.resources()[key];
     let inner = unmarshal(inner_kind(k, b), cr)->Ok_0;
@@ -597,7 +597,7 @@ pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, bs: Set<Bin
                 assert(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s_prime));
             } else {
                 assert(uid < s.api_server.uid_counter);
-                assert(gone(k, b, bs, spec_ok, key, uid)(s_prime));
+                assert(gone(k, b, spec_ok, key, uid)(s_prime));
             }
         },
         _ => {

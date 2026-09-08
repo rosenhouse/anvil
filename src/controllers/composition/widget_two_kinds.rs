@@ -193,8 +193,8 @@ pub open spec fn widget_ids_of(k: SyncKind, ids: Map<Binding, int>, sync_id: int
 proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int)
     requires
         ids_ok(k.bindings, ids, sync_id),
-        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids)),
-        janitors_registered(k, k.bindings, spec_ok, cluster, ids),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
+        janitors_registered(k, spec_ok, cluster, ids),
         widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(id),
     ensures
         id == sync_id ==> cluster.registry[id].safety_guarantee == always(lift_state(widget_sync_guarantee(k, id))),
@@ -215,8 +215,8 @@ proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cl
 proof fn lemma_member_rely(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int, id: int, other: int)
     requires
         ids_ok(k.bindings, ids, sync_id),
-        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids)),
-        janitors_registered(k, k.bindings, spec_ok, cluster, ids),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
+        janitors_registered(k, spec_ok, cluster, ids),
         widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(id),
         !widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(other),
     ensures
@@ -252,12 +252,12 @@ pub proof fn widget_two_kind_core_holds(
         ids_ok(k1.bindings, ids1, sync1),
         ids_ok(k2.bindings, ids2, sync2),
         widget_ids_of(k1, ids1, sync1).disjoint(widget_ids_of(k2, ids2, sync2)),
-        cluster.registry.contains_pair(sync1, widget_sync_controller_spec(k1, k1.bindings, spec_ok1, sync1, ids1)),
-        janitors_registered(k1, k1.bindings, spec_ok1, cluster, ids1),
-        (widget_sync_controller_spec(k1, k1.bindings, spec_ok1, sync1, ids1).membership)(cluster.cluster, sync1),
-        cluster.registry.contains_pair(sync2, widget_sync_controller_spec(k2, k2.bindings, spec_ok2, sync2, ids2)),
-        janitors_registered(k2, k2.bindings, spec_ok2, cluster, ids2),
-        (widget_sync_controller_spec(k2, k2.bindings, spec_ok2, sync2, ids2).membership)(cluster.cluster, sync2),
+        cluster.registry.contains_pair(sync1, widget_sync_controller_spec(k1, spec_ok1, sync1, ids1)),
+        janitors_registered(k1, spec_ok1, cluster, ids1),
+        (widget_sync_controller_spec(k1, spec_ok1, sync1, ids1).membership)(cluster.cluster, sync1),
+        cluster.registry.contains_pair(sync2, widget_sync_controller_spec(k2, spec_ok2, sync2, ids2)),
+        janitors_registered(k2, spec_ok2, cluster, ids2),
+        (widget_sync_controller_spec(k2, spec_ok2, sync2, ids2).membership)(cluster.cluster, sync2),
     ensures
         well_formed(cluster, union_coreset(
             widget_core_set_for(k1, spec_ok1, sync1, ids1),
@@ -271,8 +271,8 @@ pub proof fn widget_two_kind_core_holds(
     let s2 = widget_core_set_for(k2, spec_ok2, sync2, ids2);
     let spec = cluster_model(cluster);
 
-    widget_fanout_core_holds(k1, k1.bindings, spec_ok1, cluster, ids1, sync1);
-    widget_fanout_core_holds(k2, k2.bindings, spec_ok2, cluster, ids2, sync2);
+    widget_fanout_core_holds(k1, spec_ok1, cluster, ids1, sync1);
+    widget_fanout_core_holds(k2, spec_ok2, cluster, ids2, sync2);
     assert(s1.members =~= widget_ids_of(k1, ids1, sync1));
     assert(s2.members =~= widget_ids_of(k2, ids2, sync2));
 
@@ -501,9 +501,9 @@ proof fn lemma_two_kind_registered(k: SyncKind, spec_ok: spec_fn(Value) -> bool,
             ==> !other.cluster.installed_types.contains_key(name),
         forall |id: int| #[trigger] widget_ids_of(k, ids, sync_id).contains(id) ==> !other.registry.contains_key(id),
     ensures
-        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids)),
-        janitors_registered(k, k.bindings, spec_ok, cluster, ids),
-        (widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id),
+        cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
+        janitors_registered(k, spec_ok, cluster, ids),
+        (widget_sync_controller_spec(k, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id),
 {
     broadcast use Set::lemma_map_contains;
     let alone = widget_core_cluster_for(k, spec_ok, sync_id, ids);
@@ -526,18 +526,18 @@ proof fn lemma_two_kind_registered(k: SyncKind, spec_ok: spec_fn(Value) -> bool,
     } by {
         lemma_binding_id_is_a_member(k.bindings, k.bindings, ids, sync_id, b);
     }
-    assert(janitors_registered(k, k.bindings, spec_ok, cluster, ids)) by {
+    assert(janitors_registered(k, spec_ok, cluster, ids)) by {
         assert forall |b: Binding| #[trigger] k.bindings.contains(b) implies {
-            &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, k.bindings, spec_ok, ids[b]))
-            &&& (widget_janitor_controller_spec(k, b, k.bindings, spec_ok, ids[b]).membership)(cluster.cluster, ids[b])
+            &&& cluster.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, spec_ok, ids[b]))
+            &&& (widget_janitor_controller_spec(k, b, spec_ok, ids[b]).membership)(cluster.cluster, ids[b])
         } by {
-            assert(alone.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, k.bindings, spec_ok, ids[b])));
+            assert(alone.registry.contains_pair(ids[b], widget_janitor_controller_spec(k, b, spec_ok, ids[b])));
             assert(cluster.cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector));
         }
     }
-    assert((widget_sync_controller_spec(k, k.bindings, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id)) by {
+    assert((widget_sync_controller_spec(k, spec_ok, sync_id, ids).membership)(cluster.cluster, sync_id)) by {
         assert forall |b: Binding| #[trigger] k.bindings.contains(b)
-            implies sync_membership(k, b, k.bindings, spec_ok, cluster.cluster, sync_id, ids[b]) by {
+            implies sync_membership(k, b, spec_ok, cluster.cluster, sync_id, ids[b]) by {
             assert(cluster.cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector));
         }
     }
@@ -567,7 +567,7 @@ pub proof fn two_kind_demo_core_holds()
     lemma_two_kind_registered(widget_kind(), widget_spec_ok(), widget_sync_id(), widget_janitor_ids(), g, cluster);
     // The other direction of the union: Gadget's entries are the right-hand side,
     // so they win outright.
-    assert(cluster.registry.contains_pair(gadget_sync_id(), widget_sync_controller_spec(gadget_kind(), gadget_kind().bindings, widget_spec_ok(), gadget_sync_id(), gadget_janitor_ids())));
+    assert(cluster.registry.contains_pair(gadget_sync_id(), widget_sync_controller_spec(gadget_kind(), widget_spec_ok(), gadget_sync_id(), gadget_janitor_ids())));
     lemma_widget_installed_types(gadget_kind(), widget_spec_ok());
     lemma_widget_types_installed(gadget_kind(), widget_spec_ok(), g.cluster);
     assert(cluster.cluster.synced_type_is_installed(gadget_kind().outer_kind, widget_spec_ok(), gadget_kind().selector));
@@ -581,17 +581,17 @@ pub proof fn two_kind_demo_core_holds()
         assert(widget_installed_types(gadget_kind(), widget_spec_ok()).contains_key(remote_kind_name(gadget_kind_name(), b)));
         lemma_binding_id_is_a_member(gadget_kind().bindings, gadget_kind().bindings, gadget_janitor_ids(), gadget_sync_id(), b);
     }
-    assert(janitors_registered(gadget_kind(), gadget_kind().bindings, widget_spec_ok(), cluster, gadget_janitor_ids())) by {
+    assert(janitors_registered(gadget_kind(), widget_spec_ok(), cluster, gadget_janitor_ids())) by {
         assert forall |b: Binding| #[trigger] gadget_kind().bindings.contains(b) implies {
-            &&& cluster.registry.contains_pair(gadget_janitor_ids()[b], widget_janitor_controller_spec(gadget_kind(), b, gadget_kind().bindings, widget_spec_ok(), gadget_janitor_ids()[b]))
-            &&& (widget_janitor_controller_spec(gadget_kind(), b, gadget_kind().bindings, widget_spec_ok(), gadget_janitor_ids()[b]).membership)(cluster.cluster, gadget_janitor_ids()[b])
+            &&& cluster.registry.contains_pair(gadget_janitor_ids()[b], widget_janitor_controller_spec(gadget_kind(), b, widget_spec_ok(), gadget_janitor_ids()[b]))
+            &&& (widget_janitor_controller_spec(gadget_kind(), b, widget_spec_ok(), gadget_janitor_ids()[b]).membership)(cluster.cluster, gadget_janitor_ids()[b])
         } by {
-            assert(g.registry.contains_pair(gadget_janitor_ids()[b], widget_janitor_controller_spec(gadget_kind(), b, gadget_kind().bindings, widget_spec_ok(), gadget_janitor_ids()[b])));
+            assert(g.registry.contains_pair(gadget_janitor_ids()[b], widget_janitor_controller_spec(gadget_kind(), b, widget_spec_ok(), gadget_janitor_ids()[b])));
         }
     }
-    assert((widget_sync_controller_spec(gadget_kind(), gadget_kind().bindings, widget_spec_ok(), gadget_sync_id(), gadget_janitor_ids()).membership)(cluster.cluster, gadget_sync_id())) by {
+    assert((widget_sync_controller_spec(gadget_kind(), widget_spec_ok(), gadget_sync_id(), gadget_janitor_ids()).membership)(cluster.cluster, gadget_sync_id())) by {
         assert forall |b: Binding| #[trigger] gadget_kind().bindings.contains(b)
-            implies sync_membership(gadget_kind(), b, gadget_kind().bindings, widget_spec_ok(), cluster.cluster, gadget_sync_id(), gadget_janitor_ids()[b]) by {}
+            implies sync_membership(gadget_kind(), b, widget_spec_ok(), cluster.cluster, gadget_sync_id(), gadget_janitor_ids()[b]) by {}
     }
     assert(widget_ids_of(widget_kind(), widget_janitor_ids(), widget_sync_id())
         .disjoint(widget_ids_of(gadget_kind(), gadget_janitor_ids(), gadget_sync_id())));

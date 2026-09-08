@@ -14,17 +14,17 @@ use vstd::prelude::*;
 
 verus! {
 
-pub open spec fn widget_janitor_controller_spec(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, id: int) -> ControllerSpec {
+pub open spec fn widget_janitor_controller_spec(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, id: int) -> ControllerSpec {
     ControllerSpec {
         esr: widget_janitor_esr(k, b, id),
         liveness_dependency: true_pred(),
         safety_guarantee: always(lift_state(widget_janitor_guarantee(k, b, id))),
         // D3: the inner side releases terminating mirrors.
-        environment_rely: inner_releases_terminating_objects(k, bs),
+        environment_rely: inner_releases_terminating_objects(k),
         safety_partial_rely: |other_id: int| always(lift_state(widget_janitor_rely(k, other_id))),
         fairness: |cluster: Cluster| janitor_next_with_wf(cluster, id),
         membership: |cluster: Cluster, c_id: int| {
-            &&& bs.contains(b)
+            &&& k.bindings.contains(b)
             &&& cluster.controller_models.contains_pair(c_id, widget_janitor_controller_model(k, b))
             &&& cluster.synced_type_is_installed(inner_kind(k, b), spec_ok, k.selector)
             &&& cluster.synced_type_is_installed(k.outer_kind, spec_ok, k.selector)
@@ -32,7 +32,7 @@ pub open spec fn widget_janitor_controller_spec(k: SyncKind, b: Binding, bs: Set
     }
 }
 
-pub open spec fn widget_janitor_core_set(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, id: int) -> CoreSet {
+pub open spec fn widget_janitor_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, id: int) -> CoreSet {
     CoreSet {
         members: Set::empty().insert(id),
         liveness_dependency: true_pred(),
@@ -57,14 +57,14 @@ pub proof fn janitor_rely_facts_imply_lifted_condition(k: SyncKind, spec: TempPr
     }
 }
 
-pub proof fn widget_janitor_singleton_core_holds(k: SyncKind, b: Binding, bs: Set<Binding>, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, id: int)
+pub proof fn widget_janitor_singleton_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, id: int)
     requires
-        cluster.registry.contains_pair(id, widget_janitor_controller_spec(k, b, bs, spec_ok, id)),
-        well_formed(cluster, widget_janitor_core_set(k, b, bs, spec_ok, id)),
+        cluster.registry.contains_pair(id, widget_janitor_controller_spec(k, b, spec_ok, id)),
+        well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, id)),
     ensures
-        core(cluster, widget_janitor_core_set(k, b, bs, spec_ok, id)),
+        core(cluster, widget_janitor_core_set(k, b, spec_ok, id)),
 {
-    let s = widget_janitor_core_set(k, b, bs, spec_ok, id);
+    let s = widget_janitor_core_set(k, b, spec_ok, id);
     let spec = cluster_model(cluster);
     let inner = cluster.cluster;
 
@@ -109,10 +109,10 @@ pub proof fn widget_janitor_singleton_core_holds(k: SyncKind, b: Binding, bs: Se
             janitor_rely_facts_imply_lifted_condition(k, spec_re, inner, id);
             tla_forall_apply(env_fn, id);
             entails_trans(spec_re, tla_forall(env_fn), env_fn(id));
-            assert(env_fn(id) == inner_releases_terminating_objects(k, bs));
+            assert(env_fn(id) == inner_releases_terminating_objects(k));
             entails_trans(spec_re, spec, lift_state(inner.init()));
             entails_trans(spec_re, spec, janitor_next_with_wf(inner, id));
-            janitor_satisfies_its_spec(k, b, bs, spec_ok, spec_re, inner, id);
+            janitor_satisfies_its_spec(k, b, spec_ok, spec_re, inner, id);
             assert(ESR_fn(c) == widget_janitor_esr(k, b, id));
         }
     }
