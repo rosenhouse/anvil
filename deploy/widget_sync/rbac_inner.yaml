@@ -1,6 +1,8 @@
 # RBAC for the widget sync controller's access to the inner (remote) cluster.
-# Apply this in the inner cluster. tools/two-cluster-test.sh turns the service
-# account token into the kubeconfig the controller mounts in the outer cluster.
+# Apply this in the inner cluster. tools/two-cluster-test.sh puts the service
+# account token, as a separate `token` key referenced by a relative tokenFile,
+# next to the kubeconfig in the Secret the controller mounts in the outer
+# cluster; the token file is re-read, an inline token would not be.
 # The controller creates, patches (spec) and deletes the mirrors it owns and
 # reads every Widget; it never writes Widget status in the inner cluster.
 apiVersion: v1
