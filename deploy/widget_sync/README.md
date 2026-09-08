@@ -36,12 +36,37 @@ Without `--build` the script reuses the images
 On the outer copy:
 
 - `status.observedGeneration == metadata.generation`: the controller has
-  processed the current spec.
+  acted on the current spec, whether or not it succeeded; the outcome is in
+  the conditions, all of which carry the same `observedGeneration`.
 - Condition `Synced` with `status: "True"` and `observedGeneration ==
   metadata.generation`: the spec is in the inner cluster and `ready` and
   `observedCount` are the inner implementation's status for it.
-- Otherwise `Synced` is `False` with reason `InnerConverging`,
-  `InnerTerminating` or `ForeignObject`.
+- Condition `Ready`: `True` exactly when `Synced` is `True` and the inner
+  copy's own `Ready` condition (if present) is `True` and its own `Stalled`
+  condition (if present) is not; otherwise `False`, with reason `NotSynced`
+  when not synced and the inner condition's reason and message otherwise.
+- Condition `Stalled`: `True` when the controller is in a permanent case
+  (`ForeignObject`, `Forbidden`, `Rejected`) or the inner copy's own
+  `Stalled` condition is `True`; the reason is the controller's own when it
+  has one, else the inner condition's. `Ready` and `Stalled` are never both
+  `True`.
+
+The reasons of a `False` `Synced` condition:
+
+| Reason | Meaning | Stalled | Clears when |
+|---|---|---|---|
+| `InnerConverging` | the mirror carries the spec; the inner status is for an older generation of it | no | the inner implementation catches up |
+| `InnerTerminating` | the mirror has a deletion timestamp | no | the inner side releases it and a new mirror is created |
+| `StaleMirror` | the object at the mirror's name is a mirror of a previous incarnation of this copy (label present, other `parent-uid`) | no | the janitor removes it |
+| `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | yes | the object is removed in the inner cluster |
+| `Forbidden` | the inner cluster refused a request for lack of authorization | yes | the credential's RBAC is fixed |
+| `InnerUnreachable` | a request timed out or failed server-side; the inner cluster is not answering | no | the inner cluster answers again |
+| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | no | the namespace is created |
+| `Rejected` | a request was rejected as invalid (also the answer to a failed patch test after a race on the mirror, which the next reconcile clears) | yes | the schema or the object is fixed |
+| `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | no | the next reconcile |
+
+After a failed request the controller writes the status once and requeues;
+`ready` and `observedCount` keep their last reported values.
 
 The mirror carries `anvil.dev/managed-by: widget-sync` and
 `anvil.dev/parent-uid: <outer uid>`, no owner references and no finalizers of
@@ -57,12 +82,14 @@ ours.
   briefly.
 - Create `Widget{default, other}` in the inner cluster without the label, then
   in the outer cluster. The inner object is never modified; the outer copy
-  reports `ForeignObject`.
+  reports `ForeignObject` with `Stalled=True`.
 - Delete the outer copy. The janitor removes the mirror. Delete and recreate
-  with the same name: the stale mirror is removed and a new one created.
+  with the same name: the new copy may briefly report `StaleMirror` until the
+  janitor removes the old mirror, then a new one is created.
 - Disconnect `widget-sync-inner-control-plane` from the `kind` docker network,
-  edit the outer spec, reconnect. `observedGeneration` lags while the inner
-  cluster is unreachable and catches up after the heal.
+  edit the outer spec, reconnect. While the inner cluster is unreachable the
+  outer copy reports `Synced=False/InnerUnreachable` at the new generation;
+  after the heal it reaches `Synced=True`.
 
 ## Operating the controller
 

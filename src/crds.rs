@@ -191,31 +191,57 @@ pub struct WidgetSpec {
     pub message: Option<String>,
 }
 
+/// The status of a Widget. On an inner copy it is written by the inner implementation;
+/// on an outer copy it is written by the sync controller, which mirrors the inner
+/// copy's data fields and combines its conditions with its own.
 #[derive(
     Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
 )]
 pub struct WidgetStatus {
-    // The generation of this object that the writer of this status last processed.
+    /// The generation of this object that the writer of this status last processed.
+    /// On an outer copy the sync controller stamps the generation it reconciled on
+    /// every write, including the ones that report a failure.
     #[serde(rename = "observedGeneration")]
     pub observed_generation: Option<i64>,
+    /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
     pub ready: Option<bool>,
+    /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
     #[serde(rename = "observedCount")]
     pub observed_count: Option<i32>,
+    /// On an outer copy, exactly Synced, Ready and Stalled, all with observedGeneration
+    /// equal to the generation the sync controller reconciled. Synced is True when the
+    /// spec is in the inner cluster and the inner status observes it; otherwise False
+    /// with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or,
+    /// after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or
+    /// RequestFailed. Ready is True exactly when Synced is True and the inner copy's own
+    /// Ready condition, if present, is True and its own Stalled condition, if present,
+    /// is not True; otherwise False, with reason NotSynced when not synced, else with
+    /// the inner condition's reason and message. Stalled is True when the sync
+    /// controller is in a permanent case (ForeignObject, Forbidden, Rejected) or the
+    /// inner copy's own Stalled condition is True, with the sync controller's reason
+    /// when it has one, else the inner condition's. Ready and Stalled are never both
+    /// True.
     pub conditions: Option<Vec<WidgetCondition>>,
 }
 
-// A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted
-// because the verified controller does not read clocks.
+/// A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted
+/// because the verified controller does not read clocks.
 #[derive(
     Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
 )]
 pub struct WidgetCondition {
+    /// Synced, Ready or Stalled on an outer copy; whatever the inner implementation
+    /// reports on an inner copy (the sync controller reads Ready and Stalled).
     #[serde(rename = "type")]
     pub type_: String,
+    /// True or False.
     pub status: String,
+    /// The generation of the object the condition was computed for.
     #[serde(rename = "observedGeneration")]
     pub observed_generation: Option<i64>,
+    /// A CamelCase word saying why the condition has its status.
     pub reason: Option<String>,
+    /// Free text; on an outer copy, copied from the inner condition when the reason is.
     pub message: Option<String>,
 }
 
