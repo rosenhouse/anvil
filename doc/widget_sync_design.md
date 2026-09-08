@@ -726,6 +726,6 @@ side); and parent-cluster identity on mirrors for the single pair.
 
 Follow-ups after this branch: the fan-out to many outer namespaces, each with
 its own inner cluster, in the Cluster API shape of a management cluster and
-its workload clusters, together with parent identity on mirrors and tenancy
-(#15); and the pass that makes the branch reviewable for an upstream
-contribution (#16).
+its workload clusters (#15), and the controller generic over kinds given at
+boot (#20), designed together in `doc/widget_sync_fanout_design.md`; and the
+pass that makes the branch reviewable for an upstream contribution (#16).
