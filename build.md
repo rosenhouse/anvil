@@ -31,6 +31,11 @@ go_version:   "^1.20"
 
 Run `./tools/setup-verus.sh` to fetch, build, and wire up a local Verus binary.
 
+`verus.sha` pins the Verus revision the script builds, and `Cargo.lock` pins
+the `vstd` dependency to the same revision (the script refuses to run if they
+differ). Move both together: edit `verus.sha`, then
+`cargo update -p vstd --precise "$(cat verus.sha)"`.
+
 ## Build and verify
 
 Most verification targets are library modules (under `src/controllers/`, `src/kubernetes_cluster/`, etc.). To narrow scope, use `cargo verus focus --lib -- --verify-module <mod>`; `verify` rejects partial-verification flags. `--verify-only-module` excludes a module's descendants, so naming a top-level module with it verifies nothing:

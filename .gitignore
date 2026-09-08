@@ -12,7 +12,6 @@ e2e/target/
 *.d
 
 # Not tracked so CI and verus's verita always resolve vstd against current verus main
-/Cargo.lock
 
 # Verus logs / large diagnostic dumps
 src/.verus-log/

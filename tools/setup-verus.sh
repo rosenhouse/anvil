@@ -31,6 +31,14 @@ fi
 git -C "$VERUS_DIR" checkout --force --detach "$VERUS_REV"
 git -C "$VERUS_DIR" submodule update --init --recursive
 
+# Cargo.lock pins the vstd dependency by revision; it must be the one built here.
+LOCK_VSTD_REV="$(grep -A2 '^name = "vstd"' "$PROJECT_DIR/Cargo.lock" | sed -nE 's/^source = .*#([0-9a-f]+)"$/\1/p')"
+if [ "$LOCK_VSTD_REV" != "$VERUS_REV" ]; then
+    echo "Cargo.lock pins vstd at '$LOCK_VSTD_REV' but verus.sha pins Verus at '$VERUS_REV'" >&2
+    echo "run: cargo update -p vstd --precise $VERUS_REV" >&2
+    exit 1
+fi
+
 cd "$VERUS_DIR/source"
 rustc --version
 
