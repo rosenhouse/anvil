@@ -224,7 +224,7 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 | The binding's Secret | What its objects report | What the controller does |
 |---|---|---|
 | missing, or without a `value` key | `Synced=False/InnerUnreachable` | nothing: no client is bound, so every request is answered `Timeout` without a round trip. Its janitors do not run, so its mirrors are left alone |
-| present but not a parseable kubeconfig | `Synced=False/InnerUnreachable` | the same, plus one warn line; it is retried when the Secret changes |
+| present but not a parseable kubeconfig, or one the validation below refuses | `Synced=False/InnerUnreachable` | the same, plus one warn line naming the rule it broke; it is retried when the Secret changes |
 | present, its cluster unreachable or its credential denied a verb | `InnerUnreachable` (unreachable) or `Forbidden` with `Stalled=True` (denied) | retried with backoff, 1s doubling to 1min, for an unreachable cluster; re-checked every 5 minutes for a denied one |
 | present and its cluster claimed by another binding | `Synced=False/Forbidden` with `Stalled=True` | refused: no janitor runs and no request is sent, and it is re-checked every 5 minutes |
 | present and good | `Synced=True` once the mirror is there | the janitors of every configured kind run against it |
@@ -232,6 +232,39 @@ kubectl --context kind-widget-sync-outer -n widget-sync logs deploy/widget-sync-
 A changed Secret (a rotated credential; Cluster API rewrites the Secret)
 rebuilds the binding's clients and restarts its janitors, with no restart of
 the pod.
+
+**What a kubeconfig may contain.** A kubeconfig is a program as much as it is a
+credential: the client library it is handed to will run the command a `users[].user.exec`
+block names, or the `cmd-path` of an `auth-provider`, inside this pod; it will
+read the file a `tokenFile`, `client-certificate`, `client-key` or
+`certificate-authority` names — the pod's own ServiceAccount token, for
+instance — and send it to whatever `server` the same document names; and
+`proxy-url` and `insecure-skip-tls-verify` decide who may answer for the inner
+cluster. **Whoever can create such a Secret in a namespace therefore decides
+what this controller does for that namespace's bindings.** Grant that right in
+a namespace only to whoever you would let run code in the controller's pod.
+
+The controller narrows that to the shape a Cluster API workload cluster's
+kubeconfig has, before it builds a client. A Secret whose `value` breaks one of
+these rules is logged once at warn with the rule it broke and leaves the
+binding unbound (its objects read `InnerUnreachable`); nothing retries it on a
+timer, only a change of the Secret does:
+
+- exactly one cluster, one user and one context, and the `current-context` is
+  that context and names that cluster and that user;
+- the server starts with `https://`;
+- no `exec`, no `auth-provider`, no `tokenFile`, no `client-certificate`, no
+  `client-key`, no `certificate-authority` — the data forms
+  (`certificate-authority-data`, `client-certificate-data`, `client-key-data`,
+  an inline `token`) are what a Cluster API kubeconfig uses and are what is
+  accepted;
+- no `proxy-url` and no `insecure-skip-tls-verify: true` (an explicit `false`
+  is the default and is accepted).
+
+This bounds what a Secret can do to: naming an API server this controller then
+talks to with the credential in the same document. It does not bound *which*
+server that is, so a Secret can still point a binding at a cluster of the
+Secret author's choosing — which is what the claim below is about.
 
 **The access check.** Before a binding is used, the controller asks its inner
 cluster, with one `SelfSubjectAccessReview` per verb and configured kind in the

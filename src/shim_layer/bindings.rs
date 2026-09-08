@@ -34,6 +34,7 @@ use futures::{channel::mpsc, StreamExt};
 use k8s_openapi::api::authorization::v1::{ResourceAttributes, SelfSubjectAccessReview, SelfSubjectAccessReviewSpec};
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use kube::api::{Api, ObjectMeta, PostParams, ResourceExt};
+use kube::config::Kubeconfig;
 use kube::core::ErrorResponse;
 use kube::runtime::{reflector::ObjectRef, watcher, WatchStreamExt};
 use kube::Client;
@@ -88,6 +89,114 @@ pub fn binding_of_secret(namespace: &str, name: &str) -> Option<ClusterRef> {
         return None;
     }
     Some(ClusterRef::new(namespace.to_string(), cluster.to_string()))
+}
+
+/// validate_kubeconfig is the trust boundary of a binding's credential. A
+/// kubeconfig is a program as much as it is a credential: kube-client honours
+/// `users[].user.exec` (it runs a command in this pod), `auth-provider` with a
+/// `cmd-path`, `tokenFile` (it reads any file this pod can read — the mounted
+/// ServiceAccount token, say — and sends it to whatever `server` the same
+/// document names), `proxy-url` and `insecure-skip-tls-verify`. Whoever can
+/// create a Secret of the Cluster API convention in a namespace therefore
+/// decides what this controller does for that namespace's bindings, so the
+/// document is held to the shape a Cluster API workload-cluster kubeconfig has
+/// and nothing else: exactly one cluster, one user and one context, an
+/// `https://` server, and credentials given as data, never as a path or a
+/// command.
+///
+/// The reasons are what the warn log of a rejected Secret says; they name the
+/// offending field, so an operator can see which rule a hand-written kubeconfig
+/// broke.
+pub fn validate_kubeconfig(kubeconfig: &Kubeconfig) -> Result<(), String> {
+    // Exactly one of each: a document with a second cluster or user is either
+    // not a workload cluster's kubeconfig or an attempt to have the current
+    // context select something other than what was reviewed.
+    if kubeconfig.clusters.len() != 1 {
+        return Err(format!("it declares {} clusters; exactly one is required", kubeconfig.clusters.len()));
+    }
+    if kubeconfig.auth_infos.len() != 1 {
+        return Err(format!("it declares {} users; exactly one is required", kubeconfig.auth_infos.len()));
+    }
+    if kubeconfig.contexts.len() != 1 {
+        return Err(format!("it declares {} contexts; exactly one is required", kubeconfig.contexts.len()));
+    }
+    let named_cluster = &kubeconfig.clusters[0];
+    let cluster = named_cluster
+        .cluster
+        .as_ref()
+        .ok_or_else(|| format!("its cluster {:?} has no cluster section", named_cluster.name))?;
+    match cluster.server.as_deref() {
+        // Plain http would send the credential in the clear; anything else
+        // (unix://, a bare host) is not an API server address we will dial.
+        Some(server) if server.starts_with("https://") => {}
+        Some(server) => return Err(format!("its server {:?} is not https://", server)),
+        None => return Err("its cluster has no server".to_string()),
+    }
+    if cluster.insecure_skip_tls_verify == Some(true) {
+        return Err("it sets insecure-skip-tls-verify, which would let anything answer for the inner cluster".to_string());
+    }
+    if cluster.proxy_url.is_some() {
+        return Err("it sets proxy-url, which would route the credential through a third party".to_string());
+    }
+    // Paths are the attacker's read primitive: the file is read from this pod's
+    // filesystem. The data forms carry the material in the document itself.
+    if cluster.certificate_authority.is_some() {
+        return Err("it sets certificate-authority, a path in this pod; use certificate-authority-data".to_string());
+    }
+    let named_user = &kubeconfig.auth_infos[0];
+    let user = named_user
+        .auth_info
+        .as_ref()
+        .ok_or_else(|| format!("its user {:?} has no user section", named_user.name))?;
+    if user.exec.is_some() {
+        return Err("it sets exec, which would run a command in this pod".to_string());
+    }
+    if user.auth_provider.is_some() {
+        return Err("it sets auth-provider, which can run a command in this pod".to_string());
+    }
+    if user.token_file.is_some() {
+        return Err("it sets tokenFile, a path in this pod; use an inline token".to_string());
+    }
+    if user.client_certificate.is_some() {
+        return Err("it sets client-certificate, a path in this pod; use client-certificate-data".to_string());
+    }
+    if user.client_key.is_some() {
+        return Err("it sets client-key, a path in this pod; use client-key-data".to_string());
+    }
+    // The one context must be the one that is current and must name the one
+    // cluster and the one user, so that what was checked here is what
+    // Config::from_custom_kubeconfig builds the clients from.
+    let named_context = &kubeconfig.contexts[0];
+    let context = named_context
+        .context
+        .as_ref()
+        .ok_or_else(|| format!("its context {:?} has no context section", named_context.name))?;
+    if context.cluster != named_cluster.name {
+        return Err(format!(
+            "its context names the cluster {:?}, which it does not declare",
+            context.cluster
+        ));
+    }
+    if context.user != named_user.name {
+        return Err(format!("its context names the user {:?}, which it does not declare", context.user));
+    }
+    match kubeconfig.current_context.as_deref() {
+        Some(current) if current == named_context.name => {}
+        Some(current) => {
+            return Err(format!("its current-context {:?} is not its one context {:?}", current, named_context.name))
+        }
+        None => return Err("it has no current-context".to_string()),
+    }
+    Ok(())
+}
+
+/// checked_kubeconfig parses the `value` of a binding's Secret and holds it to
+/// validate_kubeconfig. The clients are built from the same text
+/// (remote_clients_from_kubeconfig_yaml parses it again); parsing is a pure
+/// function of the string, so what was checked is what is built.
+fn checked_kubeconfig(yaml: &str) -> Result<(), String> {
+    let kubeconfig = Kubeconfig::from_yaml(yaml).map_err(|e| format!("it does not parse ({})", e))?;
+    validate_kubeconfig(&kubeconfig)
 }
 
 /// The claim's three fields (doc/widget_sync_fanout_design.md, section 1.3).
@@ -416,12 +525,16 @@ impl BindingManager {
         let registered = self.clusters.remote_of(binding).await;
         let clients = match (needs_clients, registered) {
             (false, Some(clients)) => clients,
-            _ => match remote_clients_from_kubeconfig_yaml(&kubeconfig, self.request_timeout).await {
-                Ok(clients) => clients,
-                Err(e) => {
+            _ => {
+                // The kubeconfig is held to the Cluster API shape before a
+                // client is built from it (validate_kubeconfig): a document that
+                // would run a command in this pod, read a file of it, or send
+                // the credential somewhere else is refused here, before kube
+                // ever acts on it.
+                if let Err(reason) = checked_kubeconfig(&kubeconfig) {
                     warn!(
-                        "binding {}: its kubeconfig does not parse ({}); the binding is left unbound until the Secret changes",
-                        label(binding), e
+                        "binding {}: its kubeconfig is refused, {}; the binding is left unbound until the Secret changes",
+                        label(binding), reason
                     );
                     self.deregister(binding).await;
                     if let Some(record) = self.bindings.get_mut(binding) {
@@ -429,7 +542,21 @@ impl BindingManager {
                     }
                     return;
                 }
-            },
+                match remote_clients_from_kubeconfig_yaml(&kubeconfig, self.request_timeout).await {
+                    Ok(clients) => clients,
+                    Err(e) => {
+                        warn!(
+                            "binding {}: its kubeconfig does not parse ({}); the binding is left unbound until the Secret changes",
+                            label(binding), e
+                        );
+                        self.deregister(binding).await;
+                        if let Some(record) = self.bindings.get_mut(binding) {
+                            record.due_at = None;
+                        }
+                        return;
+                    }
+                }
+            }
         };
 
         match check_binding_access(&clients.requests, binding, &self.kinds, &self.verbs).await {
@@ -806,6 +933,148 @@ mod tests {
         assert_eq!(config_map.metadata.name.as_deref(), Some(CLAIM_NAME));
         assert_eq!(config_map.metadata.namespace.as_deref(), Some(CLAIM_NAMESPACE));
         assert_eq!(Claim::from_data(config_map.data.as_ref()), claim);
+    }
+
+    // A Cluster API workload cluster's kubeconfig: a CA and a client key pair,
+    // all as data. The rejections below are this document with one field added
+    // or changed, so each test isolates the rule it is about.
+    const CAPI_KUBECONFIG: &str = r#"
+apiVersion: v1
+kind: Config
+clusters:
+  - name: a
+    cluster:
+      server: https://10.0.0.2:6443
+      certificate-authority-data: Q0EK
+users:
+  - name: a-admin
+    user:
+      client-certificate-data: Q1JUCg==
+      client-key-data: S0VZCg==
+contexts:
+  - name: a-admin@a
+    context:
+      cluster: a
+      user: a-admin
+current-context: a-admin@a
+"#;
+
+    // The other accepted form: a CA and an inline bearer token, which is what
+    // tools/two-cluster-test.sh writes for a service account.
+    const TOKEN_KUBECONFIG: &str = r#"
+apiVersion: v1
+kind: Config
+clusters:
+  - name: a
+    cluster:
+      server: https://10.0.0.2:6443
+      certificate-authority-data: Q0EK
+users:
+  - name: widget-sync-remote
+    user:
+      token: a-service-account-token
+contexts:
+  - name: a
+    context:
+      cluster: a
+      user: widget-sync-remote
+current-context: a
+"#;
+
+    fn rejection(yaml: &str) -> String {
+        checked_kubeconfig(yaml).expect_err(&format!("should be refused:\n{}", yaml))
+    }
+
+    // The document as it is, with `patch` merged into it: `patch` is a YAML
+    // mapping merged one level deep, so a test says only what it changes.
+    fn with(yaml: &str, patch: &str) -> String {
+        let mut base: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let patch: serde_yaml::Value = serde_yaml::from_str(patch).unwrap();
+        let (base_map, patch_map) = (base.as_mapping_mut().unwrap(), patch.as_mapping().unwrap());
+        for (key, value) in patch_map {
+            base_map.insert(key.clone(), value.clone());
+        }
+        serde_yaml::to_string(&base).unwrap()
+    }
+
+    #[test]
+    fn a_cluster_api_kubeconfig_is_accepted() {
+        assert_eq!(checked_kubeconfig(CAPI_KUBECONFIG), Ok(()));
+        assert_eq!(checked_kubeconfig(TOKEN_KUBECONFIG), Ok(()));
+        // An explicit `insecure-skip-tls-verify: false` disables nothing and is
+        // the default; only `true` is a rejection.
+        assert_eq!(
+            checked_kubeconfig(&with(
+                CAPI_KUBECONFIG,
+                "clusters: [{name: a, cluster: {server: 'https://10.0.0.2:6443', certificate-authority-data: Q0EK, insecure-skip-tls-verify: false}}]"
+            )),
+            Ok(())
+        );
+    }
+
+    // Every field kube-client acts on that turns a Secret into code or into a
+    // read of this pod's filesystem.
+    #[test]
+    fn a_kubeconfig_that_runs_or_reads_anything_is_refused() {
+        let user = |user: &str| {
+            with(CAPI_KUBECONFIG, &format!("users: [{{name: a-admin, user: {}}}]", user))
+        };
+        assert!(rejection(&user("{exec: {apiVersion: client.authentication.k8s.io/v1, command: /bin/sh, args: [-c, 'cat /var/run/secrets/kubernetes.io/serviceaccount/token']}}"))
+            .contains("exec"));
+        assert!(rejection(&user("{auth-provider: {name: gcp, config: {cmd-path: /bin/sh}}}")).contains("auth-provider"));
+        assert!(rejection(&user("{tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token}")).contains("tokenFile"));
+        assert!(rejection(&user("{client-certificate: /etc/ssl/crt, client-key-data: S0VZCg==}")).contains("client-certificate"));
+        assert!(rejection(&user("{client-certificate-data: Q1JUCg==, client-key: /etc/ssl/key}")).contains("client-key"));
+    }
+
+    #[test]
+    fn a_kubeconfig_that_weakens_or_diverts_the_connection_is_refused() {
+        let cluster = |cluster: &str| with(CAPI_KUBECONFIG, &format!("clusters: [{{name: a, cluster: {}}}]", cluster));
+        let good = "server: 'https://10.0.0.2:6443', certificate-authority-data: Q0EK";
+        assert!(rejection(&cluster(&format!("{{{}, insecure-skip-tls-verify: true}}", good))).contains("insecure-skip-tls-verify"));
+        assert!(rejection(&cluster(&format!("{{{}, proxy-url: 'http://10.0.0.9:3128'}}", good))).contains("proxy-url"));
+        assert!(rejection(&cluster("{server: 'https://10.0.0.2:6443', certificate-authority: /etc/ssl/ca.crt}")).contains("certificate-authority"));
+        assert!(rejection(&cluster("{server: 'http://10.0.0.2:8080', certificate-authority-data: Q0EK}")).contains("not https"));
+        assert!(rejection(&cluster("{certificate-authority-data: Q0EK}")).contains("no server"));
+    }
+
+    #[test]
+    fn a_kubeconfig_of_more_than_one_cluster_user_or_context_is_refused() {
+        let two_clusters = with(
+            CAPI_KUBECONFIG,
+            "clusters: [{name: a, cluster: {server: 'https://10.0.0.2:6443', certificate-authority-data: Q0EK}}, \
+             {name: elsewhere, cluster: {server: 'https://10.0.0.9:6443', certificate-authority-data: Q0EK}}]",
+        );
+        assert!(rejection(&two_clusters).contains("2 clusters"));
+        let two_users = with(
+            CAPI_KUBECONFIG,
+            "users: [{name: a-admin, user: {client-certificate-data: Q1JUCg==, client-key-data: S0VZCg==}}, \
+             {name: other, user: {tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token}}]",
+        );
+        assert!(rejection(&two_users).contains("2 users"));
+        let two_contexts = with(
+            CAPI_KUBECONFIG,
+            "contexts: [{name: a-admin@a, context: {cluster: a, user: a-admin}}, \
+             {name: second, context: {cluster: a, user: a-admin}}]",
+        );
+        assert!(rejection(&two_contexts).contains("2 contexts"));
+    }
+
+    #[test]
+    fn a_kubeconfig_whose_context_does_not_name_what_it_declares_is_refused() {
+        let context = |context: &str| with(CAPI_KUBECONFIG, &format!("contexts: [{}]", context));
+        assert!(rejection(&context("{name: a-admin@a, context: {cluster: elsewhere, user: a-admin}}")).contains("elsewhere"));
+        assert!(rejection(&context("{name: a-admin@a, context: {cluster: a, user: someone}}")).contains("someone"));
+        assert!(rejection(&with(CAPI_KUBECONFIG, "current-context: other")).contains("current-context"));
+        let mut without: serde_yaml::Value = serde_yaml::from_str(CAPI_KUBECONFIG).unwrap();
+        without.as_mapping_mut().unwrap().remove(serde_yaml::Value::String("current-context".to_string()));
+        assert!(rejection(&serde_yaml::to_string(&without).unwrap()).contains("no current-context"));
+    }
+
+    #[test]
+    fn a_value_that_is_not_a_kubeconfig_is_refused() {
+        assert!(rejection("not: a kubeconfig").contains("exactly one is required"));
+        assert!(rejection(": : :").contains("does not parse"));
     }
 
     #[test]

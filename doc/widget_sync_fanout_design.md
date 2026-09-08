@@ -95,6 +95,17 @@ away drops the binding, its janitors included. The `tokenFile` mechanism of
 the single-pair deployment is not used: a Cluster API kubeconfig is inline
 and rotation is the Secret changing.
 
+A kubeconfig is code as much as it is a credential — `exec`, `auth-provider`,
+`tokenFile`, `proxy-url`, `insecure-skip-tls-verify` all direct the client
+library to run or read or trust something — so before a client is built the
+document is held to the shape a Cluster API kubeconfig has: exactly one
+cluster, user and context, an `https://` server, credentials as data and never
+as a path or a command, no proxy and no skipped verification (`validate_kubeconfig`,
+`shim_layer::bindings`); whoever may create such a Secret in a namespace
+otherwise decides what the controller does there. A Secret the check refuses is
+logged with the rule it broke and its binding stays unbound until the Secret
+changes.
+
 A parent whose binding has no Secret, or whose Secret does not parse, is
 answered by the shim as if the inner cluster were unreachable: every
 request to the binding fails with `Timeout`, so the outer status reads
