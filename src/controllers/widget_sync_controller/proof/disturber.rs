@@ -35,7 +35,7 @@ pub open spec fn disturber_request_is_guaranteed(msg: Message) -> bool {
     }
 }
 
-pub open spec fn widget_disturber_guarantee(kind: Kind, controller_id: int) -> StatePred<ClusterState> {
+pub open spec fn widget_disturber_guarantee(controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)
@@ -51,9 +51,9 @@ pub proof fn lemma_always_widget_disturber_guarantee(spec: TempPred<ClusterState
         spec.entails(always(lift_action(cluster.next()))),
         cluster.synced_type_is_installed(kind, spec_ok, selector),
         cluster.controller_models.contains_pair(controller_id, widget_disturber_controller_model(kind)),
-    ensures spec.entails(always(lift_state(widget_disturber_guarantee(kind, controller_id)))),
+    ensures spec.entails(always(lift_state(widget_disturber_guarantee(controller_id)))),
 {
-    let inv = widget_disturber_guarantee(kind, controller_id);
+    let inv = widget_disturber_guarantee(controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_each_object_in_reconcile_has_consistent_key_and_valid_metadata(spec, controller_id);
     cluster.lemma_always_synced_objects_in_reconcile_are_valid(spec, kind, spec_ok, selector, controller_id);
@@ -165,12 +165,12 @@ proof fn lemma_disturber_new_request_is_guaranteed(
 // The disturber's guarantee implies what both reconcilers rely on: it never
 // creates, never updates, never writes status, and its patches and deletes are
 // free under both relies.
-pub proof fn disturber_guarantee_implies_relies(k: SyncKind, kind: Kind, id: int)
+pub proof fn disturber_guarantee_implies_relies(k: SyncKind, id: int)
     ensures
-        lift_state(widget_disturber_guarantee(kind, id)).entails(lift_state(widget_sync_rely(k, id))),
-        lift_state(widget_disturber_guarantee(kind, id)).entails(lift_state(widget_janitor_rely(k, id))),
+        lift_state(widget_disturber_guarantee(id)).entails(lift_state(widget_sync_rely(k, id))),
+        lift_state(widget_disturber_guarantee(id)).entails(lift_state(widget_janitor_rely(k, id))),
 {
-    assert forall |s: ClusterState| #[trigger] widget_disturber_guarantee(kind, id)(s) implies widget_sync_rely(k, id)(s) && widget_janitor_rely(k, id)(s) by {
+    assert forall |s: ClusterState| #[trigger] widget_disturber_guarantee(id)(s) implies widget_sync_rely(k, id)(s) && widget_janitor_rely(k, id)(s) by {
         assert forall |msg| #[trigger] s.in_flight().contains(msg)
             && msg.content is APIRequest
             && msg.src.is_controller_id(id)

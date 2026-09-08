@@ -25,7 +25,7 @@ pub open spec fn widget_disturber_controller_spec(k: SyncKind, b: Binding, spec_
     ControllerSpec {
         esr: true_pred(),
         liveness_dependency: true_pred(),
-        safety_guarantee: always(lift_state(widget_disturber_guarantee(inner_kind(k, b), id))),
+        safety_guarantee: always(lift_state(widget_disturber_guarantee(id))),
         environment_rely: true_pred(),
         safety_partial_rely: |other_id: int| true_pred(),
         fairness: |cluster: Cluster| true_pred(),
@@ -36,7 +36,7 @@ pub open spec fn widget_disturber_controller_spec(k: SyncKind, b: Binding, spec_
     }
 }
 
-pub open spec fn widget_disturber_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, id: int) -> CoreSet {
+pub open spec fn widget_disturber_core_set(id: int) -> CoreSet {
     CoreSet {
         members: Set::empty().insert(id),
         liveness_dependency: true_pred(),
@@ -47,11 +47,11 @@ pub open spec fn widget_disturber_core_set(k: SyncKind, b: Binding, spec_ok: spe
 pub proof fn widget_disturber_singleton_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, id: int)
     requires
         cluster.registry.contains_pair(id, widget_disturber_controller_spec(k, b, spec_ok, id)),
-        well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, id)),
+        well_formed(cluster, widget_disturber_core_set(id)),
     ensures
-        core(cluster, widget_disturber_core_set(k, b, spec_ok, id)),
+        core(cluster, widget_disturber_core_set(id)),
 {
-    let s = widget_disturber_core_set(k, b, spec_ok, id);
+    let s = widget_disturber_core_set(id);
     let spec = cluster_model(cluster);
     let inner = cluster.cluster;
 
@@ -88,15 +88,15 @@ pub proof fn widget_disturber_singleton_core_holds(k: SyncKind, b: Binding, spec
 // The pair with the disturber.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, janitor_id: int, sync_id: int) -> CoreSet {
+pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int) -> CoreSet {
     union_coreset(
-        widget_janitor_core_set(k, b, spec_ok, janitor_id),
-        widget_sync_core_set(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id)),
+        widget_janitor_core_set(janitor_id),
+        widget_sync_core_set(k, sync_id, Map::empty().insert(b, janitor_id)),
         true_pred())
 }
 
-pub open spec fn widget_disturbed_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, janitor_id: int, sync_id: int, disturber_id: int) -> CoreSet {
-    union_coreset(widget_pair_core_set(k, b, spec_ok, janitor_id, sync_id), widget_disturber_core_set(k, b, spec_ok, disturber_id), true_pred())
+pub open spec fn widget_disturbed_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int, disturber_id: int) -> CoreSet {
+    union_coreset(widget_pair_core_set(k, b, janitor_id, sync_id), widget_disturber_core_set(disturber_id), true_pred())
 }
 
 // The pair and the disturber are compatible: the disturber relies on nothing,
@@ -110,15 +110,15 @@ pub proof fn widget_pair_with_disturber_core_holds(k: SyncKind, b: Binding, spec
         janitor_id != sync_id,
         janitor_id != disturber_id,
         sync_id != disturber_id,
-        well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, janitor_id)),
-        well_formed(cluster, widget_sync_core_set(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id))),
-        well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, disturber_id)),
+        well_formed(cluster, widget_janitor_core_set(janitor_id)),
+        well_formed(cluster, widget_sync_core_set(k, sync_id, Map::empty().insert(b, janitor_id))),
+        well_formed(cluster, widget_disturber_core_set(disturber_id)),
     ensures
-        well_formed(cluster, widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
-        core(cluster, widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
+        well_formed(cluster, widget_disturbed_core_set(k, b, janitor_id, sync_id, disturber_id)),
+        core(cluster, widget_disturbed_core_set(k, b, janitor_id, sync_id, disturber_id)),
 {
-    let s1 = widget_pair_core_set(k, b, spec_ok, janitor_id, sync_id);
-    let s2 = widget_disturber_core_set(k, b, spec_ok, disturber_id);
+    let s1 = widget_pair_core_set(k, b, janitor_id, sync_id);
+    let s2 = widget_disturber_core_set(disturber_id);
     let spec = cluster_model(cluster);
 
     widget_pair_core_holds(k, b, spec_ok, cluster, janitor_id, sync_id);
@@ -144,22 +144,22 @@ pub proof fn widget_pair_with_disturber_core_holds(k: SyncKind, b: Binding, spec
         entails_implies(spec, tla_forall(g_fn_s1), tla_forall(r21_fn));
 
         // r_12: both members' relies on the disturber follow from its guarantee.
-        disturber_guarantee_implies_relies(k, inner_kind(k, b), disturber_id);
-        entails_preserved_by_always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id)), lift_state(widget_sync_rely(k, disturber_id)));
-        entails_preserved_by_always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id)), lift_state(widget_janitor_rely(k, disturber_id)));
+        disturber_guarantee_implies_relies(k, disturber_id);
+        entails_preserved_by_always(lift_state(widget_disturber_guarantee(disturber_id)), lift_state(widget_sync_rely(k, disturber_id)));
+        entails_preserved_by_always(lift_state(widget_disturber_guarantee(disturber_id)), lift_state(widget_janitor_rely(k, disturber_id)));
         assert forall |pair: (int, int)| spec.and(tla_forall(g_fn_s2)).entails(#[trigger] r12_fn(pair)) by {
             if s1.members.contains(pair.0) && !s1.members.contains(pair.1) && s2.members.contains(pair.1) {
                 assert(pair.1 == disturber_id);
                 tla_forall_apply(g_fn_s2, disturber_id);
-                assert(g_fn_s2(disturber_id) == always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id))));
-                entails_trans(spec.and(tla_forall(g_fn_s2)), tla_forall(g_fn_s2), always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id))));
+                assert(g_fn_s2(disturber_id) == always(lift_state(widget_disturber_guarantee(disturber_id))));
+                entails_trans(spec.and(tla_forall(g_fn_s2)), tla_forall(g_fn_s2), always(lift_state(widget_disturber_guarantee(disturber_id))));
                 if pair.0 == janitor_id {
                     assert(r12_fn(pair) == always(lift_state(widget_janitor_rely(k, disturber_id))));
-                    entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id))), always(lift_state(widget_janitor_rely(k, disturber_id))));
+                    entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_disturber_guarantee(disturber_id))), always(lift_state(widget_janitor_rely(k, disturber_id))));
                 } else {
                     assert(pair.0 == sync_id);
                     assert(r12_fn(pair) == always(lift_state(widget_sync_rely(k, disturber_id))));
-                    entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_disturber_guarantee(inner_kind(k, b), disturber_id))), always(lift_state(widget_sync_rely(k, disturber_id))));
+                    entails_trans(spec.and(tla_forall(g_fn_s2)), always(lift_state(widget_disturber_guarantee(disturber_id))), always(lift_state(widget_sync_rely(k, disturber_id))));
                 }
             }
         }
@@ -211,9 +211,9 @@ pub proof fn widget_disturbed_core_holds_for(k: SyncKind, b: Binding, spec_ok: s
         sync_id != disturber_id,
     ensures
         well_formed(widget_disturbed_core_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
-            widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
+            widget_disturbed_core_set(k, b, janitor_id, sync_id, disturber_id)),
         core(widget_disturbed_core_cluster_for(k, b, spec_ok, sync_id, janitor_id, disturber_id),
-            widget_disturbed_core_set(k, b, spec_ok, janitor_id, sync_id, disturber_id)),
+            widget_disturbed_core_set(k, b, janitor_id, sync_id, disturber_id)),
 {
     let bs = Set::<Binding>::empty().insert(b);
     let ids = Map::<Binding, int>::empty().insert(b, janitor_id);
@@ -229,9 +229,9 @@ pub proof fn widget_disturbed_core_holds_for(k: SyncKind, b: Binding, spec_ok: s
             assert(x == b && y == b);
         }
     }
-    assert(well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, janitor_id)));
-    assert(well_formed(cluster, widget_disturber_core_set(k, b, spec_ok, disturber_id)));
-    assert(well_formed(cluster, widget_sync_core_set(k, spec_ok, sync_id, ids))) by {
+    assert(well_formed(cluster, widget_janitor_core_set(janitor_id)));
+    assert(well_formed(cluster, widget_disturber_core_set(disturber_id)));
+    assert(well_formed(cluster, widget_sync_core_set(k, sync_id, ids))) by {
         assert forall |b2: Binding| #[trigger] bs.contains(b2)
             implies sync_membership(k, b2, spec_ok, inner, sync_id, ids[b2]) by {
             assert(b2 == b);
@@ -257,8 +257,8 @@ pub open spec fn widget_disturbed_core_cluster() -> CoreCluster {
 // The demo is one line of the generic statement.
 pub proof fn widget_disturbed_core_holds()
     ensures
-        well_formed(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_spec_ok(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
-        core(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_spec_ok(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
+        well_formed(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
+        core(widget_disturbed_core_cluster(), widget_disturbed_core_set(widget_kind(), widget_binding(), widget_janitor_id(), widget_sync_id(), widget_disturber_id())),
 {
     widget_demo_config_ok();
     assert(widget_kind().bindings =~= Set::<Binding>::empty().insert(widget_binding()));

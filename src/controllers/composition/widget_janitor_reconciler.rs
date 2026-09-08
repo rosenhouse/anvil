@@ -32,7 +32,7 @@ pub open spec fn widget_janitor_controller_spec(k: SyncKind, b: Binding, spec_ok
     }
 }
 
-pub open spec fn widget_janitor_core_set(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, id: int) -> CoreSet {
+pub open spec fn widget_janitor_core_set(id: int) -> CoreSet {
     CoreSet {
         members: Set::empty().insert(id),
         liveness_dependency: true_pred(),
@@ -60,11 +60,11 @@ pub proof fn janitor_rely_facts_imply_lifted_condition(k: SyncKind, spec: TempPr
 pub proof fn widget_janitor_singleton_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, id: int)
     requires
         cluster.registry.contains_pair(id, widget_janitor_controller_spec(k, b, spec_ok, id)),
-        well_formed(cluster, widget_janitor_core_set(k, b, spec_ok, id)),
+        well_formed(cluster, widget_janitor_core_set(id)),
     ensures
-        core(cluster, widget_janitor_core_set(k, b, spec_ok, id)),
+        core(cluster, widget_janitor_core_set(id)),
 {
-    let s = widget_janitor_core_set(k, b, spec_ok, id);
+    let s = widget_janitor_core_set(id);
     let spec = cluster_model(cluster);
     let inner = cluster.cluster;
 

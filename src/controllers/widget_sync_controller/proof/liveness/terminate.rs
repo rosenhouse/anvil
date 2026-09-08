@@ -26,7 +26,7 @@ verus! {
 // The sync reconciler.
 // ---------------------------------------------------------------------------
 
-pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int
 )
     requires
@@ -62,7 +62,7 @@ pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding, spec_
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))), key);
         if key.kind == k.outer_kind {
-            sync_reconcile_eventually_terminates_on_key(k, b, spec_ok, spec, cluster, controller_id, key);
+            sync_reconcile_eventually_terminates_on_key(k, b, spec, cluster, controller_id, key);
         } else {
             // The sync reconciler only ever reconciles keys of its own kind.
             always_weaken(
@@ -76,7 +76,7 @@ pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding, spec_
     spec_entails_tla_forall(spec, post);
 }
 
-pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef
 )
     requires
@@ -169,7 +169,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
 
     // Every state is idle or at one of the steps.
     entails_implies_leads_to(spec, idle, idle);
-    lemma_true_equal_to_sync_idle_or_at_any_step(k, b, spec_ok, controller_id, key);
+    lemma_true_equal_to_sync_idle_or_at_any_step(k, b, controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),
         idle,
@@ -185,7 +185,7 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     );
 }
 
-proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef)
+proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef)
     requires
         k.bindings.contains(b),
     ensures
@@ -231,7 +231,7 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, s
 // The janitor reconciler.
 // ---------------------------------------------------------------------------
 
-pub proof fn janitor_reconcile_eventually_terminates(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn janitor_reconcile_eventually_terminates(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int
 )
     requires
@@ -261,7 +261,7 @@ pub proof fn janitor_reconcile_eventually_terminates(k: SyncKind, b: Binding, sp
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::AfterListOuter))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::AfterDeleteInner))), key);
         if key.kind == inner_kind(k, b) {
-            janitor_reconcile_eventually_terminates_on_key(k, b, spec_ok, spec, cluster, controller_id, key);
+            janitor_reconcile_eventually_terminates_on_key(k, b, spec, cluster, controller_id, key);
         } else {
             always_weaken(
                 spec,
@@ -274,7 +274,7 @@ pub proof fn janitor_reconcile_eventually_terminates(k: SyncKind, b: Binding, sp
     spec_entails_tla_forall(spec, post);
 }
 
-pub proof fn janitor_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn janitor_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef
 )
     requires
@@ -339,7 +339,7 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(k: SyncKind, b: Bind
     cluster.lemma_from_init_state_to_next_state_to_reconcile_idle(spec, controller_id, key, at_janitor_step_closure(WidgetJanitorStepView::Init), janitor_step_after_init());
 
     entails_implies_leads_to(spec, idle, idle);
-    lemma_true_equal_to_janitor_idle_or_at_any_step(k, b, spec_ok, controller_id, key);
+    lemma_true_equal_to_janitor_idle_or_at_any_step(k, b, controller_id, key);
     or_leads_to_combine_and_equality!(
         spec, true_pred(),
         idle,
@@ -352,7 +352,7 @@ pub proof fn janitor_reconcile_eventually_terminates_on_key(k: SyncKind, b: Bind
     );
 }
 
-proof fn lemma_true_equal_to_janitor_idle_or_at_any_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef)
+proof fn lemma_true_equal_to_janitor_idle_or_at_any_step(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef)
     requires
         k.bindings.contains(b),
     ensures

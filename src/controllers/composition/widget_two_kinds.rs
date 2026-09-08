@@ -195,7 +195,7 @@ proof fn lemma_member_guarantee(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cl
         ids_ok(k.bindings, ids, sync_id),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
         janitors_registered(k, spec_ok, cluster, ids),
-        widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(id),
+        widget_core_set_for(k, sync_id, ids).members.contains(id),
     ensures
         id == sync_id ==> cluster.registry[id].safety_guarantee == always(lift_state(widget_sync_guarantee(k, id))),
         id != sync_id ==> {
@@ -217,8 +217,8 @@ proof fn lemma_member_rely(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster
         ids_ok(k.bindings, ids, sync_id),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
         janitors_registered(k, spec_ok, cluster, ids),
-        widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(id),
-        !widget_core_set_for(k, spec_ok, sync_id, ids).members.contains(other),
+        widget_core_set_for(k, sync_id, ids).members.contains(id),
+        !widget_core_set_for(k, sync_id, ids).members.contains(other),
     ensures
         id == sync_id ==> (cluster.registry[id].safety_partial_rely)(other) == always(lift_state(widget_sync_rely(k, other))),
         id != sync_id ==> (cluster.registry[id].safety_partial_rely)(other) == always(lift_state(widget_janitor_rely(k, other))),
@@ -260,15 +260,15 @@ pub proof fn widget_two_kind_core_holds(
         (widget_sync_controller_spec(k2, spec_ok2, sync2, ids2).membership)(cluster.cluster, sync2),
     ensures
         well_formed(cluster, union_coreset(
-            widget_core_set_for(k1, spec_ok1, sync1, ids1),
-            widget_core_set_for(k2, spec_ok2, sync2, ids2), true_pred())),
+            widget_core_set_for(k1, sync1, ids1),
+            widget_core_set_for(k2, sync2, ids2), true_pred())),
         core(cluster, union_coreset(
-            widget_core_set_for(k1, spec_ok1, sync1, ids1),
-            widget_core_set_for(k2, spec_ok2, sync2, ids2), true_pred())),
+            widget_core_set_for(k1, sync1, ids1),
+            widget_core_set_for(k2, sync2, ids2), true_pred())),
 {
     broadcast use Set::lemma_map_contains;
-    let s1 = widget_core_set_for(k1, spec_ok1, sync1, ids1);
-    let s2 = widget_core_set_for(k2, spec_ok2, sync2, ids2);
+    let s1 = widget_core_set_for(k1, sync1, ids1);
+    let s2 = widget_core_set_for(k2, sync2, ids2);
     let spec = cluster_model(cluster);
 
     widget_fanout_core_holds(k1, spec_ok1, cluster, ids1, sync1);
@@ -420,8 +420,8 @@ pub open spec fn two_kind_core_cluster() -> CoreCluster {
 
 pub open spec fn two_kind_core_set() -> CoreSet {
     union_coreset(
-        widget_core_set_for(widget_kind(), widget_spec_ok(), widget_sync_id(), widget_janitor_ids()),
-        widget_core_set_for(gadget_kind(), widget_spec_ok(), gadget_sync_id(), gadget_janitor_ids()),
+        widget_core_set_for(widget_kind(), widget_sync_id(), widget_janitor_ids()),
+        widget_core_set_for(gadget_kind(), gadget_sync_id(), gadget_janitor_ids()),
         true_pred())
 }
 

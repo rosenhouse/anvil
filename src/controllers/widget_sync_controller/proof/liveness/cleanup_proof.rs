@@ -43,7 +43,7 @@ verus! {
 // ---------------------------------------------------------------------------
 
 // The snapshot scheduled for the parent key, if any, does not carry uid `a`.
-pub open spec fn scheduled_avoids(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
+pub open spec fn scheduled_avoids(controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         s.scheduled_reconciles(controller_id).contains_key(ok)
             ==> s.scheduled_reconciles(controller_id)[ok].metadata.uid != Some(a)
@@ -51,23 +51,23 @@ pub open spec fn scheduled_avoids(k: SyncKind, b: Binding, spec_ok: spec_fn(Valu
 }
 
 // The snapshot of the ongoing reconcile of the parent key, if any, does not carry uid `a`.
-pub open spec fn ongoing_avoids(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
+pub open spec fn ongoing_avoids(controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         s.ongoing_reconciles(controller_id).contains_key(ok)
             ==> s.ongoing_reconciles(controller_id)[ok].triggering_cr.metadata.uid != Some(a)
     }
 }
 
-pub open spec fn snapshots_avoid(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
+pub open spec fn snapshots_avoid(controller_id: int, ok: ObjectRef, a: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& scheduled_avoids(k, b, spec_ok, controller_id, ok, a)(s)
-        &&& ongoing_avoids(k, b, spec_ok, controller_id, ok, a)(s)
+        &&& scheduled_avoids(controller_id, ok, a)(s)
+        &&& ongoing_avoids(controller_id, ok, a)(s)
     }
 }
 
 // Requests and responses of the reconcile of the parent key are consistent, and
 // every request from that key is its pending request.
-pub open spec fn key_msgs_ok(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, ok: ObjectRef) -> StatePred<ClusterState> {
+pub open spec fn key_msgs_ok(controller_id: int, ok: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, ok)(s)
         &&& Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, ok)(s)
@@ -79,15 +79,15 @@ pub open spec fn cleanup_spec_l0(k: SyncKind, b: Binding, spec_ok: spec_fn(Value
 }
 
 pub open spec fn cleanup_spec_l1(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid) -> TempPred<ClusterState> {
-    cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(phase_i(k, b, spec_ok, controller_id))))
+    cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(phase_i(controller_id))))
 }
 
 pub open spec fn cleanup_spec_l2(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid) -> TempPred<ClusterState> {
-    cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a))))
+    cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a))))
 }
 
 pub open spec fn cleanup_spec_l3(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid) -> TempPred<ClusterState> {
-    cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, outer_key_of(k, key)))))
+    cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a).and(always(lift_state(key_msgs_ok(controller_id, outer_key_of(k, key)))))
 }
 
 pub proof fn cleanup_spec_l0_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
@@ -106,8 +106,8 @@ pub proof fn cleanup_spec_l1_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
     ensures valid(stable(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a))),
 {
     cleanup_spec_l0_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
-    always_p_is_stable(lift_state(phase_i(k, b, spec_ok, controller_id)));
-    stable_and_n!(cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(phase_i(k, b, spec_ok, controller_id))));
+    always_p_is_stable(lift_state(phase_i(controller_id)));
+    stable_and_n!(cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(phase_i(controller_id))));
 }
 
 pub proof fn cleanup_spec_l2_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
@@ -116,8 +116,8 @@ pub proof fn cleanup_spec_l2_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
     ensures valid(stable(cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a))),
 {
     cleanup_spec_l1_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
-    always_p_is_stable(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a)));
-    stable_and_n!(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a))));
+    always_p_is_stable(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a)));
+    stable_and_n!(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a))));
 }
 
 // What the layers give, down to the stable spec.
@@ -128,16 +128,16 @@ pub proof fn lemma_cleanup_l1_facts(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
     ensures
         spec.entails(sync_stable_spec(k, b, spec_ok, cluster, controller_id, janitor_id)),
         spec.entails(always(lift_state(parent_absent(k, key, a)))),
-        spec.entails(always(lift_state(phase_i(k, b, spec_ok, controller_id)))),
+        spec.entails(always(lift_state(phase_i(controller_id)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
         spec.entails(always(lift_state(Cluster::req_drop_disabled()))),
         spec.entails(always(lift_state(Cluster::pod_monkey_disabled()))),
 {
-    entails_and_split(spec, cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(phase_i(k, b, spec_ok, controller_id))));
+    entails_and_split(spec, cleanup_spec_l0(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(phase_i(controller_id))));
     entails_and_split(spec, sync_stable_spec(k, b, spec_ok, cluster, controller_id, janitor_id), always(lift_state(parent_absent(k, key, a))));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::req_drop_disabled()));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::pod_monkey_disabled()));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
 }
 
 pub proof fn lemma_cleanup_l3_facts(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid)
@@ -146,15 +146,15 @@ pub proof fn lemma_cleanup_l3_facts(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
         spec.entails(cleanup_spec_l3(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
     ensures
         spec.entails(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-        spec.entails(always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a)))),
+        spec.entails(always(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a)))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, outer_key_of(k, key))))),
         spec.entails(always(lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, outer_key_of(k, key))))),
 {
     let ok = outer_key_of(k, key);
-    entails_and_split(spec, cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, ok))));
-    entails_and_split(spec, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, ok, a))));
-    always_weaken(spec, lift_state(key_msgs_ok(k, b, spec_ok, controller_id, ok)), lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, ok)));
-    always_weaken(spec, lift_state(key_msgs_ok(k, b, spec_ok, controller_id, ok)), lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, ok)));
+    entails_and_split(spec, cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(key_msgs_ok(controller_id, ok))));
+    entails_and_split(spec, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(controller_id, ok, a))));
+    always_weaken(spec, lift_state(key_msgs_ok(controller_id, ok)), lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, ok)));
+    always_weaken(spec, lift_state(key_msgs_ok(controller_id, ok)), lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, ok)));
 }
 
 // ---------------------------------------------------------------------------
@@ -162,7 +162,7 @@ pub proof fn lemma_cleanup_l3_facts(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
 // ---------------------------------------------------------------------------
 
 // The step relation these facts are preserved under.
-pub open spec fn cleanup_snapshot_next(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, a: Uid) -> ActionPred<ClusterState> {
+pub open spec fn cleanup_snapshot_next(k: SyncKind, cluster: Cluster, controller_id: int, key: ObjectRef, a: Uid) -> ActionPred<ClusterState> {
     |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& parent_absent(k, key, a)(s_prime)
@@ -175,13 +175,13 @@ pub proof fn lemma_always_cleanup_snapshot_next(k: SyncKind, b: Binding, spec_ok
     requires
         k.bindings.contains(b),
         spec.entails(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-    ensures spec.entails(always(lift_action(cleanup_snapshot_next(k, b, spec_ok, cluster, controller_id, key, a)))),
+    ensures spec.entails(always(lift_action(cleanup_snapshot_next(k, cluster, controller_id, key, a)))),
 {
     lemma_cleanup_l1_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     always_to_always_later(spec, lift_state(parent_absent(k, key, a)));
     combine_spec_entails_always_n!(
-        spec, lift_action(cleanup_snapshot_next(k, b, spec_ok, cluster, controller_id, key, a)),
+        spec, lift_action(cleanup_snapshot_next(k, cluster, controller_id, key, a)),
         lift_action(cluster.next()),
         later(lift_state(parent_absent(k, key, a))),
         lift_state(Cluster::crash_disabled(controller_id)),
@@ -195,15 +195,15 @@ pub proof fn lemma_true_leads_to_always_scheduled_avoids(k: SyncKind, b: Binding
         key.kind == inner_kind(k, b),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_avoids(k, b, spec_ok, controller_id, outer_key_of(k, key), a))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_avoids(controller_id, outer_key_of(k, key), a))))),
 {
     let ok = outer_key_of(k, key);
     lemma_cleanup_l1_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_cleanup_snapshot_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
     lemma_sync_terminates(k, b, spec_ok, spec, cluster, controller_id, janitor_id, ok);
-    let next = cleanup_snapshot_next(k, b, spec_ok, cluster, controller_id, key, a);
-    let sched_ok = scheduled_avoids(k, b, spec_ok, controller_id, ok, a);
+    let next = cleanup_snapshot_next(k, cluster, controller_id, key, a);
+    let sched_ok = scheduled_avoids(controller_id, ok, a);
     let idle = Cluster::reconcile_idle(controller_id, ok);
 
     // sched_ok is stable: a new schedule copies the stored object, which does not have uid a.
@@ -261,12 +261,12 @@ pub proof fn lemma_true_leads_to_always_snapshots_avoid(k: SyncKind, b: Binding,
         key.kind == inner_kind(k, b),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a))))),
 {
     let ok = outer_key_of(k, key);
     let l1 = cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
-    let sched_ok = lift_state(scheduled_avoids(k, b, spec_ok, controller_id, ok, a));
-    let target = snapshots_avoid(k, b, spec_ok, controller_id, ok, a);
+    let sched_ok = lift_state(scheduled_avoids(controller_id, ok, a));
+    let target = snapshots_avoid(controller_id, ok, a);
     assert(l1.entails(l1));
     lemma_true_leads_to_always_scheduled_avoids(k, b, spec_ok, l1, cluster, controller_id, janitor_id, key, a);
 
@@ -278,7 +278,7 @@ pub proof fn lemma_true_leads_to_always_snapshots_avoid(k: SyncKind, b: Binding,
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec_a, cluster, controller_id, janitor_id);
     lemma_always_cleanup_snapshot_next(k, b, spec_ok, spec_a, cluster, controller_id, janitor_id, key, a);
     lemma_sync_terminates(k, b, spec_ok, spec_a, cluster, controller_id, janitor_id, ok);
-    let next = cleanup_snapshot_next(k, b, spec_ok, cluster, controller_id, key, a);
+    let next = cleanup_snapshot_next(k, cluster, controller_id, key, a);
     let idle = Cluster::reconcile_idle(controller_id, ok);
     assert forall |s, s_prime: ClusterState| target(s) && #[trigger] next(s, s_prime) implies target(s_prime) by {
         let step = choose |step| cluster.next_step(s, s_prime, step);
@@ -325,14 +325,14 @@ pub proof fn lemma_true_leads_to_always_key_msgs_ok(k: SyncKind, b: Binding, spe
         k.bindings.contains(b),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, outer_key_of(k, key)))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(key_msgs_ok(controller_id, outer_key_of(k, key)))))),
 {
     let ok = outer_key_of(k, key);
     let l2 = cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
     let xor = lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, ok));
     let msg_fact = lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, ok));
     assert(l2.entails(l2));
-    entails_and_split(l2, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, ok, a))));
+    entails_and_split(l2, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(controller_id, ok, a))));
     lemma_cleanup_l1_facts(k, b, spec_ok, l2, cluster, controller_id, janitor_id, key, a);
     lemma_sync_stable_spec_facts(k, b, spec_ok, l2, cluster, controller_id, janitor_id);
     lemma_sync_terminates(k, b, spec_ok, l2, cluster, controller_id, janitor_id, ok);
@@ -342,7 +342,7 @@ pub proof fn lemma_true_leads_to_always_key_msgs_ok(k: SyncKind, b: Binding, spe
     let spec_b = l2.and(always(xor));
     assert(spec_b.entails(spec_b));
     entails_and_split(spec_b, l2, always(xor));
-    entails_and_split(spec_b, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, ok, a))));
+    entails_and_split(spec_b, cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a), always(lift_state(snapshots_avoid(controller_id, ok, a))));
     lemma_cleanup_l1_facts(k, b, spec_ok, spec_b, cluster, controller_id, janitor_id, key, a);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec_b, cluster, controller_id, janitor_id);
     always_tla_forall_apply(spec_b, |k: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, k)), ok);
@@ -355,8 +355,8 @@ pub proof fn lemma_true_leads_to_always_key_msgs_ok(k: SyncKind, b: Binding, spe
     temp_pred_equality(true_pred().and(always(xor)), always(xor));
     leads_to_trans(l2, true_pred(), always(xor), always(msg_fact));
     leads_to_always_and(l2, true_pred(), xor, msg_fact);
-    temp_pred_equality(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, ok)), xor.and(msg_fact));
-    entails_trans(spec, l2, true_pred().leads_to(always(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, ok)))));
+    temp_pred_equality(lift_state(key_msgs_ok(controller_id, ok)), xor.and(msg_fact));
+    entails_trans(spec, l2, true_pred().leads_to(always(lift_state(key_msgs_ok(controller_id, ok)))));
 }
 
 // ---------------------------------------------------------------------------
@@ -379,7 +379,7 @@ pub proof fn lemma_mirror_collected_after_step(k: SyncKind, b: Binding, spec_ok:
         cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s_prime),
         every_mirror_is_bound(k, b)(s),
         every_in_flight_inner_update_preserves_identity(k)(s),
-        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -393,7 +393,7 @@ pub proof fn lemma_mirror_collected_after_step(k: SyncKind, b: Binding, spec_ok:
         sync_triggering_crs_are_bound(k, controller_id)(s),
         sync_pending_requests_match_snapshots(k, controller_id)(s),
         Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, outer_key_of(k, key))(s),
-        ongoing_avoids(k, b, spec_ok, controller_id, outer_key_of(k, key), a)(s),
+        ongoing_avoids(controller_id, outer_key_of(k, key), a)(s),
     ensures
         mirror_collected(inner_kind(k, b), key, a)(s) ==> mirror_collected(inner_kind(k, b), key, a)(s_prime),
         (s.resources().contains_key(key) && s.resources()[key].metadata.uid == Some(m))
@@ -517,7 +517,7 @@ pub proof fn lemma_mirror_collected_after_step(k: SyncKind, b: Binding, spec_ok:
 }
 
 // The step relation of the last layer.
-pub open spec fn cleanup_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid) -> ActionPred<ClusterState> {
+pub open spec fn cleanup_step_next(k: SyncKind, b: Binding, cluster: Cluster, controller_id: int, janitor_id: int, key: ObjectRef, a: Uid) -> ActionPred<ClusterState> {
     |s: ClusterState, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
@@ -526,7 +526,7 @@ pub open spec fn cleanup_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn(Val
         &&& cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))(s_prime)
         &&& every_mirror_is_bound(k, b)(s)
         &&& every_in_flight_inner_update_preserves_identity(k)(s)
-        &&& sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s)
+        &&& sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)(s)
         &&& widget_sync_guarantee(k, controller_id)(s)
         &&& cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s)
         &&& Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s)
@@ -540,7 +540,7 @@ pub open spec fn cleanup_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn(Val
         &&& sync_triggering_crs_are_bound(k, controller_id)(s)
         &&& sync_pending_requests_match_snapshots(k, controller_id)(s)
         &&& Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, outer_key_of(k, key))(s)
-        &&& ongoing_avoids(k, b, spec_ok, controller_id, outer_key_of(k, key), a)(s)
+        &&& ongoing_avoids(controller_id, outer_key_of(k, key), a)(s)
     }
 }
 
@@ -548,7 +548,7 @@ pub proof fn lemma_always_cleanup_step_next(k: SyncKind, b: Binding, spec_ok: sp
     requires
         k.bindings.contains(b),
         spec.entails(cleanup_spec_l3(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
-    ensures spec.entails(always(lift_action(cleanup_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)))),
+    ensures spec.entails(always(lift_action(cleanup_step_next(k, b, cluster, controller_id, janitor_id, key, a)))),
 {
     let ok = outer_key_of(k, key);
     lemma_cleanup_l3_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
@@ -559,9 +559,9 @@ pub proof fn lemma_always_cleanup_step_next(k: SyncKind, b: Binding, spec_ok: sp
     always_tla_forall_apply(spec, |k: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, k, at_sync_step_closure(WidgetSyncStepView::Init))), ok);
     always_tla_forall_apply(spec, |k: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, k, cluster.reconcile_model(controller_id).done)), ok);
     always_tla_forall_apply(spec, |k: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, k, cluster.reconcile_model(controller_id).error)), ok);
-    always_weaken(spec, lift_state(snapshots_avoid(k, b, spec_ok, controller_id, ok, a)), lift_state(ongoing_avoids(k, b, spec_ok, controller_id, ok, a)));
+    always_weaken(spec, lift_state(snapshots_avoid(controller_id, ok, a)), lift_state(ongoing_avoids(controller_id, ok, a)));
     combine_spec_entails_always_n!(
-        spec, lift_action(cleanup_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, key, a)),
+        spec, lift_action(cleanup_step_next(k, b, cluster, controller_id, janitor_id, key, a)),
         lift_action(cluster.next()),
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
         later(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed())),
@@ -569,7 +569,7 @@ pub proof fn lemma_always_cleanup_step_next(k: SyncKind, b: Binding, spec_ok: sp
         later(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b)))),
         lift_state(every_mirror_is_bound(k, b)),
         lift_state(every_in_flight_inner_update_preserves_identity(k)),
-        lift_state(sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)),
+        lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)),
         lift_state(widget_sync_guarantee(k, controller_id)),
         lift_state(cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()),
         lift_state(Cluster::no_pending_request_to_api_server_from_api_server_or_external()),
@@ -583,7 +583,7 @@ pub proof fn lemma_always_cleanup_step_next(k: SyncKind, b: Binding, spec_ok: sp
         lift_state(sync_triggering_crs_are_bound(k, controller_id)),
         lift_state(sync_pending_requests_match_snapshots(k, controller_id)),
         lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, ok)),
-        lift_state(ongoing_avoids(k, b, spec_ok, controller_id, ok, a))
+        lift_state(ongoing_avoids(controller_id, ok, a))
     );
 }
 
@@ -600,7 +600,7 @@ pub proof fn lemma_true_leads_to_always_mirror_collected(k: SyncKind, b: Binding
     lemma_cleanup_l1_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_cleanup_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, key, a);
-    let next = cleanup_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
+    let next = cleanup_step_next(k, b, cluster, controller_id, janitor_id, key, a);
     let collected = mirror_collected(inner_kind(k, b), key, a);
     let p_absent = lift_state(parent_absent(k, key, a));
     assert(outer_key_of(k, key) == ok);
@@ -712,9 +712,9 @@ pub proof fn lemma_parent_absent_leads_to_always_collected(k: SyncKind, b: Bindi
         let l1 = cleanup_spec_l1(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
         let l2 = cleanup_spec_l2(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
         let l3 = cleanup_spec_l3(k, b, spec_ok, cluster, controller_id, janitor_id, key, a);
-        let ph1 = always(lift_state(phase_i(k, b, spec_ok, controller_id)));
-        let snaps = always(lift_state(snapshots_avoid(k, b, spec_ok, controller_id, outer_key_of(k, key), a)));
-        let msgs = always(lift_state(key_msgs_ok(k, b, spec_ok, controller_id, outer_key_of(k, key))));
+        let ph1 = always(lift_state(phase_i(controller_id)));
+        let snaps = always(lift_state(snapshots_avoid(controller_id, outer_key_of(k, key), a)));
+        let msgs = always(lift_state(key_msgs_ok(controller_id, outer_key_of(k, key))));
         assert(l0.entails(l0));
         assert(l1.entails(l1));
         assert(l2.entails(l2));
@@ -722,7 +722,7 @@ pub proof fn lemma_parent_absent_leads_to_always_collected(k: SyncKind, b: Bindi
         // Phase I under l0.
         entails_and_split(l0, stable_spec, always(p_absent));
         lemma_sync_stable_spec_facts(k, b, spec_ok, l0, cluster, controller_id, janitor_id);
-        lemma_true_leads_to_always_phase_i(k, b, spec_ok, l0, cluster, controller_id);
+        lemma_true_leads_to_always_phase_i(k, b, l0, cluster, controller_id);
         // The layers.
         lemma_true_leads_to_always_snapshots_avoid(k, b, spec_ok, l1, cluster, controller_id, janitor_id, key, a);
         lemma_true_leads_to_always_key_msgs_ok(k, b, spec_ok, l2, cluster, controller_id, janitor_id, key, a);
@@ -762,7 +762,7 @@ pub proof fn sync_mirrors_stably_collected(k: SyncKind, b: Binding, spec_ok: spe
         spec.entails(lift_state(cluster.init())),
         spec.entails(sync_next_with_wf(cluster, controller_id)),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)))),
+        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)))),
         spec.entails(inner_releases_terminating_objects(k)),
         spec.entails(widget_janitor_esr(k, b, janitor_id)),
     ensures spec.entails(widget_mirrors_stably_collected(k, b)),
@@ -774,7 +774,7 @@ pub proof fn sync_mirrors_stably_collected(k: SyncKind, b: Binding, spec_ok: spe
     entails_and_n!(
         spec,
         sync_next_with_wf(cluster, controller_id),
-        always(lift_state(sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id))),
+        always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id))),
         inner_releases_terminating_objects(k),
         widget_mirrors_eventually_collected(k, b),
         sync_invariants(k, b, spec_ok, cluster, controller_id, janitor_id)

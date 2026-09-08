@@ -55,7 +55,7 @@ proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, spec_ok:
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -63,7 +63,7 @@ proof fn lemma_ours_kept_after_api_server_step(k: SyncKind, b: Binding, spec_ok:
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, spec_ok, outer)(s),
+        mirror_is_ours(k, b, outer)(s),
     ensures
         s_prime.resources().contains_key(inner_key(k, outer)),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
@@ -168,7 +168,7 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, spec_ok: 
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -176,9 +176,9 @@ pub proof fn lemma_ours_after_api_server_step(k: SyncKind, b: Binding, spec_ok: 
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, spec_ok, outer)(s),
+        mirror_is_ours(k, b, outer)(s),
     ensures
-        mirror_is_ours(k, b, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, outer)(s_prime),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
         s_prime.resources()[inner_key(k, outer)].metadata.generation == s.resources()[inner_key(k, outer)].metadata.generation
             || s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
@@ -249,7 +249,7 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Val
         every_in_flight_inner_update_preserves_identity(k)(s),
         janitor_deletes_are_sound(k, b, janitor_id)(s),
         builtin_deletes_never_target_mirrors(k, b)(s),
-        sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)(s),
+        sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)(s),
         widget_sync_guarantee(k, controller_id)(s),
         cluster.every_in_flight_req_msg_from_controller_has_valid_controller_id()(s),
         Cluster::no_pending_request_to_api_server_from_api_server_or_external()(s),
@@ -257,9 +257,9 @@ pub proof fn lemma_ours_after_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Val
         Cluster::all_requests_from_builtin_controllers_are_api_delete_requests()(s),
         Cluster::synced_desired_state_is(outer)(s),
         mirror_undeleted(k, outer)(s),
-        mirror_is_ours(k, b, spec_ok, outer)(s),
+        mirror_is_ours(k, b, outer)(s),
     ensures
-        mirror_is_ours(k, b, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, outer)(s_prime),
         s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
         s_prime.resources()[inner_key(k, outer)].metadata.generation == s.resources()[inner_key(k, outer)].metadata.generation
             || s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
@@ -288,10 +288,10 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, spec_ok: spec_
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
     ensures
-        mirror_is_ours(k, b, spec_ok, outer)(s) ==> mirror_is_ours(k, b, spec_ok, outer)(s_prime),
-        mirror_absent(k, b, spec_ok, outer)(s) ==> mirror_absent(k, b, spec_ok, outer)(s_prime) || mirror_is_ours(k, b, spec_ok, outer)(s_prime),
+        mirror_is_ours(k, b, outer)(s) ==> mirror_is_ours(k, b, outer)(s_prime),
+        mirror_absent(k, outer)(s) ==> mirror_absent(k, outer)(s_prime) || mirror_is_ours(k, b, outer)(s_prime),
         s.resources().contains_key(inner_key(k, outer)) && s_prime.resources().contains_key(inner_key(k, outer))
             ==> s_prime.resources()[inner_key(k, outer)].metadata.uid == s.resources()[inner_key(k, outer)].metadata.uid,
 {
@@ -300,7 +300,7 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, spec_ok: spec_
     unmarshal_of_marshal();
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    if mirror_is_ours(k, b, spec_ok, outer)(s) {
+    if mirror_is_ours(k, b, outer)(s) {
         lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     }
     let step = choose |step| cluster.next_step(s, s_prime, step);
@@ -372,7 +372,7 @@ pub proof fn lemma_mirror_key_after_step(k: SyncKind, b: Binding, spec_ok: spec_
                                     assert(created.metadata.labels == make_inner(k, cr_outer).metadata.labels);
                                     assert(created.metadata.annotations == make_inner(k, cr_outer).metadata.annotations);
                                     assert(is_mirror_of(created_inner, outer));
-                                    assert(mirror_is_ours(k, b, spec_ok, outer)(s_prime));
+                                    assert(mirror_is_ours(k, b, outer)(s_prime));
                                 } else if id == janitor_id {
                                     assert(janitor_request_is_guaranteed(k, b, msg));
                                     assert(false);
@@ -423,12 +423,12 @@ pub proof fn lemma_spec_synced_after_step(k: SyncKind, b: Binding, spec_ok: spec
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         spec_synced(k, outer)(s),
     ensures spec_synced(k, outer)(s_prime),
 {
     let ikey = inner_key(k, outer);
-    assert(mirror_is_ours(k, b, spec_ok, outer)(s));
+    assert(mirror_is_ours(k, b, outer)(s));
     lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
@@ -490,8 +490,8 @@ pub proof fn lemma_spec_change_means_synced(k: SyncKind, b: Binding, spec_ok: sp
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
-        mirror_is_ours(k, b, spec_ok, outer)(s),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        mirror_is_ours(k, b, outer)(s),
         s_prime.resources()[inner_key(k, outer)].spec != s.resources()[inner_key(k, outer)].spec,
     ensures spec_synced(k, outer)(s_prime),
 {
@@ -539,12 +539,12 @@ pub proof fn lemma_spec_change_means_synced(k: SyncKind, b: Binding, spec_ok: sp
 // Stability of the object-level facts.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_gone_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, key: ObjectRef, uid: Uid, s: ClusterState, s_prime: ClusterState)
+pub proof fn lemma_gone_is_stable(k: SyncKind, b: Binding, key: ObjectRef, uid: Uid, s: ClusterState, s_prime: ClusterState)
     requires
         k.bindings.contains(b),
-        gone(k, b, spec_ok, key, uid)(s),
+        gone(key, uid)(s),
         store_only_grows_by_fresh_uids(s, s_prime),
-    ensures gone(k, b, spec_ok, key, uid)(s_prime),
+    ensures gone(key, uid)(s_prime),
 {
     if s_prime.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == Some(uid) {
         if s.resources().contains_key(key) && s_prime.resources()[key].metadata.uid == s.resources()[key].metadata.uid {
@@ -568,7 +568,7 @@ pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, spec_ok: sp
         every_mirror_is_bound(k, b)(s),
         every_in_flight_inner_update_preserves_identity(k)(s),
         mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s),
-    ensures present_or_gone(k, b, spec_ok, key, parent_uid, uid)(s_prime),
+    ensures present_or_gone(k, b, key, parent_uid, uid)(s_prime),
 {
     let cr = s.resources()[key];
     let inner = unmarshal(inner_kind(k, b), cr)->Ok_0;
@@ -597,7 +597,7 @@ pub proof fn lemma_mirror_object_after_step(k: SyncKind, b: Binding, spec_ok: sp
                 assert(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s_prime));
             } else {
                 assert(uid < s.api_server.uid_counter);
-                assert(gone(k, b, spec_ok, key, uid)(s_prime));
+                assert(gone(key, uid)(s_prime));
             }
         },
         _ => {

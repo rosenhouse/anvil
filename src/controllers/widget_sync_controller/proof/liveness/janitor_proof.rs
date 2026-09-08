@@ -42,15 +42,15 @@ verus! {
 // ---------------------------------------------------------------------------
 
 // The janitor is at `step` on a reconcile of the mirror object.
-pub open spec fn janitor_at_step_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, step: WidgetJanitorStepView) -> StatePred<ClusterState> {
+pub open spec fn janitor_at_step_for(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, step: WidgetJanitorStepView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& s.ongoing_reconciles(controller_id).contains_key(key)
-        &&& snapshot_of_mirror(k, b, spec_ok, s.ongoing_reconciles(controller_id)[key].triggering_cr, key, parent_uid, uid)
+        &&& snapshot_of_mirror(k, b, s.ongoing_reconciles(controller_id)[key].triggering_cr, key, parent_uid, uid)
         &&& WidgetJanitorReconcileState::unmarshal(s.ongoing_reconciles(controller_id)[key].local_state)->Ok_0.reconcile_step == step
     }
 }
 
-pub open spec fn janitor_list_req_msg(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, msg: Message) -> bool {
+pub open spec fn janitor_list_req_msg(k: SyncKind, controller_id: int, key: ObjectRef, msg: Message) -> bool {
     &&& msg.src == HostId::Controller(controller_id, key)
     &&& msg.dst is APIServer
     &&& msg.content is APIRequest
@@ -58,7 +58,7 @@ pub open spec fn janitor_list_req_msg(k: SyncKind, b: Binding, spec_ok: spec_fn(
     &&& msg.content.get_list_request() == janitor_list_request(k, key)
 }
 
-pub open spec fn janitor_delete_req_msg(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, uid: Uid, msg: Message) -> bool {
+pub open spec fn janitor_delete_req_msg(controller_id: int, key: ObjectRef, uid: Uid, msg: Message) -> bool {
     &&& msg.src == HostId::Controller(controller_id, key)
     &&& msg.dst is APIServer
     &&& msg.content is APIRequest
@@ -70,89 +70,89 @@ pub open spec fn janitor_delete_req_msg(k: SyncKind, b: Binding, spec_ok: spec_f
 }
 
 // The states of the walk.
-pub open spec fn st_idle(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
+pub open spec fn st_idle(controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
     Cluster::reconcile_idle(controller_id, key)
 }
 
-pub open spec fn st_scheduled(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
+pub open spec fn st_scheduled(controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& !s.ongoing_reconciles(controller_id).contains_key(key)
         &&& s.scheduled_reconciles(controller_id).contains_key(key)
     }
 }
 
-pub open spec fn st_init(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn st_init(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::Init)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::Init)(s)
         &&& Cluster::no_pending_req_msg(controller_id, s, key)
     }
 }
 
-pub open spec fn st_list_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn st_list_req_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg is Some
-        &&& janitor_list_req_msg(k, b, spec_ok, controller_id, key, msg)
+        &&& janitor_list_req_msg(k, controller_id, key, msg)
         &&& s.in_flight().contains(msg)
     }
 }
 
-pub open spec fn st_list_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, msg: Message) -> StatePred<ClusterState> {
+pub open spec fn st_list_req_msg_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, msg: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg)
-        &&& janitor_list_req_msg(k, b, spec_ok, controller_id, key, msg)
+        &&& janitor_list_req_msg(k, controller_id, key, msg)
         &&& s.in_flight().contains(msg)
     }
 }
 
-pub open spec fn ok_list_resp_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, resp: Message, msg: Message) -> bool {
+pub open spec fn ok_list_resp_for(resp: Message, msg: Message) -> bool {
     &&& resp_msg_matches_req_msg(resp, msg)
     &&& resp.content.get_list_response().res is Ok
 }
 
-pub open spec fn st_list_resp_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn st_list_resp_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg is Some
-        &&& janitor_list_req_msg(k, b, spec_ok, controller_id, key, msg)
-        &&& exists |resp: Message| #[trigger] s.in_flight().contains(resp) && ok_list_resp_for(k, b, spec_ok, resp, msg)
+        &&& janitor_list_req_msg(k, controller_id, key, msg)
+        &&& exists |resp: Message| #[trigger] s.in_flight().contains(resp) && ok_list_resp_for(resp, msg)
     }
 }
 
-pub open spec fn st_list_resp_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, resp: Message) -> StatePred<ClusterState> {
+pub open spec fn st_list_resp_msg_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, resp: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterListOuter)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg is Some
-        &&& janitor_list_req_msg(k, b, spec_ok, controller_id, key, msg)
+        &&& janitor_list_req_msg(k, controller_id, key, msg)
         &&& s.in_flight().contains(resp)
-        &&& ok_list_resp_for(k, b, spec_ok, resp, msg)
+        &&& ok_list_resp_for(resp, msg)
     }
 }
 
-pub open spec fn st_delete_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn st_delete_req_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterDeleteInner)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterDeleteInner)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg is Some
-        &&& janitor_delete_req_msg(k, b, spec_ok, controller_id, key, uid, msg)
+        &&& janitor_delete_req_msg(controller_id, key, uid, msg)
         &&& s.in_flight().contains(msg)
     }
 }
 
-pub open spec fn st_delete_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, msg: Message) -> StatePred<ClusterState> {
+pub open spec fn st_delete_req_msg_in_flight(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid, msg: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& janitor_at_step_for(k, b, spec_ok, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterDeleteInner)(s)
+        &&& janitor_at_step_for(k, b, controller_id, key, parent_uid, uid, WidgetJanitorStepView::AfterDeleteInner)(s)
         &&& s.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg)
-        &&& janitor_delete_req_msg(k, b, spec_ok, controller_id, key, uid, msg)
+        &&& janitor_delete_req_msg(controller_id, key, uid, msg)
         &&& s.in_flight().contains(msg)
     }
 }
 
-pub open spec fn st_terminating(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn st_terminating(k: SyncKind, key: ObjectRef, uid: Uid) -> StatePred<ClusterState> {
     inner_terminating_object(k, key, uid)
 }
 
@@ -164,14 +164,14 @@ pub open spec fn st_terminating(k: SyncKind, b: Binding, spec_ok: spec_fn(Value)
 // (or the object is gone); requests and responses of the janitor's reconcile on
 // the key are consistent; every List response the janitor holds for the key was
 // answered after the parent went absent, so it does not list the parent.
-pub open spec fn scheduled_snapshot_ok(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn scheduled_snapshot_ok(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         s.scheduled_reconciles(controller_id).contains_key(key)
-            ==> snapshot_of_mirror(k, b, spec_ok, s.scheduled_reconciles(controller_id)[key], key, parent_uid, uid)
+            ==> snapshot_of_mirror(k, b, s.scheduled_reconciles(controller_id)[key], key, parent_uid, uid)
     }
 }
 
-pub open spec fn list_responses_are_fresh(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn list_responses_are_fresh(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let reconcile = s.ongoing_reconciles(controller_id)[key];
         let step = WidgetJanitorReconcileState::unmarshal(reconcile.local_state)->Ok_0.reconcile_step;
@@ -182,20 +182,20 @@ pub open spec fn list_responses_are_fresh(k: SyncKind, b: Binding, spec_ok: spec
         && reconcile.pending_req_msg is Some
         ==> forall |resp: Message| {
             &&& #[trigger] s.in_flight().contains(resp)
-            &&& ok_list_resp_for(k, b, spec_ok, resp, reconcile.pending_req_msg->0)
+            &&& ok_list_resp_for(resp, reconcile.pending_req_msg->0)
         } ==> !janitor_reconciler::parent_listed(k, b, resp.content.get_list_response().res->Ok_0, int_to_string_view(parent_uid))
     }
 }
 
-pub open spec fn scheduled_ok_or_gone(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
-    |s: ClusterState| scheduled_snapshot_ok(k, b, spec_ok, controller_id, key, parent_uid, uid)(s) || gone(k, b, spec_ok, key, uid)(s)
+pub open spec fn scheduled_ok_or_gone(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+    |s: ClusterState| scheduled_snapshot_ok(k, b, controller_id, key, parent_uid, uid)(s) || gone(key, uid)(s)
 }
 
-pub open spec fn phase_ii(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
+pub open spec fn phase_ii(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
-        &&& scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid)(s)
+        &&& scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid)(s)
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)(s)
-        &&& list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)(s)
+        &&& list_responses_are_fresh(k, b, controller_id, key, parent_uid)(s)
     }
 }
 
@@ -212,9 +212,9 @@ pub proof fn lemma_mirror_leads_to_always_present_or_gone(k: SyncKind, b: Bindin
         spec.entails(always(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(inner_kind(k, b))))),
         spec.entails(always(lift_state(every_mirror_is_bound(k, b)))),
         spec.entails(always(lift_state(every_in_flight_inner_update_preserves_identity(k)))),
-    ensures spec.entails(lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)).leads_to(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))))),
+    ensures spec.entails(lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)).leads_to(always(lift_state(present_or_gone(k, b, key, parent_uid, uid))))),
 {
-    let post = present_or_gone(k, b, spec_ok, key, parent_uid, uid);
+    let post = present_or_gone(k, b, key, parent_uid, uid);
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
@@ -239,7 +239,7 @@ pub proof fn lemma_mirror_leads_to_always_present_or_gone(k: SyncKind, b: Bindin
             lemma_mirror_object_after_step(k, b, spec_ok, cluster, s, s_prime, key, parent_uid, uid);
         } else {
             lemma_next_only_grows_by_fresh_uids(cluster, s, s_prime);
-            lemma_gone_is_stable(k, b, spec_ok, key, uid, s, s_prime);
+            lemma_gone_is_stable(k, b, key, uid, s, s_prime);
         }
     }
     entails_implies_leads_to(spec, lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)), lift_state(post));
@@ -253,7 +253,7 @@ pub proof fn lemma_mirror_leads_to_always_present_or_gone(k: SyncKind, b: Bindin
 // Scheduling copies the stored object; while the mirror is there, that is the
 // mirror. The schedule action is always enabled while the object exists, so no
 // termination argument is needed.
-pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -264,12 +264,12 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
         spec.entails(tla_forall(|i| cluster.schedule_controller_reconcile().weak_fairness((controller_id, i)))),
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
         spec.entails(always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()))),
-        spec.entails(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid))))),
+        spec.entails(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid))))),
 {
-    let ok = scheduled_snapshot_ok(k, b, spec_ok, controller_id, key, parent_uid, uid);
-    let q = present_or_gone(k, b, spec_ok, key, parent_uid, uid);
-    let post = scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid);
+    let ok = scheduled_snapshot_ok(k, b, controller_id, key, parent_uid, uid);
+    let q = present_or_gone(k, b, key, parent_uid, uid);
+    let post = scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid);
     let pre = |s: ClusterState| mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s) && !ok(s);
     let q_and_post = |s: ClusterState| q(s) && post(s);
     let stronger_next = |s, s_prime: ClusterState| {
@@ -290,7 +290,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
     );
     // What a schedule step of the key writes while the mirror is there.
     assert forall |s: ClusterState| mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s) && Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
-    implies #[trigger] snapshot_of_mirror(k, b, spec_ok, s.resources()[key], key, parent_uid, uid) by {
+    implies #[trigger] snapshot_of_mirror(k, b, s.resources()[key], key, parent_uid, uid) by {
         assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
     }
     assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
@@ -299,7 +299,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
     assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
         && cluster.schedule_controller_reconcile().forward((controller_id, key))(s, s_prime) implies post(s_prime) by {
         assert(s_prime.scheduled_reconciles(controller_id)[key] == s.resources()[key]);
-        assert(snapshot_of_mirror(k, b, spec_ok, s.resources()[key], key, parent_uid, uid));
+        assert(snapshot_of_mirror(k, b, s.resources()[key], key, parent_uid, uid));
         assert(ok(s_prime));
     }
     assert forall |s: ClusterState| #[trigger] pre(s) implies cluster.schedule_controller_reconcile().pre((controller_id, key))(s) by {
@@ -316,8 +316,8 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
     // scheduled reconcile removes it, and nothing else touches it.
     assert forall |s, s_prime: ClusterState| post(s) && #[trigger] stronger_next(s, s_prime) implies post(s_prime) by {
         lemma_next_only_grows_by_fresh_uids(cluster, s, s_prime);
-        if gone(k, b, spec_ok, key, uid)(s) {
-            lemma_gone_is_stable(k, b, spec_ok, key, uid, s, s_prime);
+        if gone(key, uid)(s) {
+            lemma_gone_is_stable(k, b, key, uid, s, s_prime);
         } else {
             assert(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s));
             assert(ok(s));
@@ -326,7 +326,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
                 Step::ScheduleControllerReconcileStep(input) => {
                     if input.0 == controller_id && input.1 == key {
                         assert(s_prime.scheduled_reconciles(controller_id)[key] == s.resources()[key]);
-                        assert(snapshot_of_mirror(k, b, spec_ok, s.resources()[key], key, parent_uid, uid));
+                        assert(snapshot_of_mirror(k, b, s.resources()[key], key, parent_uid, uid));
                         assert(ok(s_prime));
                     } else {
                         if s_prime.scheduled_reconciles(controller_id).contains_key(key) {
@@ -356,7 +356,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_ok_or_gone(k: SyncKind, b: Bin
 
 // A List answered while the parent is absent (and its uid string is bound to the
 // outer key) does not list the parent.
-pub proof fn lemma_list_answered_while_parent_absent(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, s: ClusterState, req: ListRequest, key: ObjectRef, parent_uid: Uid)
+pub proof fn lemma_list_answered_while_parent_absent(k: SyncKind, b: Binding, s: ClusterState, req: ListRequest, key: ObjectRef, parent_uid: Uid)
     requires
         k.bindings.contains(b),
         parent_absent(k, key, parent_uid)(s),
@@ -390,7 +390,7 @@ pub proof fn lemma_list_answered_while_parent_absent(k: SyncKind, b: Binding, sp
     }
 }
 
-pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, 
     cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, s: ClusterState, s_prime: ClusterState
 )
     requires
@@ -406,8 +406,8 @@ pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, s
         janitor_triggering_crs_are_sound(k, b, controller_id)(s),
         janitor_decisions_are_sound(k, b, controller_id)(s),
         parent_absent(k, key, parent_uid)(s),
-        list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)(s),
-    ensures list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)(s_prime),
+        list_responses_are_fresh(k, b, controller_id, key, parent_uid)(s),
+    ensures list_responses_are_fresh(k, b, controller_id, key, parent_uid)(s_prime),
 {
     let parent = int_to_string_view(parent_uid);
     WidgetJanitorReconcileState::marshal_preserves_integrity();
@@ -423,7 +423,7 @@ pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, s
             let pending = reconcile_prime.pending_req_msg->0;
             assert forall |resp: Message| {
                 &&& #[trigger] s_prime.in_flight().contains(resp)
-                &&& ok_list_resp_for(k, b, spec_ok, resp, pending)
+                &&& ok_list_resp_for(resp, pending)
             } implies !janitor_reconciler::parent_listed(k, b, resp.content.get_list_response().res->Ok_0, parent) by {
                 let step = choose |step| cluster.next_step(s, s_prime, step);
                 match step {
@@ -441,7 +441,7 @@ pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, s
                                     assert(resp.content.get_list_response() == handle_list_request(req, s.api_server));
                                     assert(janitor_snapshot_is_sound(k, b, reconcile.triggering_cr, key)(s));
                                     assert(parent_uid_string_is_bound_to_key(parent, outer_key_of(k, key))(s));
-                                    lemma_list_answered_while_parent_absent(k, b, spec_ok, s, req, key, parent_uid);
+                                    lemma_list_answered_while_parent_absent(k, b, s, req, key, parent_uid);
                                 },
                                 _ => {
                                     assert(false);
@@ -521,7 +521,7 @@ pub proof fn lemma_list_responses_are_fresh_preserved(k: SyncKind, b: Binding, s
     }
 }
 
-pub proof fn lemma_true_leads_to_always_list_responses_are_fresh(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_true_leads_to_always_list_responses_are_fresh(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid
 )
     requires
@@ -538,9 +538,9 @@ pub proof fn lemma_true_leads_to_always_list_responses_are_fresh(k: SyncKind, b:
         spec.entails(always(lift_state(janitor_triggering_crs_are_sound(k, b, controller_id)))),
         spec.entails(always(lift_state(janitor_decisions_are_sound(k, b, controller_id)))),
         spec.entails(always(lift_state(parent_absent(k, key, parent_uid)))),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid))))),
 {
-    let post = list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid);
+    let post = list_responses_are_fresh(k, b, controller_id, key, parent_uid);
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
@@ -567,7 +567,7 @@ pub proof fn lemma_true_leads_to_always_list_responses_are_fresh(k: SyncKind, b:
     entails_implies_leads_to(spec, lift_state(Cluster::reconcile_idle(controller_id, key)), lift_state(post));
     leads_to_trans(spec, true_pred(), lift_state(Cluster::reconcile_idle(controller_id, key)), lift_state(post));
     assert forall |s, s_prime: ClusterState| post(s) && #[trigger] stronger_next(s, s_prime) implies post(s_prime) by {
-        lemma_list_responses_are_fresh_preserved(k, b, spec_ok, cluster, controller_id, key, parent_uid, s, s_prime);
+        lemma_list_responses_are_fresh_preserved(k, b, cluster, controller_id, key, parent_uid, s, s_prime);
     }
     leads_to_stable(spec, lift_action(stronger_next), true_pred(), lift_state(post));
 }
@@ -578,7 +578,7 @@ pub proof fn lemma_true_leads_to_always_list_responses_are_fresh(k: SyncKind, b:
 // ---------------------------------------------------------------------------
 
 // idle ~> scheduled \/ gone: the schedule action is enabled while the object exists.
-pub proof fn lemma_idle_leads_to_scheduled_or_gone(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_idle_leads_to_scheduled_or_gone(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -588,15 +588,15 @@ pub proof fn lemma_idle_leads_to_scheduled_or_gone(k: SyncKind, b: Binding, spec
         cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(tla_forall(|i| cluster.schedule_controller_reconcile().weak_fairness((controller_id, i)))),
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
-        spec.entails(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))),
+        spec.entails(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))),
     ensures
-        spec.entails(lift_state(st_idle(k, b, spec_ok, controller_id, key))
-            .leads_to(lift_state(st_scheduled(k, b, spec_ok, controller_id, key)).or(lift_state(gone(k, b, spec_ok, key, uid))))),
+        spec.entails(lift_state(st_idle(controller_id, key))
+            .leads_to(lift_state(st_scheduled(controller_id, key)).or(lift_state(gone(key, uid))))),
 {
-    let q = present_or_gone(k, b, spec_ok, key, parent_uid, uid);
-    let idle = st_idle(k, b, spec_ok, controller_id, key);
-    let scheduled = st_scheduled(k, b, spec_ok, controller_id, key);
-    let g = gone(k, b, spec_ok, key, uid);
+    let q = present_or_gone(k, b, key, parent_uid, uid);
+    let idle = st_idle(controller_id, key);
+    let scheduled = st_scheduled(controller_id, key);
+    let g = gone(key, uid);
     let pre = |s: ClusterState| idle(s) && !scheduled(s) && mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s);
     let post = |s: ClusterState| scheduled(s) || g(s);
     let idle_q_post = |s: ClusterState| idle(s) && q(s) && post(s);
@@ -640,7 +640,7 @@ pub proof fn lemma_idle_leads_to_scheduled_or_gone(k: SyncKind, b: Binding, spec
 }
 
 // scheduled ~> Init \/ gone: running the scheduled reconcile copies the snapshot.
-pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -651,28 +651,28 @@ pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, spec
         spec.entails(tla_forall(|i: (Option<Message>, Option<ObjectRef>)| cluster.controller_next().weak_fairness((controller_id, i.0, i.1)))),
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
-        spec.entails(always(lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid)))),
+        spec.entails(always(lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid)))),
     ensures
-        spec.entails(lift_state(st_scheduled(k, b, spec_ok, controller_id, key))
-            .leads_to(lift_state(st_init(k, b, spec_ok, controller_id, key, parent_uid, uid)).or(lift_state(gone(k, b, spec_ok, key, uid))))),
+        spec.entails(lift_state(st_scheduled(controller_id, key))
+            .leads_to(lift_state(st_init(k, b, controller_id, key, parent_uid, uid)).or(lift_state(gone(key, uid))))),
 {
-    let pre = st_scheduled(k, b, spec_ok, controller_id, key);
-    let init = st_init(k, b, spec_ok, controller_id, key, parent_uid, uid);
-    let g = gone(k, b, spec_ok, key, uid);
+    let pre = st_scheduled(controller_id, key);
+    let init = st_init(k, b, controller_id, key, parent_uid, uid);
+    let g = gone(key, uid);
     let post = |s: ClusterState| init(s) || g(s);
     let input = (None::<Message>, Some(key));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
         &&& Cluster::crash_disabled(controller_id)(s)
-        &&& scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid)(s)
+        &&& scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
         lift_action(cluster.next()),
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
         lift_state(Cluster::crash_disabled(controller_id)),
-        lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid))
+        lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid))
     );
     WidgetJanitorReconcileState::marshal_preserves_integrity();
     assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
@@ -683,9 +683,9 @@ pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, spec
             assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg is None);
             assert(s_prime.ongoing_reconciles(controller_id)[key].local_state == janitor_reconciler::reconcile_init_state().marshal());
             if g(s) {
-                lemma_gone_is_stable(k, b, spec_ok, key, uid, s, s_prime);
+                lemma_gone_is_stable(k, b, key, uid, s, s_prime);
             } else {
-                assert(scheduled_snapshot_ok(k, b, spec_ok, controller_id, key, parent_uid, uid)(s));
+                assert(scheduled_snapshot_ok(k, b, controller_id, key, parent_uid, uid)(s));
                 assert(init(s_prime));
             }
         } else {
@@ -700,9 +700,9 @@ pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, spec
         assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg is None);
         assert(s_prime.ongoing_reconciles(controller_id)[key].local_state == janitor_reconciler::reconcile_init_state().marshal());
         if g(s) {
-            lemma_gone_is_stable(k, b, spec_ok, key, uid, s, s_prime);
+            lemma_gone_is_stable(k, b, key, uid, s, s_prime);
         } else {
-            assert(scheduled_snapshot_ok(k, b, spec_ok, controller_id, key, parent_uid, uid)(s));
+            assert(scheduled_snapshot_ok(k, b, controller_id, key, parent_uid, uid)(s));
             assert(init(s_prime));
         }
     }
@@ -714,7 +714,7 @@ pub proof fn lemma_scheduled_leads_to_init_or_gone(k: SyncKind, b: Binding, spec
 }
 
 // Init ~> the List is in flight.
-pub proof fn lemma_init_leads_to_list_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_init_leads_to_list_req_in_flight(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -726,11 +726,11 @@ pub proof fn lemma_init_leads_to_list_req_in_flight(k: SyncKind, b: Binding, spe
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
     ensures
-        spec.entails(lift_state(st_init(k, b, spec_ok, controller_id, key, parent_uid, uid))
-            .leads_to(lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)))),
+        spec.entails(lift_state(st_init(k, b, controller_id, key, parent_uid, uid))
+            .leads_to(lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid)))),
 {
-    let pre = st_init(k, b, spec_ok, controller_id, key, parent_uid, uid);
-    let post = st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid);
+    let pre = st_init(k, b, controller_id, key, parent_uid, uid);
+    let post = st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid);
     let input = (None::<Message>, Some(key));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
@@ -782,7 +782,7 @@ pub proof fn lemma_init_leads_to_list_req_in_flight(k: SyncKind, b: Binding, spe
 }
 
 // The List in flight ~> an Ok List response in flight.
-pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -796,11 +796,11 @@ pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, spec_ok:
         spec.entails(always(lift_state(Cluster::req_drop_disabled()))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)))),
     ensures
-        spec.entails(lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid))
-            .leads_to(lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)))),
+        spec.entails(lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid))
+            .leads_to(lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid)))),
 {
-    let post = st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid);
-    let pre_of = |msg: Message| lift_state(st_list_req_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, msg));
+    let post = st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid);
+    let pre_of = |msg: Message| lift_state(st_list_req_msg_in_flight(k, b, controller_id, key, parent_uid, uid, msg));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
@@ -817,7 +817,7 @@ pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, spec_ok:
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key))
     );
     assert forall |msg: Message| spec.entails(#[trigger] pre_of(msg).leads_to(lift_state(post))) by {
-        let pre = st_list_req_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, msg);
+        let pre = st_list_req_msg_in_flight(k, b, controller_id, key, parent_uid, uid, msg);
         let input = Some(msg);
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.api_server_next().forward(input)(s, s_prime) implies post(s_prime) by {
@@ -826,7 +826,7 @@ pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, spec_ok:
             assert(resp_msg_matches_req_msg(resp, msg));
             assert(resp.content.get_list_response().res is Ok);
             assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
-            assert(ok_list_resp_for(k, b, spec_ok, resp, msg));
+            assert(ok_list_resp_for(resp, msg));
         }
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
             let step = choose |step| cluster.next_step(s, s_prime, step);
@@ -866,19 +866,19 @@ pub proof fn lemma_list_req_leads_to_list_resp(k: SyncKind, b: Binding, spec_ok:
         cluster.lemma_pre_leads_to_post_by_api_server(spec, input, stronger_next, APIServerStep::HandleRequest, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)), {
-        assert forall |ex| #[trigger] lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid)), {
+        assert forall |ex| #[trigger] lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let msg = ex.head().ongoing_reconciles(controller_id)[key].pending_req_msg->0;
             assert(pre_of(msg).satisfied_by(ex));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid)));
     });
 }
 
 // An Ok List response in flight ~> the Delete is in flight. The response was
 // answered while the parent was absent (phase II), so the janitor deletes.
-pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -890,19 +890,19 @@ pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Bindi
         spec.entails(always(lift_state(Cluster::there_is_the_controller_state(controller_id)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
         spec.entails(always(lift_state(Cluster::every_in_flight_msg_has_unique_id()))),
-        spec.entails(always(lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)))),
+        spec.entails(always(lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid)))),
     ensures
-        spec.entails(lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid))
-            .leads_to(lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)))),
+        spec.entails(lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid))
+            .leads_to(lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid)))),
 {
-    let post = st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid);
-    let pre_of = |resp: Message| lift_state(st_list_resp_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, resp));
+    let post = st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid);
+    let pre_of = |resp: Message| lift_state(st_list_resp_msg_in_flight(k, b, controller_id, key, parent_uid, uid, resp));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::every_in_flight_msg_has_unique_id()(s)
-        &&& list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)(s)
+        &&& list_responses_are_fresh(k, b, controller_id, key, parent_uid)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
@@ -910,12 +910,12 @@ pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Bindi
         lift_state(Cluster::there_is_the_controller_state(controller_id)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::every_in_flight_msg_has_unique_id()),
-        lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid))
+        lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid))
     );
     WidgetJanitorReconcileState::marshal_preserves_integrity();
     unmarshal_of_marshal();
     assert forall |resp: Message| spec.entails(#[trigger] pre_of(resp).leads_to(lift_state(post))) by {
-        let pre = st_list_resp_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, resp);
+        let pre = st_list_resp_msg_in_flight(k, b, controller_id, key, parent_uid, uid, resp);
         let input = (Some(resp), Some(key));
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.controller_next().forward((controller_id, input.0, input.1))(s, s_prime) implies post(s_prime) by {
@@ -934,7 +934,7 @@ pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Bindi
             let msg = controller_req_msg(controller_id, key, s.rpc_id_allocator.allocate().1, req);
             assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg));
             assert(s_prime.in_flight().contains(msg));
-            assert(janitor_delete_req_msg(k, b, spec_ok, controller_id, key, uid, msg));
+            assert(janitor_delete_req_msg(controller_id, key, uid, msg));
             assert(s_prime.ongoing_reconciles(controller_id)[key].local_state == janitor_reconciler::at_step(WidgetJanitorStepView::AfterDeleteInner).marshal());
         }
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
@@ -995,20 +995,20 @@ pub proof fn lemma_list_resp_leads_to_delete_req_in_flight(k: SyncKind, b: Bindi
         cluster.lemma_pre_leads_to_post_by_controller(spec, controller_id, input, stronger_next, ControllerStep::ContinueReconcile, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)), {
-        assert forall |ex| #[trigger] lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid)), {
+        assert forall |ex| #[trigger] lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let s = ex.head();
             let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
-            let resp = choose |resp: Message| #[trigger] s.in_flight().contains(resp) && ok_list_resp_for(k, b, spec_ok, resp, msg);
+            let resp = choose |resp: Message| #[trigger] s.in_flight().contains(resp) && ok_list_resp_for(resp, msg);
             assert(pre_of(resp).satisfied_by(ex));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid)));
     });
 }
 
 // The Delete in flight ~> the object is terminating or gone.
-pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, 
+pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Binding, 
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid
 )
     requires
@@ -1022,14 +1022,14 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         spec.entails(always(lift_state(Cluster::req_drop_disabled()))),
         spec.entails(always(lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)))),
-        spec.entails(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))),
+        spec.entails(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))),
     ensures
-        spec.entails(lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid))
-            .leads_to(lift_state(st_terminating(k, b, spec_ok, key, uid)).or(lift_state(gone(k, b, spec_ok, key, uid))))),
+        spec.entails(lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid))
+            .leads_to(lift_state(st_terminating(k, key, uid)).or(lift_state(gone(key, uid))))),
 {
-    let g = gone(k, b, spec_ok, key, uid);
-    let post = |s: ClusterState| st_terminating(k, b, spec_ok, key, uid)(s) || g(s);
-    let pre_of = |msg: Message| lift_state(st_delete_req_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, msg));
+    let g = gone(key, uid);
+    let post = |s: ClusterState| st_terminating(k, key, uid)(s) || g(s);
+    let pre_of = |msg: Message| lift_state(st_delete_req_msg_in_flight(k, b, controller_id, key, parent_uid, uid, msg));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
         &&& Cluster::there_is_the_controller_state(controller_id)(s)
@@ -1037,7 +1037,7 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         &&& Cluster::req_drop_disabled()(s)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)(s)
-        &&& present_or_gone(k, b, spec_ok, key, parent_uid, uid)(s)
+        &&& present_or_gone(k, b, key, parent_uid, uid)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
@@ -1047,16 +1047,16 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         lift_state(Cluster::req_drop_disabled()),
         lift_state(Cluster::each_object_in_etcd_is_weakly_well_formed()),
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)),
-        lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))
+        lift_state(present_or_gone(k, b, key, parent_uid, uid))
     );
     assert forall |msg: Message| spec.entails(#[trigger] pre_of(msg).leads_to(lift_state(post))) by {
-        let pre = st_delete_req_msg_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid, msg);
+        let pre = st_delete_req_msg_in_flight(k, b, controller_id, key, parent_uid, uid, msg);
         let input = Some(msg);
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.api_server_next().forward(input)(s, s_prime) implies post(s_prime) by {
             lemma_api_server_step_only_grows_by_fresh_uids(cluster, s, s_prime, msg);
             if g(s) {
-                lemma_gone_is_stable(k, b, spec_ok, key, uid, s, s_prime);
+                lemma_gone_is_stable(k, b, key, uid, s, s_prime);
             } else {
                 assert(mirror_object_is(inner_kind(k, b), key, parent_uid, uid)(s));
                 assert(Cluster::etcd_object_is_weakly_well_formed(key)(s));
@@ -1068,7 +1068,7 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
                     assert(s_prime.resources().contains_key(key));
                     assert(s_prime.resources()[key].metadata.uid == Some(uid));
                     assert(s_prime.resources()[key].metadata.deletion_timestamp is Some);
-                    assert(st_terminating(k, b, spec_ok, key, uid)(s_prime));
+                    assert(st_terminating(k, key, uid)(s_prime));
                 } else {
                     assert(!s_prime.resources().contains_key(key));
                     assert(uid < s_prime.api_server.uid_counter);
@@ -1113,15 +1113,15 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
         cluster.lemma_pre_leads_to_post_by_api_server(spec, input, stronger_next, APIServerStep::HandleRequest, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)), {
-        assert forall |ex| #[trigger] lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid)), {
+        assert forall |ex| #[trigger] lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let msg = ex.head().ongoing_reconciles(controller_id)[key].pending_req_msg->0;
             assert(pre_of(msg).satisfied_by(ex));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid)));
     });
-    temp_pred_equality(lift_state(post), lift_state(st_terminating(k, b, spec_ok, key, uid)).or(lift_state(g)));
+    temp_pred_equality(lift_state(post), lift_state(st_terminating(k, key, uid)).or(lift_state(g)));
 }
 
 // ---------------------------------------------------------------------------
@@ -1131,7 +1131,7 @@ pub proof fn lemma_delete_req_leads_to_terminating_or_gone(k: SyncKind, b: Bindi
 // The stable spec together with the premise of R3 for one object, made stable.
 pub open spec fn janitor_spec_with_object(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> TempPred<ClusterState> {
     janitor_stable_spec(k, b, spec_ok, cluster, controller_id)
-    .and(always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))))
+    .and(always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))))
 }
 
 pub proof fn janitor_spec_with_object_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid)
@@ -1141,16 +1141,16 @@ pub proof fn janitor_spec_with_object_is_stable(k: SyncKind, b: Binding, spec_ok
 {
     janitor_stable_spec_is_stable(k, b, spec_ok, cluster, controller_id);
     always_p_is_stable(lift_state(parent_absent(k, key, parent_uid)));
-    always_p_is_stable(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)));
-    stable_and_n!(always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))));
+    always_p_is_stable(lift_state(present_or_gone(k, b, key, parent_uid, uid)));
+    stable_and_n!(always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, key, parent_uid, uid))));
     stable_and_n!(
         janitor_stable_spec(k, b, spec_ok, cluster, controller_id),
-        always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))))
+        always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, key, parent_uid, uid))))
     );
 }
 
 pub open spec fn janitor_spec_with_phase_i(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> TempPred<ClusterState> {
-    janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid).and(always(lift_state(phase_i(k, b, spec_ok, controller_id))))
+    janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid).and(always(lift_state(phase_i(controller_id))))
 }
 
 pub proof fn janitor_spec_with_phase_i_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid)
@@ -1159,12 +1159,12 @@ pub proof fn janitor_spec_with_phase_i_is_stable(k: SyncKind, b: Binding, spec_o
     ensures valid(stable(janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid))),
 {
     janitor_spec_with_object_is_stable(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid);
-    always_p_is_stable(lift_state(phase_i(k, b, spec_ok, controller_id)));
-    stable_and_n!(janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_i(k, b, spec_ok, controller_id))));
+    always_p_is_stable(lift_state(phase_i(controller_id)));
+    stable_and_n!(janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_i(controller_id))));
 }
 
 pub open spec fn janitor_spec_with_phases(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, key: ObjectRef, parent_uid: Uid, uid: Uid) -> TempPred<ClusterState> {
-    janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid).and(always(lift_state(phase_ii(k, b, spec_ok, controller_id, key, parent_uid, uid))))
+    janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid).and(always(lift_state(phase_ii(k, b, controller_id, key, parent_uid, uid))))
 }
 
 // Under the stable spec, the premise and phase I: phase II eventually holds forever.
@@ -1176,20 +1176,20 @@ pub proof fn lemma_true_leads_to_always_phase_ii(k: SyncKind, b: Binding, spec_o
         key.kind == inner_kind(k, b),
         cluster.controller_models.contains_pair(controller_id, widget_janitor_controller_model(k, b)),
         spec.entails(janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid)),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(phase_ii(k, b, spec_ok, controller_id, key, parent_uid, uid))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(phase_ii(k, b, controller_id, key, parent_uid, uid))))),
 {
     let spec_o = janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid);
-    entails_and_split(spec, spec_o, always(lift_state(phase_i(k, b, spec_ok, controller_id))));
-    entails_and_split(spec, janitor_stable_spec(k, b, spec_ok, cluster, controller_id), always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))));
-    entails_and_split(spec, always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))));
+    entails_and_split(spec, spec_o, always(lift_state(phase_i(controller_id))));
+    entails_and_split(spec, janitor_stable_spec(k, b, spec_ok, cluster, controller_id), always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))));
+    entails_and_split(spec, always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, key, parent_uid, uid))));
     lemma_janitor_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id);
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::req_drop_disabled()));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::pod_monkey_disabled()));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
     always_tla_forall_apply(spec, |key: ObjectRef| lift_state(Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)), key);
 
     // Termination of every reconcile of the janitor.
-    terminate::janitor_reconcile_eventually_terminates(k, b, spec_ok, spec, cluster, controller_id);
+    terminate::janitor_reconcile_eventually_terminates(k, b, spec, cluster, controller_id);
     let idle_of = |key: ObjectRef| true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key)));
     spec_entails_tla_forall_apply(spec, idle_of, key);
     let idle_of_alt = |key: ObjectRef| true_pred().leads_to(lift_state(|s: ClusterState| !(s.ongoing_reconciles(controller_id).contains_key(key))));
@@ -1198,25 +1198,25 @@ pub proof fn lemma_true_leads_to_always_phase_ii(k: SyncKind, b: Binding, spec_o
     }
     tla_forall_p_tla_forall_q_equality(idle_of, idle_of_alt);
 
-    lemma_true_leads_to_always_scheduled_ok_or_gone(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_true_leads_to_always_scheduled_ok_or_gone(k, b, spec, cluster, controller_id, key, parent_uid, uid);
     cluster.lemma_true_leads_to_always_pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(spec, controller_id, key);
-    lemma_true_leads_to_always_list_responses_are_fresh(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid);
+    lemma_true_leads_to_always_list_responses_are_fresh(k, b, spec, cluster, controller_id, key, parent_uid);
     leads_to_always_and(
         spec, true_pred(),
-        lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid)),
+        lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid)),
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key))
     );
     leads_to_always_and(
         spec, true_pred(),
-        lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid))
+        lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid))
             .and(lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key))),
-        lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid))
+        lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid))
     );
     temp_pred_equality(
-        lift_state(phase_ii(k, b, spec_ok, controller_id, key, parent_uid, uid)),
-        lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid))
+        lift_state(phase_ii(k, b, controller_id, key, parent_uid, uid)),
+        lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid))
             .and(lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)))
-            .and(lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)))
+            .and(lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid)))
     );
 }
 
@@ -1231,39 +1231,39 @@ pub proof fn lemma_true_leads_to_gone_under_phases(k: SyncKind, b: Binding, spec
         spec.entails(janitor_spec_with_phases(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid)),
     ensures spec.entails(true_pred().leads_to(lift_state(object_is_gone(key, uid)))),
 {
-    let phase_ii_state = phase_ii(k, b, spec_ok, controller_id, key, parent_uid, uid);
+    let phase_ii_state = phase_ii(k, b, controller_id, key, parent_uid, uid);
     entails_and_split(spec, janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_ii_state)));
-    entails_and_split(spec, janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_i(k, b, spec_ok, controller_id))));
-    entails_and_split(spec, janitor_stable_spec(k, b, spec_ok, cluster, controller_id), always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid)))));
-    entails_and_split(spec, always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid))));
+    entails_and_split(spec, janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid), always(lift_state(phase_i(controller_id))));
+    entails_and_split(spec, janitor_stable_spec(k, b, spec_ok, cluster, controller_id), always(lift_state(parent_absent(k, key, parent_uid))).and(always(lift_state(present_or_gone(k, b, key, parent_uid, uid)))));
+    entails_and_split(spec, always(lift_state(parent_absent(k, key, parent_uid))), always(lift_state(present_or_gone(k, b, key, parent_uid, uid))));
     lemma_janitor_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id);
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::req_drop_disabled()));
-    always_weaken(spec, lift_state(phase_i(k, b, spec_ok, controller_id)), lift_state(Cluster::pod_monkey_disabled()));
-    always_weaken(spec, lift_state(phase_ii_state), lift_state(scheduled_ok_or_gone(k, b, spec_ok, controller_id, key, parent_uid, uid)));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
+    always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
+    always_weaken(spec, lift_state(phase_ii_state), lift_state(scheduled_ok_or_gone(k, b, controller_id, key, parent_uid, uid)));
     always_weaken(spec, lift_state(phase_ii_state), lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)));
-    always_weaken(spec, lift_state(phase_ii_state), lift_state(list_responses_are_fresh(k, b, spec_ok, controller_id, key, parent_uid)));
+    always_weaken(spec, lift_state(phase_ii_state), lift_state(list_responses_are_fresh(k, b, controller_id, key, parent_uid)));
 
     // true ~> idle
-    terminate::janitor_reconcile_eventually_terminates(k, b, spec_ok, spec, cluster, controller_id);
+    terminate::janitor_reconcile_eventually_terminates(k, b, spec, cluster, controller_id);
     spec_entails_tla_forall_apply(spec, |key: ObjectRef| true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key))), key);
 
-    let idle = lift_state(st_idle(k, b, spec_ok, controller_id, key));
-    let scheduled = lift_state(st_scheduled(k, b, spec_ok, controller_id, key));
-    let init = lift_state(st_init(k, b, spec_ok, controller_id, key, parent_uid, uid));
-    let list_req = lift_state(st_list_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid));
-    let list_resp = lift_state(st_list_resp_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid));
-    let delete_req = lift_state(st_delete_req_in_flight(k, b, spec_ok, controller_id, key, parent_uid, uid));
-    let terminating = lift_state(st_terminating(k, b, spec_ok, key, uid));
-    let g = lift_state(gone(k, b, spec_ok, key, uid));
+    let idle = lift_state(st_idle(controller_id, key));
+    let scheduled = lift_state(st_scheduled(controller_id, key));
+    let init = lift_state(st_init(k, b, controller_id, key, parent_uid, uid));
+    let list_req = lift_state(st_list_req_in_flight(k, b, controller_id, key, parent_uid, uid));
+    let list_resp = lift_state(st_list_resp_in_flight(k, b, controller_id, key, parent_uid, uid));
+    let delete_req = lift_state(st_delete_req_in_flight(k, b, controller_id, key, parent_uid, uid));
+    let terminating = lift_state(st_terminating(k, key, uid));
+    let g = lift_state(gone(key, uid));
     let target = lift_state(object_is_gone(key, uid));
 
-    lemma_idle_leads_to_scheduled_or_gone(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
-    lemma_scheduled_leads_to_init_or_gone(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
-    lemma_init_leads_to_list_req_in_flight(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
-    lemma_list_req_leads_to_list_resp(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
-    lemma_list_resp_leads_to_delete_req_in_flight(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
-    lemma_delete_req_leads_to_terminating_or_gone(k, b, spec_ok, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_idle_leads_to_scheduled_or_gone(k, b, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_scheduled_leads_to_init_or_gone(k, b, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_init_leads_to_list_req_in_flight(k, b, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_list_req_leads_to_list_resp(k, b, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_list_resp_leads_to_delete_req_in_flight(k, b, spec, cluster, controller_id, key, parent_uid, uid);
+    lemma_delete_req_leads_to_terminating_or_gone(k, b, spec, cluster, controller_id, key, parent_uid, uid);
     // D3 for this object.
     spec_entails_tla_forall_apply(
         spec,
@@ -1305,8 +1305,8 @@ pub proof fn lemma_object_leads_to_gone(k: SyncKind, b: Binding, spec_ok: spec_f
     let spec_o = janitor_spec_with_object(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid);
     let spec_i = janitor_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid);
     let spec_ii = janitor_spec_with_phases(k, b, spec_ok, cluster, controller_id, key, parent_uid, uid);
-    let phase_i_temp = always(lift_state(phase_i(k, b, spec_ok, controller_id)));
-    let phase_ii_temp = always(lift_state(phase_ii(k, b, spec_ok, controller_id, key, parent_uid, uid)));
+    let phase_i_temp = always(lift_state(phase_i(controller_id)));
+    let phase_ii_temp = always(lift_state(phase_ii(k, b, controller_id, key, parent_uid, uid)));
 
     // Under both phases.
     assert(spec_ii.entails(spec_ii));
@@ -1324,7 +1324,7 @@ pub proof fn lemma_object_leads_to_gone(k: SyncKind, b: Binding, spec_ok: spec_f
     temp_pred_equality(true_pred().and(phase_i_temp), phase_i_temp);
     assert(spec_o.entails(spec_o));
     lemma_janitor_stable_spec_facts(k, b, spec_ok, spec_o, cluster, controller_id);
-    lemma_true_leads_to_always_phase_i(k, b, spec_ok, spec_o, cluster, controller_id);
+    lemma_true_leads_to_always_phase_i(k, b, spec_o, cluster, controller_id);
     leads_to_trans(spec_o, true_pred(), phase_i_temp, target);
     entails_trans(spec, spec_o, true_pred().leads_to(target));
 }
@@ -1343,7 +1343,7 @@ pub proof fn lemma_mirror_eventually_collected_per_object(k: SyncKind, b: Bindin
     let stable_spec = janitor_stable_spec(k, b, spec_ok, cluster, controller_id);
     let p = lift_state(parent_absent(k, key, parent_uid));
     let m = lift_state(mirror_object_is(inner_kind(k, b), key, parent_uid, uid));
-    let q = lift_state(present_or_gone(k, b, spec_ok, key, parent_uid, uid));
+    let q = lift_state(present_or_gone(k, b, key, parent_uid, uid));
     let target = lift_state(object_is_gone(key, uid));
     assert(stable_spec.entails(stable_spec));
     lemma_janitor_stable_spec_facts(k, b, spec_ok, stable_spec, cluster, controller_id);
@@ -1427,7 +1427,7 @@ pub proof fn janitor_satisfies_its_spec(k: SyncKind, b: Binding, spec_ok: spec_f
     cluster.lemma_always_all_requests_from_pod_monkey_are_api_pod_requests(spec);
     cluster.lemma_always_all_requests_from_builtin_controllers_are_api_delete_requests(spec);
     lemma_always_widget_janitor_guarantee(spec, cluster, k, b, spec_ok, controller_id);
-    lemma_janitor_rely_implies_mirror_write_facts(k, b, spec_ok, spec, cluster, controller_id);
+    lemma_janitor_rely_implies_mirror_write_facts(k, b, spec, cluster, controller_id);
     lemma_always_every_mirror_is_bound(spec, cluster, k, b, spec_ok);
     lemma_always_janitor_deletes_are_sound(spec, cluster, k, b, spec_ok, controller_id);
     entails_and(spec, widget_mirrors_eventually_collected(k, b), always(lift_state(janitor_deletes_are_sound(k, b, controller_id))));

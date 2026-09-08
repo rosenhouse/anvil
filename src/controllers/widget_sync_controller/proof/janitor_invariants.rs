@@ -302,7 +302,7 @@ pub open spec fn janitor_decisions_are_sound(k: SyncKind, b: Binding, controller
 
 // The List of the outer copies in the mirror's namespace either lists the parent or
 // shows it absent for good.
-proof fn lemma_list_response_decides_parent(cluster: Cluster, k: SyncKind, b: Binding, s: ClusterState, cr: DynamicObjectView, key: ObjectRef)
+proof fn lemma_list_response_decides_parent(k: SyncKind, b: Binding, s: ClusterState, cr: DynamicObjectView, key: ObjectRef)
     requires
         Cluster::each_object_in_etcd_is_weakly_well_formed()(s),
         janitor_snapshot_is_sound(k, b, cr, key)(s),
@@ -540,7 +540,7 @@ proof fn lemma_janitor_decision_soundness_preserved_by_api_server_step(
                 assert(msg.content.get_list_request() == janitor_list_request(k, key));
                 assert(s_prime.api_server == s.api_server);
                 assert(resp.content.get_list_response() == handle_list_request(janitor_list_request(k, key), s.api_server));
-                lemma_list_response_decides_parent(cluster, k, b, s, reconcile.triggering_cr, key);
+                lemma_list_response_decides_parent(k, b, s, reconcile.triggering_cr, key);
             }
         }
     }

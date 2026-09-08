@@ -49,7 +49,7 @@ verus! {
 // The mirror key is eventually and forever settled: absent or ours.
 // ---------------------------------------------------------------------------
 
-pub open spec fn mirror_has_uid(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, outer: SyncedObjectView, m: Uid) -> StatePred<ClusterState> {
+pub open spec fn mirror_has_uid(k: SyncKind, outer: SyncedObjectView, m: Uid) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& s.resources().contains_key(inner_key(k, outer))
         &&& s.resources()[inner_key(k, outer)].metadata.uid == Some(m)
@@ -68,18 +68,18 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(k: SyncKind, b: Binding, spe
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
-    ensures spec.entails(lift_state(mirror_has_uid(k, b, spec_ok, outer, m)).leads_to(lift_state(mirror_settled(k, b, spec_ok, outer)))),
+    ensures spec.entails(lift_state(mirror_has_uid(k, outer, m)).leads_to(lift_state(mirror_settled(k, b, outer)))),
 {
     let ikey = inner_key(k, outer);
     let key = outer.object_ref();
-    let u = outer_uid(k, b, spec_ok, outer);
+    let u = outer_uid(outer);
     lemma_unfold_sync_spec_with_phase_ii(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
-    let next = sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
-    let has_m = mirror_has_uid(k, b, spec_ok, outer, m);
-    let ours = mirror_is_ours(k, b, spec_ok, outer);
-    let settled = mirror_settled(k, b, spec_ok, outer);
+    let next = sync_step_next(k, b, cluster, controller_id, janitor_id, outer);
+    let has_m = mirror_has_uid(k, outer, m);
+    let ours = mirror_is_ours(k, b, outer);
+    let settled = mirror_settled(k, b, outer);
     let inv = |s: ClusterState| {
         &&& every_mirror_is_bound(k, b)(s)
         &&& Cluster::each_object_in_etcd_is_weakly_well_formed()(s)
@@ -180,7 +180,7 @@ pub proof fn lemma_mirror_with_uid_leads_to_settled(k: SyncKind, b: Binding, spe
 
     // While the object with uid m is being removed, nothing but our mirror takes its
     // place: j holds from now on.
-    let j = |s: ClusterState| mirror_absent(k, b, spec_ok, outer)(s) || has_m(s) || ours(s);
+    let j = |s: ClusterState| mirror_absent(k, outer)(s) || has_m(s) || ours(s);
     assert forall |s, s_prime: ClusterState| #[trigger] next(s, s_prime) && j(s) implies j(s_prime) by {
         lemma_mirror_key_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     }
@@ -220,16 +220,16 @@ pub proof fn lemma_true_leads_to_always_mirror_settled(k: SyncKind, b: Binding, 
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
-    ensures spec.entails(true_pred().leads_to(always(lift_state(mirror_settled(k, b, spec_ok, outer))))),
+    ensures spec.entails(true_pred().leads_to(always(lift_state(mirror_settled(k, b, outer))))),
 {
     let ikey = inner_key(k, outer);
     lemma_unfold_sync_spec_with_phase_ii(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
-    let next = sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
-    let settled = lift_state(mirror_settled(k, b, spec_ok, outer));
-    let absent = lift_state(mirror_absent(k, b, spec_ok, outer));
-    let has = |m: Uid| lift_state(mirror_has_uid(k, b, spec_ok, outer, m));
+    let next = sync_step_next(k, b, cluster, controller_id, janitor_id, outer);
+    let settled = lift_state(mirror_settled(k, b, outer));
+    let absent = lift_state(mirror_absent(k, outer));
+    let has = |m: Uid| lift_state(mirror_has_uid(k, outer, m));
     assert forall |m: Uid| spec.entails(#[trigger] has(m).leads_to(settled)) by {
         lemma_mirror_with_uid_leads_to_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer, m);
     }
@@ -251,7 +251,7 @@ pub proof fn lemma_true_leads_to_always_mirror_settled(k: SyncKind, b: Binding, 
     temp_pred_equality(true_pred().and(wf), wf);
     leads_to_by_borrowing_inv(spec, true_pred(), settled, wf);
     // Stability.
-    assert forall |s, s_prime: ClusterState| mirror_settled(k, b, spec_ok, outer)(s) && #[trigger] next(s, s_prime) implies mirror_settled(k, b, spec_ok, outer)(s_prime) by {
+    assert forall |s, s_prime: ClusterState| mirror_settled(k, b, outer)(s) && #[trigger] next(s, s_prime) implies mirror_settled(k, b, outer)(s_prime) by {
         lemma_mirror_key_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     }
     leads_to_stable(spec, lift_action(next), true_pred(), settled);
@@ -262,35 +262,35 @@ pub proof fn lemma_true_leads_to_always_mirror_settled(k: SyncKind, b: Binding, 
 // The states of the reconcile walk.
 // ---------------------------------------------------------------------------
 
-pub open spec fn get_req_msg_for(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView, msg: Message) -> bool {
+pub open spec fn get_req_msg_for(k: SyncKind, controller_id: int, outer: SyncedObjectView, msg: Message) -> bool {
     &&& msg.src == HostId::Controller(controller_id, outer.object_ref())
     &&& msg.dst is APIServer
     &&& msg.content is APIRequest
     &&& msg.content->APIRequest_0 == APIRequest::GetRequest(GetRequest { key: inner_key(k, outer) })
 }
 
-pub open spec fn st_sync_init(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
+pub open spec fn st_sync_init(controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& at_sync_step(controller_id, key, WidgetSyncStepView::Init)(s)
         &&& Cluster::no_pending_req_msg(controller_id, s, key)
     }
 }
 
-pub open spec fn st_get_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
+pub open spec fn st_get_req_msg_in_flight(k: SyncKind, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterGetInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg == Some(msg)
-        &&& get_req_msg_for(k, b, spec_ok, controller_id, outer, msg)
+        &&& get_req_msg_for(k, controller_id, outer, msg)
         &&& s.in_flight().contains(msg)
     }
 }
 
-pub open spec fn st_get_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn st_get_req_in_flight(k: SyncKind, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg->0;
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterGetInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg is Some
-        &&& get_req_msg_for(k, b, spec_ok, controller_id, outer, msg)
+        &&& get_req_msg_for(k, controller_id, outer, msg)
         &&& s.in_flight().contains(msg)
     }
 }
@@ -299,14 +299,14 @@ pub open spec fn st_get_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(
 // Get was answered and still is, or it was ours and still is, with the uid,
 // generation and spec the response shows, unless a write of the outer spec landed
 // since (in which case the spec is synced already).
-pub open spec fn get_resp_reflects_store(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, resp: Message, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn get_resp_reflects_store(k: SyncKind, b: Binding, resp: Message, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let ikey = inner_key(k, outer);
         let res = resp.content.get_get_response().res;
         let obj = res->Ok_0;
-        &&& res is Err ==> res->Err_0 is ObjectNotFound && mirror_absent(k, b, spec_ok, outer)(s)
+        &&& res is Err ==> res->Err_0 is ObjectNotFound && mirror_absent(k, outer)(s)
         &&& res is Ok ==> {
-            &&& mirror_is_ours(k, b, spec_ok, outer)(s)
+            &&& mirror_is_ours(k, b, outer)(s)
             &&& unmarshal(inner_kind(k, b), obj) is Ok
             &&& is_mirror_of(unmarshal(inner_kind(k, b), obj)->Ok_0, outer)
             &&& obj.metadata.deletion_timestamp is None
@@ -317,33 +317,33 @@ pub open spec fn get_resp_reflects_store(k: SyncKind, b: Binding, spec_ok: spec_
     }
 }
 
-pub open spec fn st_get_resp_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView, resp: Message) -> StatePred<ClusterState> {
+pub open spec fn st_get_resp_msg_in_flight(k: SyncKind, b: Binding, controller_id: int, outer: SyncedObjectView, resp: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg->0;
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterGetInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg is Some
-        &&& get_req_msg_for(k, b, spec_ok, controller_id, outer, msg)
+        &&& get_req_msg_for(k, controller_id, outer, msg)
         &&& s.in_flight().contains(resp)
         &&& resp_msg_matches_req_msg(resp, msg)
-        &&& get_resp_reflects_store(k, b, spec_ok, resp, outer)(s)
+        &&& get_resp_reflects_store(k, b, resp, outer)(s)
     }
 }
 
-pub open spec fn st_get_resp_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn st_get_resp_in_flight(k: SyncKind, b: Binding, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let msg = s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg->0;
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterGetInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg is Some
-        &&& get_req_msg_for(k, b, spec_ok, controller_id, outer, msg)
+        &&& get_req_msg_for(k, controller_id, outer, msg)
         &&& exists |resp: Message| {
             &&& #[trigger] s.in_flight().contains(resp)
             &&& resp_msg_matches_req_msg(resp, msg)
-            &&& get_resp_reflects_store(k, b, spec_ok, resp, outer)(s)
+            &&& get_resp_reflects_store(k, b, resp, outer)(s)
         }
     }
 }
 
-pub open spec fn st_create_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
+pub open spec fn st_create_req_msg_in_flight(k: SyncKind, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterCreateInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg == Some(msg)
@@ -352,20 +352,20 @@ pub open spec fn st_create_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: s
         &&& msg.content is APIRequest
         &&& msg.content.is_create_request()
         &&& s.in_flight().contains(msg)
-        &&& mirror_absent(k, b, spec_ok, outer)(s)
+        &&& mirror_absent(k, outer)(s)
     }
 }
 
-pub open spec fn st_create_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
-    |s: ClusterState| exists |msg: Message| #[trigger] st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s)
+pub open spec fn st_create_req_in_flight(k: SyncKind, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| exists |msg: Message| #[trigger] st_create_req_msg_in_flight(k, controller_id, outer, msg)(s)
 }
 
 // The mirror is as the pending Patch read it: same uid and generation.
-pub open spec fn patch_target_intact(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, msg: Message, outer: SyncedObjectView) -> StatePred<ClusterState> {
+pub open spec fn patch_target_intact(k: SyncKind, b: Binding, msg: Message, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let ikey = inner_key(k, outer);
         let req = msg.content.get_patch_request();
-        &&& mirror_is_ours(k, b, spec_ok, outer)(s)
+        &&& mirror_is_ours(k, b, outer)(s)
         &&& req.tests.uid is Some
         &&& req.tests.generation is Some
         &&& s.resources()[ikey].metadata.uid == req.tests.uid
@@ -373,7 +373,7 @@ pub open spec fn patch_target_intact(k: SyncKind, b: Binding, spec_ok: spec_fn(V
     }
 }
 
-pub open spec fn st_patch_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
+pub open spec fn st_patch_req_msg_in_flight(k: SyncKind, b: Binding, controller_id: int, outer: SyncedObjectView, msg: Message) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& at_sync_step(controller_id, outer.object_ref(), WidgetSyncStepView::AfterPatchInner)(s)
         &&& s.ongoing_reconciles(controller_id)[outer.object_ref()].pending_req_msg == Some(msg)
@@ -382,12 +382,12 @@ pub open spec fn st_patch_req_msg_in_flight(k: SyncKind, b: Binding, spec_ok: sp
         &&& msg.content is APIRequest
         &&& msg.content.is_patch_request()
         &&& s.in_flight().contains(msg)
-        &&& patch_target_intact(k, b, spec_ok, msg, outer)(s) || spec_synced(k, outer)(s)
+        &&& patch_target_intact(k, b, msg, outer)(s) || spec_synced(k, outer)(s)
     }
 }
 
-pub open spec fn st_patch_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
-    |s: ClusterState| exists |msg: Message| #[trigger] st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s)
+pub open spec fn st_patch_req_in_flight(k: SyncKind, b: Binding, controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| exists |msg: Message| #[trigger] st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s)
 }
 
 // ---------------------------------------------------------------------------
@@ -460,7 +460,7 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, spec_ok
         spec.entails(lift_state(|s: ClusterState| {
                 &&& !s.ongoing_reconciles(controller_id).contains_key(outer.object_ref())
                 &&& s.scheduled_reconciles(controller_id).contains_key(outer.object_ref())
-            }).leads_to(lift_state(st_sync_init(k, b, spec_ok, controller_id, outer.object_ref())))),
+            }).leads_to(lift_state(st_sync_init(controller_id, outer.object_ref())))),
 {
     let key = outer.object_ref();
     lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
@@ -472,7 +472,7 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, spec_ok
         &&& !s.ongoing_reconciles(controller_id).contains_key(key)
         &&& s.scheduled_reconciles(controller_id).contains_key(key)
     };
-    let post = st_sync_init(k, b, spec_ok, controller_id, key);
+    let post = st_sync_init(controller_id, key);
     let input = (None::<Message>, Some(key));
     let stronger_next = |s, s_prime: ClusterState| {
         &&& cluster.next()(s, s_prime)
@@ -513,8 +513,8 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
-        spec.entails(lift_state(st_sync_init(k, b, spec_ok, controller_id, outer.object_ref()))
-            .leads_to(lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer)))),
+        spec.entails(lift_state(st_sync_init(controller_id, outer.object_ref()))
+            .leads_to(lift_state(st_get_req_in_flight(k, controller_id, outer)))),
 {
     let key = outer.object_ref();
     lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
@@ -524,18 +524,18 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
 
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    let pre = st_sync_init(k, b, spec_ok, controller_id, key);
-    let post = st_get_req_in_flight(k, b, spec_ok, controller_id, outer);
+    let pre = st_sync_init(controller_id, key);
+    let post = st_get_req_in_flight(k, controller_id, outer);
     let input = (None::<Message>, Some(key));
     let stronger_next = |s, s_prime: ClusterState| {
-        &&& sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime)
+        &&& sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s)
         &&& cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
-        lift_action(sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)),
         lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id))
@@ -550,7 +550,7 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
         assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg));
         assert(s_prime.in_flight().contains(msg));
         assert(s_prime.ongoing_reconciles(controller_id)[key].local_state == sync_reconciler::at_step(WidgetSyncStepView::AfterGetInner).marshal());
-        assert(get_req_msg_for(k, b, spec_ok, controller_id, outer, msg));
+        assert(get_req_msg_for(k, controller_id, outer, msg));
     }
     assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
         let step = choose |step| cluster.next_step(s, s_prime, step);
@@ -586,8 +586,8 @@ pub proof fn lemma_sync_get_req_leads_to_get_resp(k: SyncKind, b: Binding, spec_
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
-        spec.entails(lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer))
-            .leads_to(lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer)))),
+        spec.entails(lift_state(st_get_req_in_flight(k, controller_id, outer))
+            .leads_to(lift_state(st_get_resp_in_flight(k, b, controller_id, outer)))),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -596,28 +596,28 @@ pub proof fn lemma_sync_get_req_leads_to_get_resp(k: SyncKind, b: Binding, spec_
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     
-    let post = st_get_resp_in_flight(k, b, spec_ok, controller_id, outer);
-    let pre_of = |msg: Message| lift_state(st_get_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg));
+    let post = st_get_resp_in_flight(k, b, controller_id, outer);
+    let pre_of = |msg: Message| lift_state(st_get_req_msg_in_flight(k, controller_id, outer, msg));
     let stronger_next = |s, s_prime: ClusterState| {
-        &&& sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime)
+        &&& sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::req_drop_disabled()(s)
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)(s)
-        &&& mirror_settled(k, b, spec_ok, outer)(s)
-        &&& mirror_settled(k, b, spec_ok, outer)(s_prime)
+        &&& mirror_settled(k, b, outer)(s)
+        &&& mirror_settled(k, b, outer)(s_prime)
     };
-    always_to_always_later(spec, lift_state(mirror_settled(k, b, spec_ok, outer)));
+    always_to_always_later(spec, lift_state(mirror_settled(k, b, outer)));
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
-        lift_action(sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::req_drop_disabled()),
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)),
-        lift_state(mirror_settled(k, b, spec_ok, outer)),
-        later(lift_state(mirror_settled(k, b, spec_ok, outer)))
+        lift_state(mirror_settled(k, b, outer)),
+        later(lift_state(mirror_settled(k, b, outer)))
     );
     assert forall |msg: Message| spec.entails(#[trigger] pre_of(msg).leads_to(lift_state(post))) by {
-        let pre = st_get_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg);
+        let pre = st_get_req_msg_in_flight(k, controller_id, outer, msg);
         let input = Some(msg);
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.api_server_next().forward(input)(s, s_prime) implies post(s_prime) by {
@@ -628,12 +628,12 @@ pub proof fn lemma_sync_get_req_leads_to_get_resp(k: SyncKind, b: Binding, spec_
             assert(s_prime.ongoing_reconciles(controller_id) == s.ongoing_reconciles(controller_id));
             assert(resp.content.get_get_response() == handle_get_request(GetRequest { key: ikey }, s.api_server));
             if s.resources().contains_key(ikey) {
-                assert(mirror_is_ours(k, b, spec_ok, outer)(s));
+                assert(mirror_is_ours(k, b, outer)(s));
                 assert(resp.content.get_get_response().res == Ok::<DynamicObjectView, APIError>(s.resources()[ikey]));
             } else {
                 assert(resp.content.get_get_response().res == Err::<DynamicObjectView, APIError>(APIError::ObjectNotFound));
             }
-            assert(get_resp_reflects_store(k, b, spec_ok, resp, outer)(s_prime));
+            assert(get_resp_reflects_store(k, b, resp, outer)(s_prime));
         }
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime) implies pre(s_prime) || post(s_prime) by {
             let step = choose |step| cluster.next_step(s, s_prime, step);
@@ -672,13 +672,13 @@ pub proof fn lemma_sync_get_req_leads_to_get_resp(k: SyncKind, b: Binding, spec_
         cluster.lemma_pre_leads_to_post_by_api_server(spec, input, stronger_next, APIServerStep::HandleRequest, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer)), {
-        assert forall |ex| #[trigger] lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_get_req_in_flight(k, controller_id, outer)), {
+        assert forall |ex| #[trigger] lift_state(st_get_req_in_flight(k, controller_id, outer)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let msg = ex.head().ongoing_reconciles(controller_id)[key].pending_req_msg->0;
             assert(pre_of(msg).satisfied_by(ex));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_get_req_in_flight(k, controller_id, outer)));
     });
 }
 
@@ -692,12 +692,12 @@ pub proof fn lemma_get_resp_keeps_reflecting_store(k: SyncKind, b: Binding, spec
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
-        mirror_settled(k, b, spec_ok, outer)(s),
-        st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp)(s),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        mirror_settled(k, b, outer)(s),
+        st_get_resp_msg_in_flight(k, b, controller_id, outer, resp)(s),
         s_prime.ongoing_reconciles(controller_id)[outer.object_ref()] == s.ongoing_reconciles(controller_id)[outer.object_ref()],
         s_prime.ongoing_reconciles(controller_id).contains_key(outer.object_ref()),
-    ensures get_resp_reflects_store(k, b, spec_ok, resp, outer)(s_prime),
+    ensures get_resp_reflects_store(k, b, resp, outer)(s_prime),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -705,8 +705,8 @@ pub proof fn lemma_get_resp_keeps_reflecting_store(k: SyncKind, b: Binding, spec
     lemma_mirror_key_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     if res is Err {
         // Absent stays absent: only the pending Get is in flight from the reconcile, so no create of ours lands.
-        if !mirror_absent(k, b, spec_ok, outer)(s_prime) {
-            assert(mirror_is_ours(k, b, spec_ok, outer)(s_prime));
+        if !mirror_absent(k, outer)(s_prime) {
+            assert(mirror_is_ours(k, b, outer)(s_prime));
             let step = choose |step| cluster.next_step(s, s_prime, step);
             match step {
                 Step::APIServerStep(input) => {
@@ -745,7 +745,7 @@ pub proof fn lemma_get_resp_keeps_reflecting_store(k: SyncKind, b: Binding, spec
         }
     } else {
         let obj = res->Ok_0;
-        assert(mirror_is_ours(k, b, spec_ok, outer)(s));
+        assert(mirror_is_ours(k, b, outer)(s));
         lemma_ours_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
         if spec_synced(k, outer)(s) {
             lemma_spec_synced_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
@@ -769,15 +769,15 @@ proof fn lemma_sync_get_resp_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(V
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::every_in_flight_msg_has_unique_id()(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        mirror_settled(k, b, spec_ok, outer)(s),
-        st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp)(s),
+        mirror_settled(k, b, outer)(s),
+        st_get_resp_msg_in_flight(k, b, controller_id, outer, resp)(s),
         cluster.controller_next().forward((controller_id, Some(resp), Some(outer.object_ref())))(s, s_prime),
-    ensures st_create_req_in_flight(k, b, spec_ok, controller_id, outer)(s_prime) || st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)(s_prime) || spec_synced(k, outer)(s_prime),
+    ensures st_create_req_in_flight(k, controller_id, outer)(s_prime) || st_patch_req_in_flight(k, b, controller_id, outer)(s_prime) || spec_synced(k, outer)(s_prime),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -787,8 +787,8 @@ proof fn lemma_sync_get_resp_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(V
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
     let post = |s: ClusterState| {
-        ||| st_create_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
-        ||| st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
+        ||| st_create_req_in_flight(k, controller_id, outer)(s)
+        ||| st_patch_req_in_flight(k, b, controller_id, outer)(s)
         ||| spec_synced(k, outer)(s)
     };
     lemma_current_reconcile_of_outer(k, b, spec_ok, cluster, controller_id, janitor_id, s, outer);
@@ -810,8 +810,8 @@ proof fn lemma_sync_get_resp_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(V
         let msg = controller_req_msg(controller_id, key, s.rpc_id_allocator.allocate().1, req);
         assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg));
         assert(s_prime.in_flight().contains(msg));
-        assert(mirror_absent(k, b, spec_ok, outer)(s_prime));
-        assert(st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s_prime));
+        assert(mirror_absent(k, outer)(s_prime));
+        assert(st_create_req_msg_in_flight(k, controller_id, outer, msg)(s_prime));
     } else {
         let obj = res->Ok_0;
         let inner = unmarshal(inner_kind(k, b), obj)->Ok_0;
@@ -830,8 +830,8 @@ proof fn lemma_sync_get_resp_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(V
             assert(msg.content.get_patch_request().tests.generation == obj.metadata.generation);
             assert(obj.metadata.uid is Some);
             assert(obj.metadata.generation is Some);
-            assert(patch_target_intact(k, b, spec_ok, msg, outer)(s_prime));
-            assert(st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s_prime));
+            assert(patch_target_intact(k, b, msg, outer)(s_prime));
+            assert(st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s_prime));
         } else {
             // The stored spec is the one read, which is the outer spec.
             assert(s.resources()[ikey].spec == obj.spec);
@@ -852,14 +852,14 @@ proof fn lemma_sync_get_resp_stays_in_flight(k: SyncKind, b: Binding, spec_ok: s
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::every_in_flight_msg_has_unique_id()(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        mirror_settled(k, b, spec_ok, outer)(s),
-        st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp)(s),
-    ensures st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp)(s_prime) || st_create_req_in_flight(k, b, spec_ok, controller_id, outer)(s_prime) || st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)(s_prime) || spec_synced(k, outer)(s_prime),
+        mirror_settled(k, b, outer)(s),
+        st_get_resp_msg_in_flight(k, b, controller_id, outer, resp)(s),
+    ensures st_get_resp_msg_in_flight(k, b, controller_id, outer, resp)(s_prime) || st_create_req_in_flight(k, controller_id, outer)(s_prime) || st_patch_req_in_flight(k, b, controller_id, outer)(s_prime) || spec_synced(k, outer)(s_prime),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -868,10 +868,10 @@ proof fn lemma_sync_get_resp_stays_in_flight(k: SyncKind, b: Binding, spec_ok: s
     unmarshal_of_marshal();
     unmarshal_of_marshal();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    let pre = st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp);
+    let pre = st_get_resp_msg_in_flight(k, b, controller_id, outer, resp);
     let post = |s: ClusterState| {
-        ||| st_create_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
-        ||| st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
+        ||| st_create_req_in_flight(k, controller_id, outer)(s)
+        ||| st_patch_req_in_flight(k, b, controller_id, outer)(s)
         ||| spec_synced(k, outer)(s)
     };
     let pending = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
@@ -944,9 +944,9 @@ pub proof fn lemma_sync_get_resp_leads_to_decision(k: SyncKind, b: Binding, spec
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
-        spec.entails(lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer))
-            .leads_to(lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer))
-                .or(lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)))
+        spec.entails(lift_state(st_get_resp_in_flight(k, b, controller_id, outer))
+            .leads_to(lift_state(st_create_req_in_flight(k, controller_id, outer))
+                .or(lift_state(st_patch_req_in_flight(k, b, controller_id, outer)))
                 .or(lift_state(spec_synced(k, outer))))),
 {
     let key = outer.object_ref();
@@ -956,30 +956,30 @@ pub proof fn lemma_sync_get_resp_leads_to_decision(k: SyncKind, b: Binding, spec
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     
     let post = |s: ClusterState| {
-        ||| st_create_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
-        ||| st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)(s)
+        ||| st_create_req_in_flight(k, controller_id, outer)(s)
+        ||| st_patch_req_in_flight(k, b, controller_id, outer)(s)
         ||| spec_synced(k, outer)(s)
     };
-    let pre_of = |resp: Message| lift_state(st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp));
+    let pre_of = |resp: Message| lift_state(st_get_resp_msg_in_flight(k, b, controller_id, outer, resp));
     let stronger_next = |s, s_prime: ClusterState| {
-        &&& sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime)
+        &&& sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::every_in_flight_msg_has_unique_id()(s)
         &&& Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s)
         &&& cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s)
-        &&& mirror_settled(k, b, spec_ok, outer)(s)
+        &&& mirror_settled(k, b, outer)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
-        lift_action(sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::every_in_flight_msg_has_unique_id()),
         lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)),
         lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)),
-        lift_state(mirror_settled(k, b, spec_ok, outer))
+        lift_state(mirror_settled(k, b, outer))
     );
     assert forall |resp: Message| spec.entails(#[trigger] pre_of(resp).leads_to(lift_state(post))) by {
-        let pre = st_get_resp_msg_in_flight(k, b, spec_ok, controller_id, outer, resp);
+        let pre = st_get_resp_msg_in_flight(k, b, controller_id, outer, resp);
         let input = (Some(resp), Some(key));
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.controller_next().forward((controller_id, input.0, input.1))(s, s_prime) implies post(s_prime) by {
@@ -995,23 +995,23 @@ pub proof fn lemma_sync_get_resp_leads_to_decision(k: SyncKind, b: Binding, spec
         cluster.lemma_pre_leads_to_post_by_controller(spec, controller_id, input, stronger_next, ControllerStep::ContinueReconcile, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer)), {
-        assert forall |ex| #[trigger] lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_get_resp_in_flight(k, b, controller_id, outer)), {
+        assert forall |ex| #[trigger] lift_state(st_get_resp_in_flight(k, b, controller_id, outer)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let s = ex.head();
             let msg = s.ongoing_reconciles(controller_id)[key].pending_req_msg->0;
             let resp = choose |resp: Message| {
                 &&& #[trigger] s.in_flight().contains(resp)
                 &&& resp_msg_matches_req_msg(resp, msg)
-                &&& get_resp_reflects_store(k, b, spec_ok, resp, outer)(s)
+                &&& get_resp_reflects_store(k, b, resp, outer)(s)
             };
             assert(pre_of(resp).satisfied_by(ex));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_get_resp_in_flight(k, b, controller_id, outer)));
     });
     temp_pred_equality(
         lift_state(post),
-        lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)).or(lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer))).or(lift_state(spec_synced(k, outer)))
+        lift_state(st_create_req_in_flight(k, controller_id, outer)).or(lift_state(st_patch_req_in_flight(k, b, controller_id, outer))).or(lift_state(spec_synced(k, outer)))
     );
 }
 
@@ -1027,13 +1027,13 @@ proof fn lemma_sync_create_req_handled(k: SyncKind, b: Binding, spec_ok: spec_fn
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::req_drop_disabled()(s),
         Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, outer.object_ref())(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s),
+        st_create_req_msg_in_flight(k, controller_id, outer, msg)(s),
         cluster.api_server_next().forward(Some(msg))(s, s_prime),
     ensures spec_synced(k, outer)(s_prime),
 {
@@ -1094,7 +1094,7 @@ proof fn lemma_sync_create_req_handled(k: SyncKind, b: Binding, spec_ok: spec_fn
     assert(created_inner.metadata == created.metadata);
     assert(is_mirror_of(created_inner, outer));
     assert(created_inner.spec == outer.spec);
-    assert(mirror_is_ours(k, b, spec_ok, outer)(s_prime));
+    assert(mirror_is_ours(k, b, outer)(s_prime));
 }
 
 // Any other step keeps the Create in flight and the mirror key empty.
@@ -1107,14 +1107,14 @@ proof fn lemma_sync_create_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok:
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::req_drop_disabled()(s),
         Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, outer.object_ref())(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s),
-    ensures st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s_prime) || spec_synced(k, outer)(s_prime),
+        st_create_req_msg_in_flight(k, controller_id, outer, msg)(s),
+    ensures st_create_req_msg_in_flight(k, controller_id, outer, msg)(s_prime) || spec_synced(k, outer)(s_prime),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -1124,7 +1124,7 @@ proof fn lemma_sync_create_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok:
     unmarshal_of_marshal();
     marshal_status_preserves_integrity();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    let pre = st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg);
+    let pre = st_create_req_msg_in_flight(k, controller_id, outer, msg);
     let post = spec_synced(k, outer);
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
@@ -1136,7 +1136,7 @@ proof fn lemma_sync_create_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok:
                 assert(s_prime.ongoing_reconciles(controller_id)[key] == s.ongoing_reconciles(controller_id)[key]);
                 // Nothing but the pending Create, which is msg, creates the mirror.
                 lemma_mirror_key_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
-                if !mirror_absent(k, b, spec_ok, outer)(s_prime) {
+                if !mirror_absent(k, outer)(s_prime) {
                     let handled = i->0;
                     assert(s.in_flight().contains(handled));
                     match handled.content->APIRequest_0 {
@@ -1207,7 +1207,7 @@ pub proof fn lemma_sync_create_req_leads_to_synced(k: SyncKind, b: Binding, spec
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
-        spec.entails(lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)).leads_to(lift_state(spec_synced(k, outer)))),
+        spec.entails(lift_state(st_create_req_in_flight(k, controller_id, outer)).leads_to(lift_state(spec_synced(k, outer)))),
 {
     let key = outer.object_ref();
     lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
@@ -1216,9 +1216,9 @@ pub proof fn lemma_sync_create_req_leads_to_synced(k: SyncKind, b: Binding, spec
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     
     let post = spec_synced(k, outer);
-    let pre_of = |msg: Message| lift_state(st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg));
+    let pre_of = |msg: Message| lift_state(st_create_req_msg_in_flight(k, controller_id, outer, msg));
     let stronger_next = |s, s_prime: ClusterState| {
-        &&& sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime)
+        &&& sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::req_drop_disabled()(s)
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)(s)
@@ -1227,7 +1227,7 @@ pub proof fn lemma_sync_create_req_leads_to_synced(k: SyncKind, b: Binding, spec
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
-        lift_action(sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::req_drop_disabled()),
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)),
@@ -1235,7 +1235,7 @@ pub proof fn lemma_sync_create_req_leads_to_synced(k: SyncKind, b: Binding, spec
         lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id))
     );
     assert forall |msg: Message| spec.entails(#[trigger] pre_of(msg).leads_to(lift_state(post))) by {
-        let pre = st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg);
+        let pre = st_create_req_msg_in_flight(k, controller_id, outer, msg);
         let input = Some(msg);
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.api_server_next().forward(input)(s, s_prime) implies post(s_prime) by {
@@ -1248,19 +1248,19 @@ pub proof fn lemma_sync_create_req_leads_to_synced(k: SyncKind, b: Binding, spec
         cluster.lemma_pre_leads_to_post_by_api_server(spec, input, stronger_next, APIServerStep::HandleRequest, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)), {
-        assert forall |ex| #[trigger] lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_create_req_in_flight(k, controller_id, outer)), {
+        assert forall |ex| #[trigger] lift_state(st_create_req_in_flight(k, controller_id, outer)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let s = ex.head();
-            let msg = choose |msg: Message| #[trigger] st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s);
+            let msg = choose |msg: Message| #[trigger] st_create_req_msg_in_flight(k, controller_id, outer, msg)(s);
             assert(pre_of(msg).satisfied_by(ex));
         }
         assert forall |ex| #[trigger] tla_exists(pre_of).satisfied_by(ex)
-        implies lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex) by {
+        implies lift_state(st_create_req_in_flight(k, controller_id, outer)).satisfied_by(ex) by {
             let msg = choose |msg: Message| #[trigger] pre_of(msg).satisfied_by(ex);
-            assert(st_create_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(ex.head()));
+            assert(st_create_req_msg_in_flight(k, controller_id, outer, msg)(ex.head()));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_create_req_in_flight(k, controller_id, outer)));
     });
 }
 
@@ -1275,13 +1275,13 @@ proof fn lemma_sync_patch_req_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::req_drop_disabled()(s),
         Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, outer.object_ref())(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s),
+        st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s),
         cluster.api_server_next().forward(Some(msg))(s, s_prime),
     ensures spec_synced(k, outer)(s_prime),
 {
@@ -1297,7 +1297,7 @@ proof fn lemma_sync_patch_req_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(
     if spec_synced(k, outer)(s) {
         lemma_spec_synced_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     } else {
-        assert(patch_target_intact(k, b, spec_ok, msg, outer)(s));
+        assert(patch_target_intact(k, b, msg, outer)(s));
         lemma_current_reconcile_of_outer(k, b, spec_ok, cluster, controller_id, janitor_id, s, outer);
         lemma_weakly_well_formed_implies_kinds_match(s);
         let reconcile = s.ongoing_reconciles(controller_id)[key];
@@ -1368,7 +1368,7 @@ proof fn lemma_sync_patch_req_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(
         assert(updated_rv.metadata.annotations == old_obj.metadata.annotations);
         assert(is_mirror_of(updated_inner, outer));
         assert(updated_inner.spec == outer.spec);
-        assert(mirror_is_ours(k, b, spec_ok, outer)(s_prime));
+        assert(mirror_is_ours(k, b, outer)(s_prime));
     }
 }
 
@@ -1382,14 +1382,14 @@ proof fn lemma_sync_patch_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok: 
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime),
+        sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime),
         Cluster::crash_disabled(controller_id)(s),
         Cluster::req_drop_disabled()(s),
         Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, outer.object_ref())(s),
         Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s),
         cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s),
-        st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s),
-    ensures st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s_prime) || spec_synced(k, outer)(s_prime),
+        st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s),
+    ensures st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s_prime) || spec_synced(k, outer)(s_prime),
 {
     let key = outer.object_ref();
     let ikey = inner_key(k, outer);
@@ -1399,7 +1399,7 @@ proof fn lemma_sync_patch_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok: 
     unmarshal_of_marshal();
     marshal_status_preserves_integrity();
     WidgetSyncReconcileState::marshal_preserves_integrity();
-    let pre = st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg);
+    let pre = st_patch_req_msg_in_flight(k, b, controller_id, outer, msg);
     let post = spec_synced(k, outer);
     let step = choose |step| cluster.next_step(s, s_prime, step);
     match step {
@@ -1416,7 +1416,7 @@ proof fn lemma_sync_patch_req_stays_in_flight(k: SyncKind, b: Binding, spec_ok: 
                     if s_prime.resources()[ikey].spec != s.resources()[ikey].spec {
                         lemma_spec_change_means_synced(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
                     } else {
-                        assert(patch_target_intact(k, b, spec_ok, msg, outer)(s_prime));
+                        assert(patch_target_intact(k, b, msg, outer)(s_prime));
                     }
                 }
                 assert(pre(s_prime));
@@ -1460,7 +1460,7 @@ pub proof fn lemma_sync_patch_req_leads_to_synced(k: SyncKind, b: Binding, spec_
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
-        spec.entails(lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)).leads_to(lift_state(spec_synced(k, outer)))),
+        spec.entails(lift_state(st_patch_req_in_flight(k, b, controller_id, outer)).leads_to(lift_state(spec_synced(k, outer)))),
 {
     let key = outer.object_ref();
     lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
@@ -1469,9 +1469,9 @@ pub proof fn lemma_sync_patch_req_leads_to_synced(k: SyncKind, b: Binding, spec_
     lemma_always_sync_step_next(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     
     let post = spec_synced(k, outer);
-    let pre_of = |msg: Message| lift_state(st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg));
+    let pre_of = |msg: Message| lift_state(st_patch_req_msg_in_flight(k, b, controller_id, outer, msg));
     let stronger_next = |s, s_prime: ClusterState| {
-        &&& sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)(s, s_prime)
+        &&& sync_step_next(k, b, cluster, controller_id, janitor_id, outer)(s, s_prime)
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::req_drop_disabled()(s)
         &&& Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)(s)
@@ -1480,7 +1480,7 @@ pub proof fn lemma_sync_patch_req_leads_to_synced(k: SyncKind, b: Binding, spec_
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
-        lift_action(sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::req_drop_disabled()),
         lift_state(Cluster::pending_req_in_flight_xor_resp_in_flight_if_has_pending_req_msg(controller_id, key)),
@@ -1488,7 +1488,7 @@ pub proof fn lemma_sync_patch_req_leads_to_synced(k: SyncKind, b: Binding, spec_
         lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id))
     );
     assert forall |msg: Message| spec.entails(#[trigger] pre_of(msg).leads_to(lift_state(post))) by {
-        let pre = st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg);
+        let pre = st_patch_req_msg_in_flight(k, b, controller_id, outer, msg);
         let input = Some(msg);
         assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
             && cluster.api_server_next().forward(input)(s, s_prime) implies post(s_prime) by {
@@ -1501,19 +1501,19 @@ pub proof fn lemma_sync_patch_req_leads_to_synced(k: SyncKind, b: Binding, spec_
         cluster.lemma_pre_leads_to_post_by_api_server(spec, input, stronger_next, APIServerStep::HandleRequest, pre, post);
     }
     leads_to_exists_intro(spec, pre_of, lift_state(post));
-    assert_by(tla_exists(pre_of) == lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)), {
-        assert forall |ex| #[trigger] lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex)
+    assert_by(tla_exists(pre_of) == lift_state(st_patch_req_in_flight(k, b, controller_id, outer)), {
+        assert forall |ex| #[trigger] lift_state(st_patch_req_in_flight(k, b, controller_id, outer)).satisfied_by(ex)
         implies tla_exists(pre_of).satisfied_by(ex) by {
             let s = ex.head();
-            let msg = choose |msg: Message| #[trigger] st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(s);
+            let msg = choose |msg: Message| #[trigger] st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(s);
             assert(pre_of(msg).satisfied_by(ex));
         }
         assert forall |ex| #[trigger] tla_exists(pre_of).satisfied_by(ex)
-        implies lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)).satisfied_by(ex) by {
+        implies lift_state(st_patch_req_in_flight(k, b, controller_id, outer)).satisfied_by(ex) by {
             let msg = choose |msg: Message| #[trigger] pre_of(msg).satisfied_by(ex);
-            assert(st_patch_req_msg_in_flight(k, b, spec_ok, controller_id, outer, msg)(ex.head()));
+            assert(st_patch_req_msg_in_flight(k, b, controller_id, outer, msg)(ex.head()));
         }
-        temp_pred_equality(tla_exists(pre_of), lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer)));
+        temp_pred_equality(tla_exists(pre_of), lift_state(st_patch_req_in_flight(k, b, controller_id, outer)));
     });
 }
 
@@ -1544,11 +1544,11 @@ pub proof fn lemma_true_leads_to_always_spec_synced(k: SyncKind, b: Binding, spe
         &&& !s.ongoing_reconciles(controller_id).contains_key(key)
         &&& s.scheduled_reconciles(controller_id).contains_key(key)
     });
-    let init = lift_state(st_sync_init(k, b, spec_ok, controller_id, key));
-    let get_req = lift_state(st_get_req_in_flight(k, b, spec_ok, controller_id, outer));
-    let get_resp = lift_state(st_get_resp_in_flight(k, b, spec_ok, controller_id, outer));
-    let create_req = lift_state(st_create_req_in_flight(k, b, spec_ok, controller_id, outer));
-    let patch_req = lift_state(st_patch_req_in_flight(k, b, spec_ok, controller_id, outer));
+    let init = lift_state(st_sync_init(controller_id, key));
+    let get_req = lift_state(st_get_req_in_flight(k, controller_id, outer));
+    let get_resp = lift_state(st_get_resp_in_flight(k, b, controller_id, outer));
+    let create_req = lift_state(st_create_req_in_flight(k, controller_id, outer));
+    let patch_req = lift_state(st_patch_req_in_flight(k, b, controller_id, outer));
     let synced = lift_state(spec_synced(k, outer));
     lemma_sync_idle_leads_to_scheduled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_scheduled_leads_to_init(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
@@ -1562,7 +1562,7 @@ pub proof fn lemma_true_leads_to_always_spec_synced(k: SyncKind, b: Binding, spe
     or_leads_to(spec, create_req.or(patch_req), synced, synced);
     leads_to_trans_n!(spec, true_pred(), idle, scheduled, init, get_req, get_resp, create_req.or(patch_req).or(synced), synced);
     // Stability.
-    let next = sync_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
+    let next = sync_step_next(k, b, cluster, controller_id, janitor_id, outer);
     assert forall |s, s_prime: ClusterState| spec_synced(k, outer)(s) && #[trigger] next(s, s_prime) implies spec_synced(k, outer)(s_prime) by {
         lemma_spec_synced_after_step(k, b, spec_ok, cluster, controller_id, janitor_id, s, s_prime, outer);
     }
@@ -1591,9 +1591,9 @@ pub proof fn lemma_outer_spec_stable_leads_to_always_spec_synced(k: SyncKind, b:
     let spec_i = sync_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let spec_ii = sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let spec_iii = sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
-    let settled_temp = always(lift_state(mirror_settled(k, b, spec_ok, outer)));
-    let phase_ii_temp = always(lift_state(sync_phase_ii(k, b, spec_ok, controller_id, outer)));
-    let phase_i_temp = always(lift_state(phase_i(k, b, spec_ok, controller_id)));
+    let settled_temp = always(lift_state(mirror_settled(k, b, outer)));
+    let phase_ii_temp = always(lift_state(sync_phase_ii(controller_id, outer)));
+    let phase_i_temp = always(lift_state(phase_i(controller_id)));
     let premise_temp = always(lift_state(outer_spec_stable(k, b, outer)));
 
     // Under all layers.
@@ -1620,7 +1620,7 @@ pub proof fn lemma_outer_spec_stable_leads_to_always_spec_synced(k: SyncKind, b:
     assert(spec_d.entails(spec_d));
     entails_and_split(spec_d, stable_spec, premise_temp);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec_d, cluster, controller_id, janitor_id);
-    lemma_true_leads_to_always_phase_i(k, b, spec_ok, spec_d, cluster, controller_id);
+    lemma_true_leads_to_always_phase_i(k, b, spec_d, cluster, controller_id);
     leads_to_trans(spec_d, true_pred(), phase_i_temp, target);
     // Remove the premise.
     sync_stable_spec_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id);
@@ -1637,7 +1637,7 @@ pub proof fn sync_eventually_synced(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
         spec.entails(lift_state(cluster.init())),
         spec.entails(sync_next_with_wf(cluster, controller_id)),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id)))),
+        spec.entails(always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id)))),
         spec.entails(inner_releases_terminating_objects(k)),
         spec.entails(widget_janitor_esr(k, b, janitor_id)),
     ensures spec.entails(widget_spec_eventually_synced(k, b)),
@@ -1649,7 +1649,7 @@ pub proof fn sync_eventually_synced(k: SyncKind, b: Binding, spec_ok: spec_fn(Va
     entails_and_n!(
         spec,
         sync_next_with_wf(cluster, controller_id),
-        always(lift_state(sync_rely_with_janitor(k, b, spec_ok, cluster, controller_id, janitor_id))),
+        always(lift_state(sync_rely_with_janitor(k, b, cluster, controller_id, janitor_id))),
         inner_releases_terminating_objects(k),
         widget_mirrors_eventually_collected(k, b),
         sync_invariants(k, b, spec_ok, cluster, controller_id, janitor_id)

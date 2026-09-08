@@ -641,12 +641,12 @@ proof fn vrs_vd_vsts_rmq_core_holds(cluster: CoreCluster)
 // The Widget controllers of the configuration, composed by widget_fanout_core_holds
 // (through widget_core_set_for): the janitors' ESRs discharge the sync
 // reconciler's liveness dependency inside the set, so the set as a whole has none.
-pub open spec fn widget_set_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>) -> CoreSet {
-    widget_core_set_for(k, spec_ok, sync_id, ids)
+pub open spec fn widget_set_for(k: SyncKind, sync_id: int, ids: Map<Binding, int>) -> CoreSet {
+    widget_core_set_for(k, sync_id, ids)
 }
 
-pub open spec fn core_set_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>) -> CoreSet {
-    union_coreset(vrs_vd_vsts_rmq_set(), widget_set_for(k, spec_ok, sync_id, ids), true_pred())
+pub open spec fn core_set_for(k: SyncKind, sync_id: int, ids: Map<Binding, int>) -> CoreSet {
+    union_coreset(vrs_vd_vsts_rmq_set(), widget_set_for(k, sync_id, ids), true_pred())
 }
 
 proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>, cluster: CoreCluster)
@@ -668,12 +668,12 @@ proof fn all_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: i
         well_formed(cluster, vsts_core_set(vsts_id())),
         well_formed(cluster, rmq_core_set(rmq_id())),
     ensures
-        well_formed(cluster, core_set_for(k, spec_ok, sync_id, ids)),
-        core(cluster, core_set_for(k, spec_ok, sync_id, ids)),
+        well_formed(cluster, core_set_for(k, sync_id, ids)),
+        core(cluster, core_set_for(k, sync_id, ids)),
 {
     broadcast use Set::lemma_map_contains;
     let s1 = vrs_vd_vsts_rmq_set();
-    let s2 = widget_set_for(k, spec_ok, sync_id, ids);
+    let s2 = widget_set_for(k, sync_id, ids);
     let spec = cluster_model(cluster);
 
     vrs_vd_vsts_rmq_core_holds(cluster);
@@ -800,8 +800,8 @@ pub proof fn core_holds_for(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_i
         ids_ok(k.bindings, ids, sync_id),
         widget_ids_off_framework(k.bindings, ids, sync_id),
     ensures
-        well_formed(core_cluster_for(k, spec_ok, sync_id, ids), core_set_for(k, spec_ok, sync_id, ids)),
-        core(core_cluster_for(k, spec_ok, sync_id, ids), core_set_for(k, spec_ok, sync_id, ids)),
+        well_formed(core_cluster_for(k, spec_ok, sync_id, ids), core_set_for(k, sync_id, ids)),
+        core(core_cluster_for(k, spec_ok, sync_id, ids), core_set_for(k, sync_id, ids)),
 {
     broadcast use Set::lemma_map_contains;
     let cluster = core_cluster_for(k, spec_ok, sync_id, ids);
@@ -857,9 +857,9 @@ pub open spec fn cluster_instance() -> Cluster { cluster_instance_for(wk(), wspe
 
 pub open spec fn core_cluster() -> CoreCluster { core_cluster_for(wk(), wspec_ok(), sync_id(), wids()) }
 
-pub open spec fn widget_set() -> CoreSet { widget_set_for(wk(), wspec_ok(), sync_id(), wids()) }
+pub open spec fn widget_set() -> CoreSet { widget_set_for(wk(), sync_id(), wids()) }
 
-pub open spec fn core_set() -> CoreSet { core_set_for(wk(), wspec_ok(), sync_id(), wids()) }
+pub open spec fn core_set() -> CoreSet { core_set_for(wk(), sync_id(), wids()) }
 
 // The demo is one application of core_holds_for. The only thing the literal
 // strings are used for is the four inequalities of widget_kinds_off_framework and
