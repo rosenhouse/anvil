@@ -172,12 +172,13 @@ pub open spec fn widget_janitor_rely(k: SyncKind, other_id: int) -> StatePred<Cl
 // Guarantee conditions.
 
 // The status patch the sync reconciler sends for the outer copy at `outer_key`:
-// it tests the copy's uid and generation, and (G-gen) the status it writes carries
+// it tests the copy's uid and generation, (G-gen) the status it writes carries
 // observedGeneration equal to the tested generation, as do its Synced, Ready and
-// Stalled conditions; and (G-merge) the status is outer_status_for of some source
-// status and outcome.
+// Stalled conditions, and (G-shape) those three conditions are the whole of it and
+// agree with each other.
 pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, outer_key: ObjectRef) -> bool {
     let status = unmarshal_status(req.status);
+    let conds = status->Ok_0->0.conditions->0;
     &&& req.kind == k.outer_kind
     &&& req.namespace == outer_key.namespace
     &&& req.name == outer_key.name
@@ -192,13 +193,26 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& status->Ok_0->0.ready_condition()->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.stalled_condition() is Some
     &&& status->Ok_0->0.stalled_condition()->0.observed_generation == req.tests.generation
-    // (G-merge) The status is outer_status_for of a source status and an outcome,
-    // so its conditions and its mirrored remainder are that function's
-    // (outer_status_for in spec_types.rs). Where the source came from is not
-    // stated: relating it to the mirror's stored status needs the Get response
-    // that produced it, which no state keeps (#49, finding 2).
-    &&& exists |source: SyncedStatusView, outcome: SyncOutcomeView|
-            status->Ok_0->0 == #[trigger] outer_status_for(req.tests.generation, source, outcome)
+    // (G-shape) Synced, Ready and Stalled are the status's only conditions, in that
+    // order; each is True or False and never Unknown; Ready is True only when
+    // Synced is; and Ready and Stalled are never both True.
+    //
+    // This constrains the reported conditions against each other, not against the
+    // inner cluster. It admits a Ready with any reason and message, and a mirrored
+    // remainder of any value. Tying either to the status the mirror held needs the
+    // Get response that produced it, which no state keeps, so the reconciler that
+    // #49 finding 2 describes -- one reporting Synced and Ready over invented
+    // mirrored fields -- still satisfies this guarantee. That finding is open.
+    &&& status->Ok_0->0.conditions is Some
+    &&& conds.len() == 3
+    &&& conds[0].type_ == synced_condition_type()
+    &&& conds[1].type_ == ready_condition_type()
+    &&& conds[2].type_ == stalled_condition_type()
+    &&& (conds[0].status == condition_true() || conds[0].status == condition_false())
+    &&& (conds[1].status == condition_true() || conds[1].status == condition_false())
+    &&& (conds[2].status == condition_true() || conds[2].status == condition_false())
+    &&& (conds[1].status == condition_true() ==> conds[0].status == condition_true())
+    &&& !(conds[1].status == condition_true() && conds[2].status == condition_true())
 }
 
 // Every request the sync reconciler of `k` sends while reconciling the outer copy

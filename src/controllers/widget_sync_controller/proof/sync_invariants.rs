@@ -244,7 +244,7 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                                     // reported) or a binding this reconciler does not
                                     // serve (the inner cluster is reported unreachable).
                                     assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
-                                    assert(exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status)));
+                                    assert(pending_status_patch_is_merged(k, msg, outer));
                                 }
                             },
                             WidgetSyncStepView::AfterGetInner => {
@@ -255,18 +255,18 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                                     assert(msg.content->APIRequest_0 == APIRequest::PatchRequest(sync_reconciler::inner_spec_patch(k, inner, outer)));
                                 } else {
                                     assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
-                                    assert(exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status)));
+                                    assert(pending_status_patch_is_merged(k, msg, outer));
                                 }
                             },
                             WidgetSyncStepView::AfterCreateInner => {
                                 // The Create failed and the failure is being reported.
                                 assert(state_prime.reconcile_step is AfterReportError);
-                                assert(exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status)));
+                                assert(pending_status_patch_is_merged(k, msg, outer));
                             },
                             WidgetSyncStepView::AfterPatchInner => {
                                 // The Patch failed and the failure is being reported.
                                 assert(state_prime.reconcile_step is AfterReportError);
-                                assert(exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status)));
+                                assert(pending_status_patch_is_merged(k, msg, outer));
                             },
                             _ => {
                                 assert(false);

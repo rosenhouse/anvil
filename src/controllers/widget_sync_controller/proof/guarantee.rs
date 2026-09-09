@@ -317,6 +317,29 @@ pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: 
     assert("True"@.len() != "False"@.len());
 }
 
+// (G-shape) of outer_status_for: the three conditions are two-valued, Ready is
+// True only when Synced is, and Ready and Stalled are never both True. Every
+// status the sync reconciler writes is an outer_status_for, so the guarantee
+// carries these to any reader of the patch.
+pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
+    ensures
+        ({
+            let synced = synced_condition_for(generation, outcome);
+            let ready = ready_condition_for(generation, source, outcome);
+            let stalled = stalled_condition_for(generation, source, outcome);
+            &&& (synced.status == condition_true() || synced.status == condition_false())
+            &&& (ready.status == condition_true() || ready.status == condition_false())
+            &&& (stalled.status == condition_true() || stalled.status == condition_false())
+            &&& (ready.status == condition_true() ==> synced.status == condition_true())
+            &&& !(ready.status == condition_true() && stalled.status == condition_true())
+        }),
+{
+    reveal_strlit("True");
+    reveal_strlit("False");
+    assert("True"@.len() != "False"@.len());
+    lemma_ready_and_stalled_exclusive(generation, source, outcome);
+}
+
 // ---------------------------------------------------------------------------
 // The sync guarantee.
 // ---------------------------------------------------------------------------
@@ -467,14 +490,11 @@ proof fn lemma_sync_new_request_is_guaranteed(
     let cr_key = input.2->0;
     let reconcile = s.ongoing_reconciles(controller_id)[cr_key];
     let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
-    // Every status the reconciler writes mirrors the remainder of the snapshot's
-    // own status, which is representable because the snapshot was unmarshalled.
+    // The remainder of every status the reconciler writes is representable: on the
+    // Synced path it is the inner status's, read out of a value; on the others it
+    // is the snapshot's own, and the snapshot was itself unmarshalled.
     unmarshal_is_representable();
     lemma_status_or_default_rest_ok(outer.status);
-    assert forall |source: SyncedStatusView, outcome: SyncOutcomeView| status_rest_ok(source.rest)
-        implies written_status_shape(#[trigger] outer_status_for(outer.metadata.generation, source, outcome), outer.metadata.generation) by {
-        lemma_outer_status_for_has_written_shape(outer.metadata.generation, source, outcome);
-    }
     assert(outer_snapshot_is_bound(k, reconcile.triggering_cr, cr_key)(s));
     assert(outer.object_ref() == cr_key);
     assert(outer.metadata == reconcile.triggering_cr.metadata);
@@ -563,10 +583,9 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
         outer.object_ref() == outer_key,
         outer.metadata.uid is Some,
         outer.metadata.generation is Some,
-        // status_rest_ok(source.rest) is what written_status_shape needs; the rest
-        // of the clause discharges (G-merge).
+        // status_rest_ok(source.rest) is what written_status_shape needs.
         exists |source: SyncedStatusView, outcome: SyncOutcomeView|
-            req == sync_reconciler::outer_status_patch(k, outer, outer_status_for(outer.metadata.generation, source, outcome))
+            req == sync_reconciler::outer_status_patch(k, outer, #[trigger] outer_status_for(outer.metadata.generation, source, outcome))
             && status_rest_ok(source.rest),
     ensures sync_status_patch_req(k, req, outer_key),
 {
@@ -580,7 +599,12 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
     assert(unmarshal_status(req.status) == Ok::<Option<SyncedStatusView>, UnmarshalError>(Some(status)));
     assert(req.tests.generation == outer.metadata.generation);
     lemma_conditions_of_written_status(status);
-    assert(unmarshal_status(req.status)->Ok_0->0 == outer_status_for(req.tests.generation, source, outcome));
+    // (G-shape). The conditions are outer_status_for's three, in order, so the
+    // coherence lemma is about the very conditions the guarantee reads.
+    lemma_outer_status_for_conditions_are_coherent(outer.metadata.generation, source, outcome);
+    assert(status.conditions->0[0] == synced_condition_for(outer.metadata.generation, outcome));
+    assert(status.conditions->0[1] == ready_condition_for(outer.metadata.generation, source, outcome));
+    assert(status.conditions->0[2] == stalled_condition_for(outer.metadata.generation, source, outcome));
 }
 
 // The shape of every status the sync reconciler writes for a snapshot at

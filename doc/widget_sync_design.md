@@ -184,13 +184,21 @@ generation of the snapshot it reconciled, and the patch's generation test
 makes it land only while the copy is still at `g`. The status carries three
 conditions, `Synced`, `Ready` and `Stalled`, all with
 `condition.observedGeneration == g` (G-gen, section 3.1). `Synced` is `True`
-exactly when the reconcile verified `Inner.spec == σ` and the inner status
-observes the mirror's current generation.
+exactly when the reconcile verified `Inner.spec == σ` for the snapshot's `σ`
+and the inner status observes the mirror's current generation; the patch's
+generation test is what keeps a snapshot the outer copy has moved past from
+landing.
 
 > `status.observedGeneration == metadata.generation` means the sync controller
 > has acted on the current spec, whether or not it succeeded. `Synced == True`
 > at that generation means the spec is in the inner cluster and the mirrored
 > fields are the inner implementation's status for it.
+
+This paragraph reads `reconcile_core`. It is not what the guarantee proves: the
+guarantee constrains the reported conditions against each other (G-shape,
+section 3.1), not against the inner cluster. The `Synced == True` above is a
+property of the code, and the theorems do not yet carry it to a reader of the
+outer copy.
 
 Otherwise `Synced` is `False` with reason `InnerConverging`,
 `InnerTerminating`, `StaleMirror`, `ForeignObject`, or, after a failed
@@ -573,16 +581,16 @@ namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
-`observedGeneration` (G-gen), and which is `outer_status_for` of some source
-status and outcome (G-merge). Nothing else.
+`observedGeneration` (G-gen), and whose conditions are those three, in that
+order and no others, each `True` or `False`, with `Ready` `True` only when
+`Synced` is and never at the same time as `Stalled` (G-shape). Nothing else.
 
-(G-merge) fixes the shape of the written status without saying where the source
-came from. It gives the three conditions in that order and no others, `Synced`
-`True` exactly when the outcome is `Synced`, `Ready` `True` only then, and
-`Ready` and `Stalled` never both `True`. It leaves the source's mirrored
-remainder and the `Ready` and `Stalled` text unconstrained. Relating the source
-to the status the mirror actually held needs the `Get` response that produced
-it, which no state keeps (issue #49, finding 2).
+(G-shape) constrains the reported conditions against each other. It does not
+constrain them against the inner cluster: the `Ready` reason and message, and
+the mirrored remainder, may be anything. Tying either to the status the mirror
+held needs the `Get` response that produced it, which no state keeps, so a
+reconciler reporting `Synced` and `Ready` over invented mirrored fields still
+satisfies the guarantee. Issue #49 finding 2 is open.
 
 **Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
 mirror's namespace, or a `Delete` of the mirror with a uid precondition.
