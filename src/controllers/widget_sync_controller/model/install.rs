@@ -2,8 +2,8 @@ use crate::kubernetes_api_objects::{error::*, spec::prelude::*};
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::spec::cluster::{Cluster, ControllerModel};
 use crate::reconciler::spec::io::{VoidEReqView, VoidERespView};
-use crate::widget_sync_controller::model::{disturber_reconciler, janitor_reconciler, sync_reconciler};
-use crate::widget_sync_controller::model::{disturber_reconciler::WidgetDisturberReconcileState, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState};
+use crate::widget_sync_controller::model::{disturber_reconciler, inner_impl_reconciler, janitor_reconciler, sync_reconciler};
+use crate::widget_sync_controller::model::{disturber_reconciler::WidgetDisturberReconcileState, inner_impl_reconciler::WidgetInnerImplReconcileState, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState};
 use crate::widget_sync_controller::trusted::spec_types::*;
 use vstd::prelude::*;
 
@@ -21,6 +21,17 @@ impl Marshallable for WidgetSyncReconcileState {
 }
 
 impl Marshallable for WidgetJanitorReconcileState {
+    uninterp spec fn marshal(self) -> Value;
+
+    uninterp spec fn unmarshal(v: Value) -> Result<Self, UnmarshalError>;
+
+    #[verifier(external_body)]
+    proof fn marshal_preserves_integrity()
+        ensures forall |o: Self| Self::unmarshal(#[trigger] o.marshal()) is Ok && o == Self::unmarshal(o.marshal())->Ok_0
+    {}
+}
+
+impl Marshallable for WidgetInnerImplReconcileState {
     uninterp spec fn marshal(self) -> Value;
 
     uninterp spec fn unmarshal(v: Value) -> Result<Self, UnmarshalError>;
@@ -65,6 +76,21 @@ pub open spec fn widget_janitor_controller_model(k: SyncKind, b: Binding) -> Con
             |obj: SyncedObjectView, resp_o, s| janitor_reconciler::reconcile_core(k, b, obj, resp_o, s),
             |s| janitor_reconciler::reconcile_done(s),
             |s| janitor_reconciler::reconcile_error(s),
+        ),
+        external_model: None,
+    }
+}
+
+// The inner implementation of a mirrored kind: it writes the status the sync
+// controller carries back out (inner_impl_reconciler.rs).
+pub open spec fn widget_inner_impl_controller_model(kind: Kind) -> ControllerModel {
+    ControllerModel {
+        reconcile_model: Cluster::synced_reconcile_model::<WidgetInnerImplReconcileState, VoidEReqView, VoidERespView>(
+            kind,
+            || inner_impl_reconciler::reconcile_init_state(),
+            |obj: SyncedObjectView, resp_o, s| inner_impl_reconciler::reconcile_core(kind, obj, resp_o, s),
+            |s| inner_impl_reconciler::reconcile_done(s),
+            |s| inner_impl_reconciler::reconcile_error(s),
         ),
         external_model: None,
     }

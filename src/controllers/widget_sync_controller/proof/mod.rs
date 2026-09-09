@@ -1,6 +1,7 @@
 pub mod disturber;
 pub mod guarantee;
 pub mod helper_invariants;
+pub mod inner_impl;
 pub mod janitor_invariants;
 pub mod liveness;
 pub mod predicate;

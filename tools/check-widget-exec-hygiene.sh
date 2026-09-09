@@ -26,7 +26,7 @@ fi
 ## (section 3). A new external_body or external item anywhere under the
 ## controller must be added there deliberately, so its location is pinned here.
 root=src/controllers/widget_sync_controller
-expected="$root/model/install.rs:3
+expected="$root/model/install.rs:4
 $root/trusted/exec_types.rs:1"
 actual=$(grep -rc --exclude-dir=target --exclude-dir='target-*' 'external_body' "$root" | grep -v ':0$' | sort)
 if [ "$actual" != "$expected" ]; then
@@ -41,13 +41,16 @@ if grep -rn --exclude-dir=target --exclude-dir='target-*' 'verifier(external)\]'
 fi
 
 ## An uninterp spec function is trusted in the same way an external_body body
-## is: it means whatever the exec side does with it. The pair's are the three
-## reconcile states' Marshallable instances (marshal and unmarshal each).
+## is: it means whatever the exec side does with it. The pair's are the four
+## reconcile states' Marshallable instances (marshal and unmarshal each: the
+## sync reconciler's, the janitor's, the disturber's and the inner
+## implementation's -- each modelled controller costs one external_body round
+## trip and two uninterpreted functions).
 ## Neither the disturber's edit nor default_status_rest is among them any more:
 ## the first is a closed definition with a proved lemma, the second is the empty
 ## remainder of spec::synced_object. A new one is a new assumption, so the count
 ## is pinned per file like the shape files' below.
-uninterp_expected="$root/model/install.rs:6"
+uninterp_expected="$root/model/install.rs:8"
 uninterp_actual=$(grep -rc --exclude-dir=target --exclude-dir='target-*' 'uninterp spec fn' "$root" | grep -v ':0$' | sort)
 if [ "$uninterp_actual" != "$uninterp_expected" ]; then
     echo "uninterp spec fn items under $root changed; update doc/widget_sync_design.md section 3 and this script" >&2
