@@ -332,12 +332,50 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
             &&& (stalled.status == condition_true() || stalled.status == condition_false())
             &&& (ready.status == condition_true() ==> synced.status == condition_true())
             &&& !(ready.status == condition_true() && stalled.status == condition_true())
+            &&& (synced.status == condition_true() <==> synced.reason == Some(reason_synced()))
+            &&& synced.reason is Some
+            &&& synced.message is None
+            &&& (synced.status == condition_false() ==> {
+                    &&& ready.reason == Some(reason_not_synced())
+                    &&& ready.message is None
+                    &&& stalled.reason == synced.reason
+                    &&& stalled.message is None
+                })
         }),
 {
     reveal_strlit("True");
     reveal_strlit("False");
     assert("True"@.len() != "False"@.len());
     lemma_ready_and_stalled_exclusive(generation, source, outcome);
+    // Synced is the only reason of that name, so the reason identifies the outcome
+    // as Synced and the condition's status follows.
+    lemma_synced_is_the_only_synced_reason(outcome);
+}
+
+// No outcome but Synced reports the reason Synced. Each reason is a distinct
+// literal, and Synced is the only one of its length.
+pub proof fn lemma_synced_is_the_only_synced_reason(outcome: SyncOutcomeView)
+    ensures outcome.reason() == reason_synced() <==> outcome is Synced,
+{
+    reveal_strlit("Synced");
+    reveal_strlit("InnerConverging");
+    reveal_strlit("InnerTerminating");
+    reveal_strlit("ForeignObject");
+    reveal_strlit("StaleMirror");
+    reveal_strlit("Forbidden");
+    reveal_strlit("InnerUnreachable");
+    reveal_strlit("CreateFailed");
+    reveal_strlit("Rejected");
+    reveal_strlit("RequestFailed");
+    assert("Synced"@.len() != "InnerConverging"@.len());
+    assert("Synced"@.len() != "InnerTerminating"@.len());
+    assert("Synced"@.len() != "ForeignObject"@.len());
+    assert("Synced"@.len() != "StaleMirror"@.len());
+    assert("Synced"@.len() != "Forbidden"@.len());
+    assert("Synced"@.len() != "InnerUnreachable"@.len());
+    assert("Synced"@.len() != "CreateFailed"@.len());
+    assert("Synced"@.len() != "Rejected"@.len());
+    assert("Synced"@.len() != "RequestFailed"@.len());
 }
 
 // ---------------------------------------------------------------------------

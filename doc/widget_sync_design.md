@@ -194,12 +194,6 @@ landing.
 > at that generation means the spec is in the inner cluster and the mirrored
 > fields are the inner implementation's status for it.
 
-This paragraph reads `reconcile_core`. It is not what the guarantee proves: the
-guarantee constrains the reported conditions against each other (G-shape,
-section 3.1), not against the inner cluster. The `Synced == True` above is a
-property of the code, and the theorems do not yet carry it to a reader of the
-outer copy.
-
 Otherwise `Synced` is `False` with reason `InnerConverging`,
 `InnerTerminating`, `StaleMirror`, `ForeignObject`, or, after a failed
 request, `Forbidden`, `InnerUnreachable`, `CreateFailed`, `Rejected` or
@@ -223,7 +217,17 @@ status is, that is when `Synced` is `True`:
   is `False`, with the inner `Stalled` condition's reason and message when
   synced and present, else with the outcome's reason.
 - `Ready` and `Stalled` are never both `True`
-  (`lemma_ready_and_stalled_exclusive`).
+  (`lemma_ready_and_stalled_exclusive`), which (G-shape) carries to a reader of
+  the patch. It is still not lifted to the stored outer copy.
+
+The rest of this section describes `reconcile_core`, not a theorem. What the
+guarantee proves of a status write is (G-shape) and (G-gen) (section 3.1), which
+relate the reported conditions to each other and to the tested generation, never
+to the inner cluster. So `Synced == True` meaning the spec is in the inner
+cluster is a property of the code. No theorem carries that direction to a reader
+of the outer copy. R2 carries its converse -- a settled inner status is
+eventually reported -- under premises that findings 1 and 3 of issue #49 record
+as unchained and unmodelled.
 
 ## 2. The model
 
@@ -581,16 +585,28 @@ namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
-`observedGeneration` (G-gen), and whose conditions are those three, in that
-order and no others, each `True` or `False`, with `Ready` `True` only when
-`Synced` is and never at the same time as `Stalled` (G-shape). Nothing else.
+`observedGeneration` (G-gen), and whose condition list is those three and
+nothing else, in that order (G-shape). Nothing else.
 
-(G-shape) constrains the reported conditions against each other. It does not
-constrain them against the inner cluster: the `Ready` reason and message, and
-the mirrored remainder, may be anything. Tying either to the status the mirror
-held needs the `Get` response that produced it, which no state keeps, so a
-reconciler reporting `Synced` and `Ready` over invented mirrored fields still
-satisfies the guarantee. Issue #49 finding 2 is open.
+(G-shape) also relates the three to each other. Each is `True` or `False`.
+`Ready` is `True` only when `Synced` is, and never at the same time as
+`Stalled`. `Synced` is `True` exactly when its reason is `Synced`, and it
+carries no message. A `False` `Synced` means no inner status was read, and the
+other two say so rather than reporting one: `Ready` denies with `NotSynced`,
+`Stalled` repeats `Synced`'s reason, and neither carries a message.
+
+What (G-shape) never does is relate a reported condition to the inner cluster.
+The mirrored remainder is unconstrained, and so are the `Ready` and `Stalled`
+text where `Synced` is `True` -- the path that carries the inner status, and so
+the path that matters. Tying either to the status the mirror held needs the
+`Get` response that produced it, which no state keeps, so a reconciler reporting
+`Synced` and `Ready` over invented mirrored fields still satisfies the
+guarantee. Issue #49 finding 2 is open.
+
+Each condition being two-valued is `outer_status_for`'s merge, which issue #49
+finding 16 disputes: a workload reporting `Ready=Unknown` is reported `False`.
+(G-shape) states that merge rather than endorsing it, so changing it changes the
+guarantee.
 
 **Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
 mirror's namespace, or a `Delete` of the mirror with a uid precondition.
