@@ -57,7 +57,9 @@ impl RawValue {
     // a status the outer copy has never carried is built from.
     #[verifier(external_body)]
     pub fn empty_rest() -> (rest: RawValue)
-        ensures spec::status_rest_ok(rest@),
+        ensures
+            spec::status_rest_ok(rest@),
+            rest@ == spec::empty_status_rest(),
     {
         RawValue { inner: serde_json::Value::Object(serde_json::Map::new()) }
     }

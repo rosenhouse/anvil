@@ -825,6 +825,10 @@ proof fn lemma_r2_reconcile_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value
     let reconcile = s.ongoing_reconciles(controller_id)[key];
     let cr = reconcile.triggering_cr;
     let cr_outer = unmarshal(k.outer_kind, cr)->Ok_0;
+    // The status the reconcile writes mirrors a remainder that came out of an
+    // unmarshalled object, so it is one a value can represent.
+    unmarshal_is_representable();
+    lemma_status_or_default_rest_ok(cr_outer.status);
     let state = WidgetSyncReconcileState::unmarshal(reconcile.local_state)->Ok_0;
     let resp_msg_opt = input.1;
     let resp_o = if resp_msg_opt is Some {
@@ -1336,6 +1340,9 @@ proof fn lemma_r2_get_resp_handled(k: SyncKind, b: Binding, spec_ok: spec_fn(Val
     let obj = res->Ok_0;
     assert(settled_response_obj(k, b, obj, outer, settled));
     let inner = unmarshal(inner_kind(k, b), obj)->Ok_0;
+    unmarshal_is_representable();
+    lemma_status_or_default_rest_ok(cr_outer.status);
+    lemma_status_or_default_rest_ok(inner.status);
     let resp_o = Some(ResponseView::<VoidERespView>::KResponse(resp.content->APIResponse_0));
     assert(is_some_k_get_resp_view(resp_o));
     assert(extract_some_k_get_resp_view(resp_o) == res);

@@ -127,9 +127,39 @@ pub uninterp spec fn marshal_status(s: Option<SyncedStatusView>) -> Value;
 // keep -- and a contract that cannot be kept proves anything.
 pub uninterp spec fn status_rest_ok(v: Value) -> bool;
 
+// A status a value can represent: one whose remainder is a remainder. The two
+// round trips below hold of these and of no others, which is what status_rest_ok
+// was introduced to say.
+pub open spec fn status_ok(s: Option<SyncedStatusView>) -> bool {
+    s is Some ==> status_rest_ok(s->0.rest)
+}
+
+// The remainder of a status with no members of its own: what a status the outer
+// copy has never carried mirrors. Trusted in the same way status_rest_ok is; the
+// exec twin is exec::synced_object::RawValue::empty_rest().
+pub uninterp spec fn empty_status_rest() -> Value;
+
+#[verifier(external_body)]
+pub proof fn empty_status_rest_ok()
+    ensures status_rest_ok(empty_status_rest()),
+{}
+
+// Marshalling a representable status and reading it back gives it again. The
+// hypothesis is not a technicality: a status whose remainder carried an
+// `observedGeneration` or `conditions` of its own is not representable, because
+// marshalling keeps those two apart from the remainder, so nothing could be read
+// back for it. Stated without the hypothesis this ensures proves anything.
 #[verifier(external_body)]
 pub proof fn marshal_status_preserves_integrity()
-    ensures forall |s: Option<SyncedStatusView>| unmarshal_status(#[trigger] marshal_status(s)) == Ok::<Option<SyncedStatusView>, UnmarshalError>(s),
+    ensures forall |s: Option<SyncedStatusView>| status_ok(s)
+        ==> unmarshal_status(#[trigger] marshal_status(s)) == Ok::<Option<SyncedStatusView>, UnmarshalError>(s),
+{}
+
+// A status read out of a value is representable: the remainder it carries is
+// what was left after the two members were taken out.
+#[verifier(external_body)]
+pub proof fn unmarshal_status_is_representable()
+    ensures forall |v: Value| #[trigger] unmarshal_status(v) is Ok ==> status_ok(unmarshal_status(v)->Ok_0),
 {}
 
 // The string at `path` in the spec value, None when the path does not lead to a
@@ -164,8 +194,17 @@ pub proof fn marshal_preserves_kind()
     ensures forall |kind: Kind, d: DynamicObjectView| #[trigger] unmarshal(kind, d) is Ok ==> d.kind == kind && unmarshal(kind, d)->Ok_0.kind == kind,
 {}
 
+// An object read out of a dynamic object carries a representable status: its
+// status is what unmarshal_status gave.
+pub proof fn unmarshal_is_representable()
+    ensures forall |kind: Kind, d: DynamicObjectView| #[trigger] unmarshal(kind, d) is Ok ==> status_ok(unmarshal(kind, d)->Ok_0.status),
+{
+    unmarshal_status_is_representable();
+}
+
 pub proof fn unmarshal_of_marshal()
-    ensures forall |o: SyncedObjectView| unmarshal(o.kind, #[trigger] marshal(o)) == Ok::<SyncedObjectView, UnmarshalError>(o),
+    ensures forall |o: SyncedObjectView| status_ok(o.status)
+        ==> unmarshal(o.kind, #[trigger] marshal(o)) == Ok::<SyncedObjectView, UnmarshalError>(o),
 {
     marshal_status_preserves_integrity();
 }

@@ -209,9 +209,10 @@ impl SyncedStatusView {
 }
 
 // The mirrored remainder of a status that was never written: what the outer copy
-// reports before it has ever carried an inner status. Trusted, with the exec
-// twin inside trusted::exec_types::outer_status_for.
-pub uninterp spec fn default_status_rest() -> Value;
+// reports before it has ever carried an inner status. The exec twin is inside
+// trusted::exec_types::outer_status_for, which builds it with
+// RawValue::empty_rest().
+pub open spec fn default_status_rest() -> Value { empty_status_rest() }
 
 pub open spec fn default_synced_status() -> SyncedStatusView {
     SyncedStatusView {
@@ -225,6 +226,15 @@ pub open spec fn default_synced_status() -> SyncedStatusView {
 // fields the outer status keeps when the inner status is not consulted.
 pub open spec fn status_or_default(status: Option<SyncedStatusView>) -> SyncedStatusView {
     if status is Some { status->0 } else { default_synced_status() }
+}
+
+// The source of the mirrored remainder is representable when the status it came
+// from is: an inner status read out of a value, or the empty remainder.
+pub proof fn lemma_status_or_default_rest_ok(status: Option<SyncedStatusView>)
+    requires status_ok(status),
+    ensures status_rest_ok(status_or_default(status).rest),
+{
+    empty_status_rest_ok();
 }
 
 // ---------------------------------------------------------------------------
