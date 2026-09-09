@@ -19,4 +19,4 @@ pub mod temporal_rules;
 pub mod transition_validation;
 pub mod wf1_helpers;
 pub mod api_server;
-pub mod two_cluster;
+pub mod multi_cluster;

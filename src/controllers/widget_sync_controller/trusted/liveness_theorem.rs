@@ -7,7 +7,7 @@
 // `k.outer_kind` and the mirror in binding `b` has kind `inner_kind(k, b)`, at the
 // same namespace and name. The reading on two stores, with the outer copy in one
 // and one binding's mirrors in the other, is
-// widget_sync_controller::proof::two_cluster.
+// widget_sync_controller::proof::multi_cluster.
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::spec::{cluster::*, esr::*, message::*};
