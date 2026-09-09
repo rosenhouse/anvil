@@ -140,6 +140,21 @@ pub proof fn lemma_always_builtin_deletes_never_target_mirrors(spec: TempPred<Cl
 // triggering snapshot at its current step.
 // ---------------------------------------------------------------------------
 
+// Every status the sync reconciler has in flight is one its own merge produced,
+// from a source status and an outcome. Weaker than provenance -- it does not say
+// the source is a status the mirror held -- but it rules out a reconciler that
+// reports a status it made up: the three conditions are outer_status_for's, so
+// Synced, Ready and Stalled are the merge of the outcome with the source's own
+// Ready and Stalled, and each is stamped with the outer generation. The place the
+// merge's source is an inner status is the Synced path of reconcile_core, which
+// takes it from a mirror that is_mirror_of the outer copy, has its spec, and is
+// inner_caught_up (#49, finding 2).
+pub open spec fn status_patch_is_a_merge(k: SyncKind, msg: Message, outer: SyncedObjectView) -> bool {
+    exists |source: SyncedStatusView, outcome: SyncOutcomeView|
+        msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(
+            #[trigger] sync_reconciler::outer_status_patch(k, outer, outer_status_for(outer.metadata.generation, source, outcome)))
+}
+
 pub open spec fn sync_pending_request_is(k: SyncKind, controller_id: int, key: ObjectRef, reconcile: OngoingReconcile) -> bool {
     let msg = reconcile.pending_req_msg->0;
     let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
@@ -153,8 +168,8 @@ pub open spec fn sync_pending_request_is(k: SyncKind, controller_id: int, key: O
         obj: marshal(make_inner(k, outer)),
     })
     &&& step is AfterPatchInner ==> exists |inner: SyncedObjectView| msg.content->APIRequest_0 == APIRequest::PatchRequest(#[trigger] sync_reconciler::inner_spec_patch(k, inner, outer))
-    &&& step is AfterPatchOuterStatus ==> exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status))
-    &&& step is AfterReportError ==> exists |status: SyncedStatusView| msg.content->APIRequest_0 == APIRequest::PatchStatusRequest(#[trigger] sync_reconciler::outer_status_patch(k, outer, status))
+    &&& step is AfterPatchOuterStatus ==> status_patch_is_a_merge(k, msg, outer)
+    &&& step is AfterReportError ==> status_patch_is_a_merge(k, msg, outer)
 }
 
 pub open spec fn sync_pending_requests_match_snapshots(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
