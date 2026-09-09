@@ -42,12 +42,12 @@ fi
 
 ## An uninterp spec function is trusted in the same way an external_body body
 ## is: it means whatever the exec side does with it. The pair's are the three
-## reconcile states' Marshallable instances (marshal and unmarshal each) and
-## default_status_rest. The disturber's edit is not among them any more: it is
-## a closed definition with a proved lemma. A new one is a new assumption, so
-## the count is pinned per file like the shape files' below.
-uninterp_expected="$root/model/install.rs:6
-$root/trusted/spec_types.rs:1"
+## reconcile states' Marshallable instances (marshal and unmarshal each).
+## Neither the disturber's edit nor default_status_rest is among them any more:
+## the first is a closed definition with a proved lemma, the second is the empty
+## remainder of spec::synced_object. A new one is a new assumption, so the count
+## is pinned per file like the shape files' below.
+uninterp_expected="$root/model/install.rs:6"
 uninterp_actual=$(grep -rc --exclude-dir=target --exclude-dir='target-*' 'uninterp spec fn' "$root" | grep -v ':0$' | sort)
 if [ "$uninterp_actual" != "$uninterp_expected" ]; then
     echo "uninterp spec fn items under $root changed; update doc/widget_sync_design.md section 3 and this script" >&2
@@ -72,9 +72,9 @@ src/kubernetes_api_objects/exec/synced_object.rs
 src/kubernetes_api_objects/spec/model_kind.rs
 src/kubernetes_api_objects/spec/synced_object.rs"
 shape_expected="src/kubernetes_api_objects/exec/registry.rs:4:2:0
-src/kubernetes_api_objects/exec/synced_object.rs:35:11:0
+src/kubernetes_api_objects/exec/synced_object.rs:36:11:0
 src/kubernetes_api_objects/spec/model_kind.rs:0:0:0
-src/kubernetes_api_objects/spec/synced_object.rs:1:0:4"
+src/kubernetes_api_objects/spec/synced_object.rs:3:0:5"
 shape_actual=$(for file in $shape_files; do
     printf '%s:%s:%s:%s\n' "$file" \
         "$(grep -c '#\[verifier(external_body)\]' "$file" || true)" \
