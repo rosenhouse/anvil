@@ -48,23 +48,18 @@ verus! {
 // ---------------------------------------------------------------------------
 
 // What the one-store reading needs of the configured kind and binding: the
-// outer kind is not this binding's mirror kind (lemma_widget_kinds_ok discharges
-// it from sync_kind_ok, by the injectivity of model_kind), and the selector
-// reads the spec, not metadata, so that the API server's validation is
-// metadata-blind as the refinement requires.
+// outer kind is not this binding's mirror kind. lemma_widget_kinds_ok discharges
+// it from sync_kind_ok, by the injectivity of model_kind.
 pub open spec fn widget_kinds_ok(sk: SyncKind, bnd: Binding) -> bool {
-    &&& sk.outer_kind != inner_kind(sk, bnd)
-    &&& sk.selector is Field
+    sk.outer_kind != inner_kind(sk, bnd)
 }
 
 // What the multi-store instantiation needs of the cluster for one kind: the
-// primary side is the home side, the outer kind lives there, the selector reads
-// the spec, and the mirror kind of every binding the sync reconciler serves
-// lives on that binding's side, which the cluster has. Nothing is said about
-// the sides of other kinds: the mirrors of other configured kinds live wherever
-// their own bindings say.
+// primary side is the home side, the outer kind lives there, and the mirror kind
+// of every binding the sync reconciler serves lives on that binding's side,
+// which the cluster has. Nothing is said about the sides of other kinds: the
+// mirrors of other configured kinds live wherever their own bindings say.
 pub open spec fn widget_kind_cluster_ok(sk: SyncKind, tc: MultiCluster<ClusterIdView>) -> bool {
-    &&& sk.selector is Field
     &&& tc.wf()
     &&& tc.home == ClusterIdView::Primary
     &&& tc.side_of_kind(sk.outer_kind) == ClusterIdView::Primary
@@ -2647,7 +2642,7 @@ pub proof fn lemma_janitor_sound_transfer(sk: SyncKind, bnd: Binding, spec_ok: s
 // is not the binding's mirror kind, which is lemma_outer_kind_is_not_inner under
 // sync_kind_ok -- the injectivity of model_kind, not the length of a name.
 pub proof fn lemma_widget_kinds_ok(sk: SyncKind, bnd: Binding)
-    requires sync_kind_ok(sk), sk.selector is Field,
+    requires sync_kind_ok(sk),
     ensures widget_kinds_ok(sk, bnd),
 {
     lemma_outer_kind_is_not_inner(sk, bnd);
@@ -2693,7 +2688,6 @@ pub proof fn lemma_widget_multi_cluster_ok(sk: SyncKind, bnd: Binding, cluster: 
     requires
         sync_kind_ok(sk),
         bindings_ok(sk),
-        sk.selector is Field,
         sk.bindings.contains(bnd),
         sk.bindings.subset_of(bindings),
     ensures widget_multi_cluster_ok(sk, bnd, widget_multi_cluster_for(cluster, bindings)),
@@ -2724,10 +2718,6 @@ pub proof fn lemma_widget_multi_cluster_ok(sk: SyncKind, bnd: Binding, cluster: 
 pub proof fn lemma_widget_types(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: Cluster)
     requires
         sync_kind_ok(sk),
-        // The refinement asks that the API server's validation not read metadata,
-        // and a `name` selector's immutability rule reads metadata.name
-        // (doc/widget_sync_fanout_design.md, section 5.2).
-        sk.selector is Field,
         cluster.installed_types == widget_installed_types(sk, spec_ok),
     ensures
         cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
@@ -2764,7 +2754,6 @@ pub proof fn lemma_widget_types(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, c
 pub proof fn lemma_widget_is_pair_cluster(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
     requires
         sync_kind_ok(sk),
-        sk.selector is Field,
         sk.bindings.contains(bnd),
         sync_id != janitor_id,
     ensures widget_pair_cluster(sk, bnd, spec_ok, widget_pair_cluster_for(sk, bnd, spec_ok, sync_id, janitor_id), sync_id, janitor_id),
@@ -2785,7 +2774,6 @@ pub proof fn widget_instance_multi_cluster_theorem(sk: SyncKind, bnd: Binding, s
     requires
         sync_kind_ok(sk),
         bindings_ok(sk),
-        sk.selector is Field,
         sk.bindings.contains(bnd),
         sync_id != janitor_id,
     ensures ({
@@ -2901,7 +2889,6 @@ pub proof fn lemma_widget_disturbed_is_cluster_with_others(sk: SyncKind, bnd: Bi
     requires
         sync_kind_ok(sk),
         bindings_ok(sk),
-        sk.selector is Field,
         sk.bindings.contains(bnd),
         sync_id != janitor_id,
         sync_id != disturber_id,
@@ -2927,7 +2914,6 @@ pub proof fn widget_disturbed_multi_cluster_theorem(sk: SyncKind, bnd: Binding, 
     requires
         sync_kind_ok(sk),
         bindings_ok(sk),
-        sk.selector is Field,
         sk.bindings.contains(bnd),
         sync_id != janitor_id,
         sync_id != disturber_id,

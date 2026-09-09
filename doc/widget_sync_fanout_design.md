@@ -610,24 +610,12 @@ key's kind; the delete-soundness clause is read with the conjuncts of
 `parent_absent_forever` (the parent is an outer copy of `k` that selects `b`'s
 cluster), not over every stored object.
 
-Two hypotheses the fixed pair did not need appear here. First, the folded
+One hypothesis the fixed pair did not need appears here: the folded
 one-store cluster installs the mirror kind of every binding of `k.bindings`,
 not only of `b`: the sync controller of `k` serves all of them, so a Create it
 sends for an outer copy of another *served* binding must still name a known kind
 (`MultiCluster::request_ok`, which `models_ok` asks of the reconcile model as a
 function, for every object it could be triggered by, not only the stored ones).
-Second, the selector of `k` must be a *field* of the spec, not `metadata.name`
-(`sk.selector is Field`): the refinement asks that the API server's validation
-not read metadata (`installed_types_ignore_metadata`), and the immutability rule
-of a `name` selector reads `metadata.name`. That restriction is an artifact of
-how the model states validation, not a limitation of the system: a `name`
-selector is immutable because Kubernetes never renames an object, so the real
-API server enforces it with no rule at all, and it is only the model's reading
-of the rule as a `valid_transition` that has to touch metadata. It is a real
-cost: the deployment of section 4 configures `Gadget` with a `name` selector, so
-no multi-store theorem is read for that configuration, and no instance of the
-deployment theorem of section 5.3 names two kinds. The one-store theorems, which
-do not ask for a field selector, cover both kinds.
 
 The theorem is still read for one binding `b` at a time -- the ESRs it consumes
 and the D3 it assumes are `b`'s, and the janitors of the other bindings enter as
@@ -644,8 +632,7 @@ conjunction, and `widget_cluster_with_others` and `widget_pair_cluster` take
 `bnd` in `k.bindings`. The closed statements are therefore closed for *any*
 configuration, not only the demo's. `lemma_widget_is_pair_cluster` and
 `widget_instance_multi_cluster_theorem` take `k`, `bnd` in `k.bindings`, two ids
-and the schema, under `sync_kind_ok(k)`, `bindings_ok(k)` and a field selector,
-and read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
+and the schema, under `sync_kind_ok(k)` and `bindings_ok(k)`, and read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
 janitor_id)`: the model kinds of the whole configuration installed, the sync
 controller, and the janitor of `bnd`.
 `lemma_widget_disturbed_is_cluster_with_others` and
@@ -662,8 +649,7 @@ delete soundness for *every* (kind, binding) of a deployment, on one model that
 gives every binding its own store: for a map from configured kinds to their
 setups and a set of bindings covering theirs (`bindings_cover`), under
 `kinds_deployed` -- each kind
-well formed, with well-formed bindings, a field selector and disjoint ids; its
-kinds installed; and the cluster running exactly the deployment's controllers
+well formed, with well-formed bindings and disjoint ids; its kinds installed; and the cluster running exactly the deployment's controllers
 and no others.
 
 The other controllers of the deployment are admitted, not assumed: the sync
@@ -688,11 +674,10 @@ Two things the theorem does not give. It is read per (kind, binding), so
 nothing compares two inner clusters -- though nothing the controllers do
 compares them either: the sync controller compares an outer uid with the
 annotation on the mirror of one binding, and the janitor of a binding compares
-its mirror's annotation with outer uids. No instance of the theorem names two
-kinds, because the demo's second kind selects its cluster by `metadata.name`;
-writing one means dropping the field-selector hypothesis of section 5.2, which
-in turn means restating the immutability rule so that it does not read
-metadata.
+its mirror's annotation with outer uids. And no instance of it names two
+kinds, so the obligations a second kind carries -- `kinds_separate`, and the
+controllers of both kinds sharing one id space and one set of installed types --
+have no witness (#50).
 
 ### 5.4 Assumptions
 

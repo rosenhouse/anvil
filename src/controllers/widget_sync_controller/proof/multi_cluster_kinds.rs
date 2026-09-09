@@ -49,7 +49,6 @@ pub open spec fn kinds_deployed(setups: Map<SyncKind, KindSetup>, cluster: Clust
         let c = setups[k];
         &&& sync_kind_ok(k)
         &&& bindings_ok(k)
-        &&& k.selector is Field
         &&& ids_ok(k.bindings, c.janitor_ids, c.sync_id)
         &&& cluster.controller_models.contains_pair(c.sync_id, widget_sync_controller_model(k))
         &&& cluster.synced_type_is_installed(k.outer_kind, c.spec_ok, k.selector)
@@ -275,10 +274,8 @@ pub proof fn widget_kinds_multi_cluster_theorem(setups: Map<SyncKind, KindSetup>
 // ---------------------------------------------------------------------------
 
 // The fan-out demo (composition::widget_sync_reconciler::widget_fanout_kind):
-// one kind, two bindings, three controllers. There is no two-kind instance: the
-// second kind of the demo deployment, Gadget, selects its cluster by
-// `metadata.name`, which kinds_deployed's field selector rules out
-// (doc/widget_sync_fanout_design.md, section 5.2).
+// one kind, two bindings, three controllers. No instance names two kinds, so the
+// obligations a second kind carries have no witness (issue #50).
 pub open spec fn widget_fanout_setups() -> Map<SyncKind, KindSetup> {
     Map::<SyncKind, KindSetup>::empty().insert(widget_fanout_kind(), KindSetup {
         spec_ok: widget_spec_ok(),
@@ -296,7 +293,6 @@ proof fn lemma_one_kind_deployed(k: SyncKind, spec_ok: spec_fn(Value) -> bool, s
     requires
         sync_kind_ok(k),
         bindings_ok(k),
-        k.selector is Field,
         ids_ok(k.bindings, ids, sync_id),
     ensures kinds_deployed(
         Map::<SyncKind, KindSetup>::empty().insert(k, KindSetup { spec_ok: spec_ok, sync_id: sync_id, janitor_ids: ids }),
