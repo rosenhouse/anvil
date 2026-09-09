@@ -107,10 +107,7 @@ impl DynReconciler for JanitorReconciler {
     }
 
     fn reconcile_core(&self, inner: &SyncedObject, resp_o: Option<Response<VoidEResp>>, state: WidgetJanitorReconcileState) -> (res: (WidgetJanitorReconcileState, Option<Request<VoidEReq>>)) {
-        proof {
-            synced_object_status_is_representable(*inner);
-            lemma_janitor_model_transition(self.kind@, self.binding@, inner@, resp_o.deep_view(), state@);
-        }
+        proof { lemma_janitor_model_transition(self.kind@, self.binding@, inner@, resp_o.deep_view(), state@); }
         let res = reconcile_core(&self.kind, &self.binding, inner, resp_o, state);
         res
     }

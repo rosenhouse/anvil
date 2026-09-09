@@ -57,9 +57,7 @@ impl RawValue {
     // a status the outer copy has never carried is built from.
     #[verifier(external_body)]
     pub fn empty_rest() -> (rest: RawValue)
-        ensures
-            spec::status_rest_ok(rest@),
-            rest@ == spec::empty_status_rest(),
+        ensures rest@ == spec::empty_status_rest(),
     {
         RawValue { inner: serde_json::Value::Object(serde_json::Map::new()) }
     }
@@ -462,15 +460,6 @@ pub struct SyncedObject {
 implement_view_trait!(SyncedObject, SyncedObjectView);
 implement_deep_view_trait!(SyncedObject, SyncedObjectView);
 
-// Every SyncedObject carries a status a value can represent. Trusted, and true
-// by construction: the only way to build one is SyncedObject::unmarshal, whose
-// view is spec::unmarshal of a dynamic object, and a status that came out of
-// unmarshal_status is representable
-// (spec::synced_object::unmarshal_is_representable).
-#[verifier(external_body)]
-pub proof fn synced_object_status_is_representable(o: SyncedObject)
-    ensures spec::status_ok(o@.status),
-{}
 
 impl std::clone::Clone for SyncedObject {
     #[verifier(external_body)]

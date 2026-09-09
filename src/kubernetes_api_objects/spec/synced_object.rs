@@ -127,9 +127,9 @@ pub uninterp spec fn marshal_status(s: Option<SyncedStatusView>) -> Value;
 // keep -- and a contract that cannot be kept proves anything.
 pub uninterp spec fn status_rest_ok(v: Value) -> bool;
 
-// A status a value can represent: one whose remainder is a remainder. The two
-// round trips below hold of these and of no others, which is what status_rest_ok
-// was introduced to say.
+// A status a value can represent: one whose remainder is a remainder. This is
+// the condition status_rest_ok was introduced to name; it is necessary for the
+// two round trips below, and the exec side keeps it of every status it builds.
 pub open spec fn status_ok(s: Option<SyncedStatusView>) -> bool {
     s is Some ==> status_rest_ok(s->0.rest)
 }
@@ -247,6 +247,12 @@ pub trait DynamicObjectLike: Sized {
     spec fn metadata(self) -> ObjectMetaView;
 
     spec fn marshal(self) -> DynamicObjectView;
+
+    // Whether the object survives the round trip through its marshalled form.
+    // A reconcile is only asked to conform to its model on such an object,
+    // because the model runs on the marshalled form and the two agree on no
+    // other (reconciler::exec::reconciler::DynReconciler::reconcile_core).
+    spec fn representable(self) -> bool;
 }
 
 impl DynamicObjectLike for SyncedObjectView {
@@ -261,6 +267,10 @@ impl DynamicObjectLike for SyncedObjectView {
     open spec fn marshal(self) -> DynamicObjectView {
         marshal(self)
     }
+
+    open spec fn representable(self) -> bool {
+        status_ok(self.status)
+    }
 }
 
 impl DynamicObjectLike for DynamicObjectView {
@@ -274,6 +284,11 @@ impl DynamicObjectLike for DynamicObjectView {
 
     open spec fn marshal(self) -> DynamicObjectView {
         self
+    }
+
+    // A dynamic object is its own marshalled form.
+    open spec fn representable(self) -> bool {
+        true
     }
 }
 

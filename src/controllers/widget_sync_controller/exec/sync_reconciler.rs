@@ -109,10 +109,7 @@ impl DynReconciler for SyncReconciler {
     }
 
     fn reconcile_core(&self, outer: &SyncedObject, resp_o: Option<Response<VoidEResp>>, state: WidgetSyncReconcileState) -> (res: (WidgetSyncReconcileState, Option<Request<VoidEReq>>)) {
-        proof {
-            synced_object_status_is_representable(*outer);
-            lemma_sync_model_transition(self.kind@, outer@, resp_o.deep_view(), state@);
-        }
+        proof { lemma_sync_model_transition(self.kind@, outer@, resp_o.deep_view(), state@); }
         let res = reconcile_core(&self.kind, outer, resp_o, state);
         res
     }

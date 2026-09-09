@@ -72,8 +72,9 @@ where
 //
 // The shim calls reconcile_core on an object it fetched from the cluster and
 // wrapped for the kind the controller was started for, which is what the
-// precondition on the kind trusts (shim_layer::controller_runtime::
-// reconcile_dyn_with).
+// preconditions on the kind and on representability trust
+// (shim_layer::controller_runtime::reconcile_dyn_with): the wrapping is an
+// unmarshal, and an object that unmarshals is representable.
 //
 // reconcile_core requires only that the object is well formed for a namespaced
 // kind and that its kind is the one the reconciler was built for. It does not
@@ -113,6 +114,7 @@ where
         requires
             cr@.metadata().well_formed_for_namespaced(),
             cr@.kind() == self.model().kind,
+            cr@.representable(),
         ensures
             (self.model().transition)(cr@.marshal(), marshal_response_view::<<Self::EResp as View>::V>(resp_o.deep_view()), state@.marshal())
                 == (res.0@.marshal(), marshal_request_view::<<Self::EReq as View>::V>(res.1.deep_view()));

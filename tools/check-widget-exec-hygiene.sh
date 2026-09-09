@@ -72,7 +72,7 @@ src/kubernetes_api_objects/exec/synced_object.rs
 src/kubernetes_api_objects/spec/model_kind.rs
 src/kubernetes_api_objects/spec/synced_object.rs"
 shape_expected="src/kubernetes_api_objects/exec/registry.rs:4:2:0
-src/kubernetes_api_objects/exec/synced_object.rs:36:11:0
+src/kubernetes_api_objects/exec/synced_object.rs:35:11:0
 src/kubernetes_api_objects/spec/model_kind.rs:0:0:0
 src/kubernetes_api_objects/spec/synced_object.rs:3:0:5"
 shape_actual=$(for file in $shape_files; do
