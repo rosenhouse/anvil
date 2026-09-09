@@ -563,14 +563,24 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
         outer.object_ref() == outer_key,
         outer.metadata.uid is Some,
         outer.metadata.generation is Some,
-        exists |status: SyncedStatusView| req == sync_reconciler::outer_status_patch(k, outer, status) && written_status_shape(status, outer.metadata.generation),
+        // The status is the reconciler's own merge of a source and an outcome,
+        // which is what carries (G-merge) into the guarantee.
+        exists |source: SyncedStatusView, outcome: SyncOutcomeView|
+            req == sync_reconciler::outer_status_patch(k, outer, outer_status_for(outer.metadata.generation, source, outcome))
+            && status_rest_ok(source.rest),
     ensures sync_status_patch_req(k, req, outer_key),
 {
     marshal_status_preserves_integrity();
-    let status = choose |status: SyncedStatusView| req == sync_reconciler::outer_status_patch(k, outer, status) && written_status_shape(status, outer.metadata.generation);
+    let (source, outcome) = choose |source: SyncedStatusView, outcome: SyncOutcomeView|
+        req == sync_reconciler::outer_status_patch(k, outer, outer_status_for(outer.metadata.generation, source, outcome))
+        && status_rest_ok(source.rest);
+    let status = outer_status_for(outer.metadata.generation, source, outcome);
+    lemma_outer_status_for_has_written_shape(outer.metadata.generation, source, outcome);
     assert(req.status == marshal_status(Some(status)));
     assert(unmarshal_status(req.status) == Ok::<Option<SyncedStatusView>, UnmarshalError>(Some(status)));
+    assert(req.tests.generation == outer.metadata.generation);
     lemma_conditions_of_written_status(status);
+    assert(unmarshal_status(req.status)->Ok_0->0 == outer_status_for(req.tests.generation, source, outcome));
 }
 
 // The shape of every status the sync reconciler writes for a snapshot at
