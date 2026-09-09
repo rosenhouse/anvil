@@ -30,7 +30,7 @@ pub open spec fn widget_inner_impl_controller_spec(k: SyncKind, b: Binding, spec
     ControllerSpec {
         esr: true_pred(),
         liveness_dependency: true_pred(),
-        safety_guarantee: always(lift_state(widget_inner_impl_guarantee(id))),
+        safety_guarantee: always(lift_state(widget_inner_impl_guarantee(inner_kind(k, b), id))),
         environment_rely: true_pred(),
         safety_partial_rely: |other_id: int| true_pred(),
         fairness: |cluster: Cluster| true_pred(),
