@@ -411,7 +411,7 @@ reconcilers.
 | Write executed, client sees a timeout | yes | covered by an executed write plus `restart_controller`; every write is replay-safe (patches test uid and generation, deletes carry uids); a delayed `Create` is collected by the janitor |
 | Late delivery of a stale request | yes | the network reorders; the tests reject it |
 | Spurious `NotFound` (CRD missing, wrong kubeconfig) | yes, as a fault | the janitor deletes only after a successful `List` lacking the parent |
-| Inner implementation writing status, timestamps or annotations on every reconcile | yes, as another controller under the rely | the spec patch tests generation, not resource version; on many stores the implementation must also meet hypotheses 1 to 3 of 2.2; an annotation write is an `Update` carrying a resource version (3.2) |
+| Inner implementation writing status, timestamps or annotations on every reconcile | yes, as another controller under the rely, and modeled as one (2.5) | the spec patch tests generation, not resource version; on many stores the implementation must also meet hypotheses 1 to 3 of 2.2; an annotation write is an `Update` carrying a resource version (3.2) |
 | Inner implementation adding finalizers | yes, as another controller under the rely | rely allows it; R3 needs D3; on many stores also hypotheses 1 to 3 of 2.2 |
 | Out-of-band edit of a mirror's spec, or of its other labels and annotations (a `kubectl edit` in the inner cluster) | yes, as another controller's write | the rely permits it; the reconciler overwrites a spec edit and never copies a status computed for it; R1 and R2 hold once such edits stop (`mirror_spec_undisturbed`). The disturber (section 2.4) is a controller model doing the spec edit, on one store and on two |
 | Out-of-band delete of a mirror; inner cluster rebuilt | yes, as another controller's delete | the rely permits any Delete; the reconciler recovers (NotFound → Create); R1 and R2 hold once such deletes stop landing on the live mirror (`mirror_undeleted`); R3 and R3s hold throughout. The disturber (section 2.4) is a controller model doing exactly this, on one store and on two |
@@ -465,6 +465,37 @@ disturbance has stopped" is said. A cluster-model step in the style of the pod
 monkey was not needed: it would have touched every `next_step` case split in the
 repository and the multi-store simulation, for a behaviour the rely already
 expresses.
+
+### 2.5 The inner implementation
+
+The controller a workload cluster runs for a mirrored kind is what the return
+path exists for: the sync controller copies a spec in, something acts on it and
+writes a status, and the sync controller carries that status back out. It is
+another controller under the rely, like the disturber, and
+`model/inner_impl_reconciler.rs` models one. On each reconcile it patches the
+status of the mirror it was triggered by, stamping `observedGeneration` with the
+generation it observed and reporting `Ready`. It tests that generation, so a
+patch delayed past a spec change cannot claim to have observed the newer one --
+`inner_caught_up` would otherwise hold of a status computed for an older spec,
+which is the one thing an implementation must not do. What a real
+implementation computes is its own business; the pair's properties are stated
+over whatever status it writes, so the model writes the cheapest one that has
+the shape.
+
+Its guarantee (`proof/inner_impl.rs`: every request it has in flight is a status
+Patch of its own mirror, of its own kind) implies both reconcilers' relies. The
+sync reconciler's rely asks only that a status Patch not name the outer kind,
+and the janitor's constrains Creates and Updates, of which it sends neither.
+
+What this settles and what it does not. Before it, no modelled controller
+anywhere wrote an inner status, so `inner_settled` -- the premise of R2 -- and
+D3 held of no execution of any modelled cluster, and the row in 2.3 above
+described coverage with nothing to point at. The premise is now producible.
+That is not the same as R2 being reached: reaching it needs the implementation
+to be live, and no fairness is assumed for it, deliberately (3.3). R2 is stated
+for whatever status the inner side has settled on, so that it holds for any
+implementation, and the price of that generality is that the theorem says
+nothing about when the settling happens.
 
 ## 3. Specification
 
@@ -834,6 +865,7 @@ instantiation included, carry no budget.
 | R1, R2, R3, R3s | `widget_sync_controller/proof/liveness/{sync_spec_proof,sync_status_proof,janitor_proof,cleanup_proof}.rs` |
 | Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
 | The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
+| The inner implementation: model and guarantee | `widget_sync_controller/model/inner_impl_reconciler.rs`, `proof/inner_impl.rs` |
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
 | Configured kinds composed with each other | `composition/widget_two_kinds.rs` |
 | Multi-store model | `kubernetes_cluster/spec/multi_cluster.rs` |
