@@ -481,10 +481,12 @@ which names the model kind of a configured kind in a cluster. `π` is
 Trusted beyond the specification, under `widget_sync_controller/`: one
 `external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
 which builds the outer status, its three conditions included, by hand to match
-the spec's definition — three `external_body` items in `model/install.rs`, the
+the spec's definition — four `external_body` items in `model/install.rs`, the
 `Marshallable` instances of the reconcile states, whose `marshal` and
-`unmarshal` are the six uninterpreted spec functions the hygiene script pins
-there. Nothing else under the controller is uninterpreted: the mirrored
+`unmarshal` are the eight uninterpreted spec functions the hygiene script pins
+there. Each modelled controller costs one round-trip axiom and two
+uninterpreted functions, which is the price of the disturber (section 2.4) and
+of the inner implementation (section 2.5). Nothing else under the controller is uninterpreted: the mirrored
 remainder of a status that was never written is the shape's empty remainder,
 `empty_status_rest()`.
 

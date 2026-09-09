@@ -31,6 +31,17 @@ impl Marshallable for WidgetJanitorReconcileState {
     {}
 }
 
+impl Marshallable for WidgetInnerImplReconcileState {
+    uninterp spec fn marshal(self) -> Value;
+
+    uninterp spec fn unmarshal(v: Value) -> Result<Self, UnmarshalError>;
+
+    #[verifier(external_body)]
+    proof fn marshal_preserves_integrity()
+        ensures forall |o: Self| Self::unmarshal(#[trigger] o.marshal()) is Ok && o == Self::unmarshal(o.marshal())->Ok_0
+    {}
+}
+
 impl Marshallable for WidgetDisturberReconcileState {
     uninterp spec fn marshal(self) -> Value;
 
