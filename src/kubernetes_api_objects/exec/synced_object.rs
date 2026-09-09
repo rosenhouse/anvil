@@ -57,7 +57,7 @@ impl RawValue {
     // a status the outer copy has never carried is built from.
     #[verifier(external_body)]
     pub fn empty_rest() -> (rest: RawValue)
-        ensures spec::status_rest_ok(rest@),
+        ensures rest@ == spec::empty_status_rest(),
     {
         RawValue { inner: serde_json::Value::Object(serde_json::Map::new()) }
     }
@@ -459,6 +459,7 @@ pub struct SyncedObject {
 
 implement_view_trait!(SyncedObject, SyncedObjectView);
 implement_deep_view_trait!(SyncedObject, SyncedObjectView);
+
 
 impl std::clone::Clone for SyncedObject {
     #[verifier(external_body)]

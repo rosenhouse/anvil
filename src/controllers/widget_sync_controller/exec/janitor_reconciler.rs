@@ -43,7 +43,7 @@ pub struct JanitorReconciler {
 }
 
 pub proof fn lemma_janitor_model_transition(k: SyncKind, b: Binding, cr: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, s: janitor_reconciler::WidgetJanitorReconcileState)
-    requires cr.kind == inner_kind(k, b),
+    requires cr.kind == inner_kind(k, b), status_ok(cr.status),
     ensures
         (widget_janitor_controller_model(k, b).reconcile_model.transition)(marshal(cr), marshal_response_view::<VoidERespView>(resp_o), s.marshal())
             == (janitor_reconciler::reconcile_core(k, b, cr, resp_o, s).0.marshal(),

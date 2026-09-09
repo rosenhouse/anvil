@@ -243,7 +243,7 @@ pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedSta
         Some(s) => s.rest(),
         // The mirrored remainder of a status that was never written: the model's
         // default_status_rest().
-        None => RawValue::from_json(serde_json::Value::Object(serde_json::Map::new())),
+        None => RawValue::empty_rest(),
     };
     SyncedStatus::new(outer_generation, Some(vec![synced_condition, ready_condition, stalled_condition]), rest)
 }

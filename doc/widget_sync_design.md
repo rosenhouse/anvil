@@ -484,9 +484,9 @@ which builds the outer status, its three conditions included, by hand to match
 the spec's definition — three `external_body` items in `model/install.rs`, the
 `Marshallable` instances of the reconcile states, whose `marshal` and
 `unmarshal` are the six uninterpreted spec functions the hygiene script pins
-there — and one more uninterpreted spec function, `default_status_rest()` in
-`trusted/spec_types.rs`, the mirrored remainder of a status that was never
-written.
+there. Nothing else under the controller is uninterpreted: the mirrored
+remainder of a status that was never written is the shape's empty remainder,
+`empty_status_rest()`.
 
 Everything the pair used to trust about its own wrappers is now the shape's,
 and lives in `kubernetes_api_objects`, where anything else generic over kinds
@@ -497,7 +497,7 @@ shares it. That inventory, which
 |---|---|
 | `exec/synced_object.rs` | the wrappers of the shape: `SyncedObject`'s `unmarshal`, `marshal`, `has_kind`, `new` and accessors; `SyncedStatus`'s and `SyncedCondition`'s constructors and accessors, `SyncedStatus::rest` and `RawValue::empty_rest` (whose values satisfy `status_rest_ok`, the precondition of `SyncedStatus::new`); the free `marshal_status` and `cluster_of_dynamic`, the latter being the selector read off a stored object that a `List` response gives; and the two equalities `RawValue::eq` and `SyncedStatus::eq`, whose postconditions are *iffs* — `b == (self@ == other@)` — so each is trusted to decide equality of the view in both directions, which is what makes "the specs differ" and "the status differs" decisions of the reconcilers rather than approximations |
 | `exec/registry.rs` | `RegistryEntry::crd_name` and `RegistryEntry::api_resource`, the routing the model trusts (section 5.3): the model kind of a configured kind in a cluster |
-| `spec/synced_object.rs` | the uninterpreted `unmarshal_status`, `marshal_status`, `spec_field` and `status_rest_ok`, and the axiom `marshal_status_preserves_integrity` (`unmarshal_status(marshal_status(s)) == Ok(s)`). `unmarshal`, `marshal` and their lemmas are proved over these, not assumed |
+| `spec/synced_object.rs` | the uninterpreted `unmarshal_status`, `marshal_status`, `spec_field`, `status_rest_ok` and `empty_status_rest`, and three axioms over them: `marshal_status_preserves_integrity` (`unmarshal_status(marshal_status(s)) == Ok(s)`, **for a representable `s`** — a status whose remainder carries an `observedGeneration` or `conditions` of its own is not representable, so an unguarded round trip would be a contract no implementation can keep), `unmarshal_status_is_representable` (a status read out of a value is one) and `empty_status_rest_ok` (the empty remainder is one). Representability is a *precondition* of `DynReconciler::reconcile_core`, beside the two the trait already carries, discharged by the shim's unmarshal -- not a property asserted of every `SyncedObject`, which would let any holder of one conclude that an arbitrary status is representable. `unmarshal`, `marshal` and their lemmas are proved over these, not assumed |
 | `spec/model_kind.rs` | nothing: `model_kind` and its injectivity are proved. The hypotheses that injectivity rests on — no `@` in a kind name, none in a binding's parts and no `/` in its namespace — are checked on the exec side at boot (`crd_shape::check_kind_name`) and when a Secret is read (`bindings::binding_of_secret`) |
 
 From the framework the pair also relies on `UidToken`, on the `PatchTests` and

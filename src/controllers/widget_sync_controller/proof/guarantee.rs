@@ -467,8 +467,12 @@ proof fn lemma_sync_new_request_is_guaranteed(
     let cr_key = input.2->0;
     let reconcile = s.ongoing_reconciles(controller_id)[cr_key];
     let outer = unmarshal(k.outer_kind, reconcile.triggering_cr)->Ok_0;
-    assert forall |source: SyncedStatusView, outcome: SyncOutcomeView|
-        written_status_shape(#[trigger] outer_status_for(outer.metadata.generation, source, outcome), outer.metadata.generation) by {
+    // Every status the reconciler writes mirrors the remainder of the snapshot's
+    // own status, which is representable because the snapshot was unmarshalled.
+    unmarshal_is_representable();
+    lemma_status_or_default_rest_ok(outer.status);
+    assert forall |source: SyncedStatusView, outcome: SyncOutcomeView| status_rest_ok(source.rest)
+        implies written_status_shape(#[trigger] outer_status_for(outer.metadata.generation, source, outcome), outer.metadata.generation) by {
         lemma_outer_status_for_has_written_shape(outer.metadata.generation, source, outcome);
     }
     assert(outer_snapshot_is_bound(k, reconcile.triggering_cr, cr_key)(s));
@@ -572,6 +576,11 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
 // The shape of every status the sync reconciler writes for a snapshot at
 // `generation`: the three conditions, each stamped with the generation.
 pub open spec fn written_status_shape(status: SyncedStatusView, generation: Option<int>) -> bool {
+    // The remainder is one a value can represent, so the status reads back
+    // (kubernetes_api_objects::spec::synced_object::status_ok). It is mirrored
+    // from the source, which is an inner status read out of a value or the
+    // empty remainder.
+    &&& status_rest_ok(status.rest)
     &&& status.observed_generation == generation
     &&& written_conditions_shape(status)
     &&& status.conditions->0[0].observed_generation == generation
@@ -580,6 +589,7 @@ pub open spec fn written_status_shape(status: SyncedStatusView, generation: Opti
 }
 
 pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
+    requires status_rest_ok(source.rest),
     ensures written_status_shape(outer_status_for(generation, source, outcome), generation),
 {
 }
