@@ -134,6 +134,7 @@ impl DynReconciler for ProbeReconciler {
 
     fn reconcile_core(&self, cr: &SyncedObject, resp_o: Option<Response<VoidEResp>>, state: ProbeState) -> (res: (ProbeState, Option<Request<VoidEReq>>)) {
         proof {
+            synced_object_status_is_representable(*cr);
             lemma_synced_reconcile_model_transition::<ProbeStateView, VoidEReqView, VoidERespView>(
                 self.model().kind, || probe_init(), |cr, resp_o, s| probe_core(cr, resp_o, s), |s| probe_done(s), |s| probe_error(s),
                 cr@, resp_o.deep_view(), state@,

@@ -196,7 +196,11 @@ pub proof fn lemma_synced_reconcile_model_transition<S, EReq, EResp>(
         S: Marshallable,
         EReq: Marshallable,
         EResp: Marshallable,
-    requires cr.kind == kind,
+    requires
+        cr.kind == kind,
+        // Only a representable status survives the round trip through the
+        // marshalled form, so only for such a cr do the two agree.
+        status_ok(cr.status),
     ensures
         (Cluster::synced_reconcile_model::<S, EReq, EResp>(kind, init, core, done, error).transition)(marshal(cr), marshal_response_view::<EResp>(resp_o), s.marshal())
             == (core(cr, resp_o, s).0.marshal(), marshal_request_view::<EReq>(core(cr, resp_o, s).1)),

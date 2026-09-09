@@ -45,7 +45,7 @@ pub struct SyncReconciler {
 // What the model's four closures compute on the marshalled forms; the two
 // lemmas of install_helpers, instantiated at the sync reconciler's closures.
 pub proof fn lemma_sync_model_transition(k: SyncKind, cr: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, s: sync_reconciler::WidgetSyncReconcileState)
-    requires cr.kind == k.outer_kind,
+    requires cr.kind == k.outer_kind, status_ok(cr.status),
     ensures
         (widget_sync_controller_model(k).reconcile_model.transition)(marshal(cr), marshal_response_view::<VoidERespView>(resp_o), s.marshal())
             == (sync_reconciler::reconcile_core(k, cr, resp_o, s).0.marshal(),
@@ -109,7 +109,10 @@ impl DynReconciler for SyncReconciler {
     }
 
     fn reconcile_core(&self, outer: &SyncedObject, resp_o: Option<Response<VoidEResp>>, state: WidgetSyncReconcileState) -> (res: (WidgetSyncReconcileState, Option<Request<VoidEReq>>)) {
-        proof { lemma_sync_model_transition(self.kind@, outer@, resp_o.deep_view(), state@); }
+        proof {
+            synced_object_status_is_representable(*outer);
+            lemma_sync_model_transition(self.kind@, outer@, resp_o.deep_view(), state@);
+        }
         let res = reconcile_core(&self.kind, outer, resp_o, state);
         res
     }

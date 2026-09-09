@@ -43,7 +43,7 @@ pub struct JanitorReconciler {
 }
 
 pub proof fn lemma_janitor_model_transition(k: SyncKind, b: Binding, cr: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, s: janitor_reconciler::WidgetJanitorReconcileState)
-    requires cr.kind == inner_kind(k, b),
+    requires cr.kind == inner_kind(k, b), status_ok(cr.status),
     ensures
         (widget_janitor_controller_model(k, b).reconcile_model.transition)(marshal(cr), marshal_response_view::<VoidERespView>(resp_o), s.marshal())
             == (janitor_reconciler::reconcile_core(k, b, cr, resp_o, s).0.marshal(),
@@ -107,7 +107,10 @@ impl DynReconciler for JanitorReconciler {
     }
 
     fn reconcile_core(&self, inner: &SyncedObject, resp_o: Option<Response<VoidEResp>>, state: WidgetJanitorReconcileState) -> (res: (WidgetJanitorReconcileState, Option<Request<VoidEReq>>)) {
-        proof { lemma_janitor_model_transition(self.kind@, self.binding@, inner@, resp_o.deep_view(), state@); }
+        proof {
+            synced_object_status_is_representable(*inner);
+            lemma_janitor_model_transition(self.kind@, self.binding@, inner@, resp_o.deep_view(), state@);
+        }
         let res = reconcile_core(&self.kind, &self.binding, inner, resp_o, state);
         res
     }
