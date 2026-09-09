@@ -636,6 +636,14 @@ pub proof fn widget_fanout_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bo
 // instance of widget_fanout_core_holds, not a second proof of it: the janitors'
 // core set of a one-element binding set has the one janitor's id as its only
 // member, so the two core sets are the same value by set extensionality.
+// The pair's core set: the janitor of `b` and the sync controller serving it.
+pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int) -> CoreSet {
+    union_coreset(
+        widget_janitor_core_set(janitor_id),
+        widget_sync_core_set(k, sync_id, Map::empty().insert(b, janitor_id)),
+        true_pred())
+}
+
 pub proof fn widget_pair_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, janitor_id: int, sync_id: int)
     requires
         // `b` is the whole configuration: the sync reconciler serves it alone,

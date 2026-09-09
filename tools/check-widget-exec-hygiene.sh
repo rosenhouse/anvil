@@ -41,7 +41,7 @@ if grep -rn --exclude-dir=target --exclude-dir='target-*' 'verifier(external)\]'
 fi
 
 ## An uninterp spec function is trusted in the same way an external_body body
-## is: it means whatever the exec side does with it. The pair's are the three
+## is: it means whatever the exec side does with it. The pair's are the four
 ## reconcile states' Marshallable instances (marshal and unmarshal each: the
 ## sync reconciler's, the janitor's, the disturber's and the inner
 ## implementation's -- each modelled controller costs one external_body round

@@ -81,8 +81,6 @@ pub open spec fn widget_janitor_controller_model(k: SyncKind, b: Binding) -> Con
     }
 }
 
-// The out-of-band actor of model/disturber_reconciler.rs, as a controller model,
-// acting on the objects of one inner kind.
 // The inner implementation of a mirrored kind: it writes the status the sync
 // controller carries back out (inner_impl_reconciler.rs).
 pub open spec fn widget_inner_impl_controller_model(kind: Kind) -> ControllerModel {
@@ -98,6 +96,8 @@ pub open spec fn widget_inner_impl_controller_model(kind: Kind) -> ControllerMod
     }
 }
 
+// The out-of-band actor of model/disturber_reconciler.rs, as a controller model,
+// acting on the objects of one inner kind.
 pub open spec fn widget_disturber_controller_model(kind: Kind) -> ControllerModel {
     ControllerModel {
         reconcile_model: Cluster::synced_reconcile_model::<WidgetDisturberReconcileState, VoidEReqView, VoidERespView>(

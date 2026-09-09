@@ -88,12 +88,6 @@ pub proof fn widget_disturber_singleton_core_holds(k: SyncKind, b: Binding, spec
 // The pair with the disturber.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int) -> CoreSet {
-    union_coreset(
-        widget_janitor_core_set(janitor_id),
-        widget_sync_core_set(k, sync_id, Map::empty().insert(b, janitor_id)),
-        true_pred())
-}
 
 pub open spec fn widget_disturbed_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int, disturber_id: int) -> CoreSet {
     union_coreset(widget_pair_core_set(k, b, janitor_id, sync_id), widget_disturber_core_set(disturber_id), true_pred())

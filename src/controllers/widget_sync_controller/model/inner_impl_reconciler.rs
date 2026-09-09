@@ -1,20 +1,15 @@
 // Model of an inner implementation: the controller a workload cluster runs for a
 // mirrored kind. It is what the return path of the design exists for -- the sync
 // controller copies a spec in, something in the inner cluster acts on it and
-// writes a status, and the sync controller carries that status back out.
-//
-// Until this model there was no such controller anywhere in the repository. The
-// disturber (disturber_reconciler.rs) edits and deletes mirrors but writes no
-// status, so `inner_settled` -- the premise of R2 -- and D3 held of no modelled
-// execution, and doc/widget_sync_design.md section 2.3 listed inner status writes
-// as covered "as another controller under the rely" with nothing to point at.
+// writes a status, and the sync controller carries that status back out. It is
+// another controller under the rely, as the disturber is
+// (doc/widget_sync_design.md, section 2.5).
 //
 // On each reconcile it patches the status of the mirror it was triggered by,
-// stamping observedGeneration with that mirror's own generation and reporting
-// Ready. It tests the generation it observed, so a patch that arrives after the
-// spec moved on does not claim to have observed the newer one. It reads nothing
-// and reports on nothing else: what a real implementation computes is its own
-// business, and the pair's properties are stated over whatever status it writes.
+// stamping observedGeneration with the generation it read off that mirror and
+// reporting Ready. It reads nothing else and reports on nothing else: what a real
+// implementation computes is its own business, and the pair's properties are
+// stated over whatever status it writes.
 //
 // Its guarantee (proof/inner_impl.rs) implies the relies of both reconcilers: a
 // status patch of a mirror is a request the sync reconciler's rely permits
@@ -81,10 +76,16 @@ pub open spec fn inner_impl_status(generation: Option<int>) -> SyncedStatusView 
     }
 }
 
-// The status patch, pinned to the generation the reconcile observed. Without the
-// test a patch delayed past a spec change would stamp observedGeneration with a
-// generation it never saw, which is the one thing an implementation must not do:
-// inner_caught_up would then hold of a status computed for an older spec.
+// The status patch, pinned to the uid and the generation the reconcile read.
+//
+// The two tests do different jobs. The uid test is the safety one: generations
+// restart at 1 with each incarnation, so a patch delayed past a delete and a
+// recreate would otherwise pass the generation test and make inner_caught_up
+// hold of a status computed for the previous incarnation's spec. The generation
+// test buys stability rather than safety -- the stamp is the generation this
+// reconcile read, so a delayed patch is stale, not wrong -- but without it a late
+// patch would overwrite a settled status with an older one, and R2's premise is
+// `always(inner_settled)`, not one instant of it.
 pub open spec fn inner_status_patch(kind: Kind, inner: SyncedObjectView) -> PatchStatusRequest {
     PatchStatusRequest {
         namespace: inner.metadata.namespace->0,
@@ -95,6 +96,21 @@ pub open spec fn inner_status_patch(kind: Kind, inner: SyncedObjectView) -> Patc
             .with_generation_from_object_meta(inner.metadata),
         status: marshal_status(Some(inner_impl_status(inner.metadata.generation))),
     }
+}
+
+// The status the implementation writes is one that reports the mirror as caught
+// up with the generation the patch tested. This is the load-bearing half of
+// "the premise of R2 is producible" (doc/widget_sync_design.md, section 2.5):
+// the other half is that a status write keeps the metadata and the spec, so
+// spec_synced survives it, which is the API server's own rule
+// (status_updated_object).
+pub proof fn lemma_inner_impl_status_is_caught_up(inner: SyncedObjectView)
+    requires inner.metadata.generation is Some,
+    ensures inner_caught_up(SyncedObjectView {
+        status: Some(inner_impl_status(inner.metadata.generation)),
+        ..inner
+    }),
+{
 }
 
 pub open spec fn reconcile_core(kind: Kind, inner: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetInnerImplReconcileState) -> (WidgetInnerImplReconcileState, Option<RequestView<VoidEReqView>>) {

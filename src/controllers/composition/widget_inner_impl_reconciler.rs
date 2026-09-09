@@ -4,11 +4,13 @@
 // mirror's status still has R1, R2, R3 and R3s. Nothing is assumed about the
 // implementation beyond the shape of its requests: no fairness, no rely, no ESR.
 //
-// This is the cluster the deployment actually is -- the pair beside something in
-// the workload cluster acting on the mirrored spec -- and until this file the
-// repository had no such cluster. What it does not give is R2 being reached:
-// that needs the implementation to be live, and no fairness is assumed for it
-// (doc/widget_sync_design.md, section 2.5).
+// This is a one-store reading: the implementation and the outer copies share an
+// API server. The multi-store one, which is the shape a deployment has, needs the
+// implementation's commutation lemma and widget_other_controller_ok besides, as
+// the disturber has (proof/multi_cluster.rs); it is not written yet.
+//
+// Nor does this give R2 being reached: that needs the implementation to be live,
+// and no fairness is assumed for it (doc/widget_sync_design.md, section 2.5).
 use crate::composition::widget_janitor_reconciler::*;
 use crate::composition::widget_sync_reconciler::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
@@ -93,12 +95,6 @@ pub proof fn widget_inner_impl_singleton_core_holds(k: SyncKind, b: Binding, spe
 // The pair with the inner implementation.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int) -> CoreSet {
-    union_coreset(
-        widget_janitor_core_set(janitor_id),
-        widget_sync_core_set(k, sync_id, Map::empty().insert(b, janitor_id)),
-        true_pred())
-}
 
 pub open spec fn widget_implemented_core_set(k: SyncKind, b: Binding, janitor_id: int, sync_id: int, impl_id: int) -> CoreSet {
     union_coreset(widget_pair_core_set(k, b, janitor_id, sync_id), widget_inner_impl_core_set(impl_id), true_pred())
@@ -252,7 +248,9 @@ pub proof fn widget_implemented_core_holds_for(k: SyncKind, b: Binding, spec_ok:
 // The demo configuration with the inner implementation: three controllers.
 // ---------------------------------------------------------------------------
 
-pub open spec fn widget_inner_impl_id() -> int { 4 }
+// 3 is the disturber, 4 the fan-out demo's second janitor, 5 the gadget
+// janitor: distinct so the demo id space stays injective across the instances.
+pub open spec fn widget_inner_impl_id() -> int { 6 }
 
 pub open spec fn widget_implemented_cluster_instance() -> Cluster {
     widget_implemented_cluster_for(widget_kind(), widget_binding(), widget_spec_ok(), widget_sync_id(), widget_janitor_id(), widget_inner_impl_id())

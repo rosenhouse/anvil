@@ -6,8 +6,7 @@
 // That it implies the relies is the point: the sync reconciler's rely permits a
 // status patch of anything but an outer copy, and the janitor's does not
 // constrain one at all. So an inner implementation writing a status is a
-// controller the pair tolerates, which is what doc/widget_sync_design.md section
-// 2.3 claimed before any such model existed.
+// controller the pair tolerates.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
