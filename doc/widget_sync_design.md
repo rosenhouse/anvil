@@ -328,7 +328,7 @@ admits the disturber (section 2.4) as one. `widget_instance_multi_cluster_theore
 and `widget_disturbed_multi_cluster_theorem` close the statement for the clusters
 `composition/widget_sync_reconciler.rs` and
 `composition/widget_disturber_reconciler.rs` build from a configuration, for any
-configuration meeting `sync_kind_ok`, `bindings_ok` and a field selector; the demo
+configuration meeting `sync_kind_ok` and `bindings_ok`; the demo
 applies them in one line. Those instances are the witness that the hypotheses are
 satisfiable, because the sync reconciler serves a finite set of bindings
 (doc/widget_sync_fanout_design.md, sections 3.2 and 5.2).

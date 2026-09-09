@@ -274,10 +274,8 @@ pub proof fn widget_kinds_multi_cluster_theorem(setups: Map<SyncKind, KindSetup>
 // ---------------------------------------------------------------------------
 
 // The fan-out demo (composition::widget_sync_reconciler::widget_fanout_kind):
-// one kind, two bindings, three controllers. There is no two-kind instance: the
-// second kind of the demo deployment, Gadget, selects its cluster by
-// `metadata.name`, which kinds_deployed's field selector rules out
-// (doc/widget_sync_fanout_design.md, section 5.2).
+// one kind, two bindings, three controllers. No instance names two kinds, so the
+// obligations a second kind carries have no witness (issue #50).
 pub open spec fn widget_fanout_setups() -> Map<SyncKind, KindSetup> {
     Map::<SyncKind, KindSetup>::empty().insert(widget_fanout_kind(), KindSetup {
         spec_ok: widget_spec_ok(),
