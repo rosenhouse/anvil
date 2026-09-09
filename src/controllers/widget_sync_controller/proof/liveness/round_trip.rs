@@ -1,12 +1,9 @@
 // The round trip: R1 and R2 chained across D4.
 //
-// R1 promises the mirror carries the outer copy's spec. R2 promises the outer copy
-// carries the status the inner side settled on. R2's premise, inner_settled,
-// contains R1's conclusion, spec_synced, and two things besides: that the inner
-// status observes the mirror's current generation, and that it is the particular
-// `settled` R2 is stated for. R1 supplies neither, and no proof about the sync
-// controller can -- both are facts about the implementation running in the inner
-// cluster, which Anvil does not model. D4 assumes exactly that step.
+// R2's premise, inner_settled, is R1's conclusion plus two facts about the
+// implementation running in the inner cluster, which Anvil does not model: that
+// the inner status observes the mirror's current generation, and that it is the
+// status R2 is stated for. D4 assumes that step.
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::spec::cluster::*;
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, spec_types::*};
@@ -15,41 +12,6 @@ use verus_temporal_logic::rules::*;
 use vstd::prelude::*;
 
 verus! {
-
-// A predicate that holds of every execution holds always, under any spec.
-proof fn lemma_valid_entails_always(spec: TempPred<ClusterState>, p: TempPred<ClusterState>)
-    requires valid(p),
-    ensures spec.entails(always(p)),
-{
-    assert forall |ex| #[trigger] spec.satisfied_by(ex) implies always(p).satisfied_by(ex) by {
-        assert forall |i: nat| p.satisfied_by(#[trigger] ex.suffix(i)) by {}
-    }
-}
-
-// Modus ponens under a spec: the shape core's conclusion is stated in.
-pub proof fn lemma_entails_modus_ponens(spec: TempPred<ClusterState>, p: TempPred<ClusterState>, q: TempPred<ClusterState>)
-    requires
-        spec.entails(p.implies(q)),
-        spec.entails(p),
-    ensures spec.entails(q),
-{
-    assert forall |ex| #[trigger] spec.satisfied_by(ex) implies q.satisfied_by(ex) by {
-        assert(spec.implies(p.implies(q)).satisfied_by(ex));
-        assert(spec.implies(p).satisfied_by(ex));
-    }
-}
-
-// Both halves of a conjunction a spec entails.
-pub proof fn lemma_entails_and_elim(spec: TempPred<ClusterState>, p: TempPred<ClusterState>, q: TempPred<ClusterState>)
-    requires spec.entails(p.and(q)),
-    ensures
-        spec.entails(p),
-        spec.entails(q),
-{
-    assert forall |ex| #[trigger] spec.satisfied_by(ex) implies p.satisfied_by(ex) && q.satisfied_by(ex) by {
-        assert(spec.implies(p.and(q)).satisfied_by(ex));
-    }
-}
 
 // R1 and R2 for one outer copy, plus D4 for it, give the round trip for it. The
 // chain is: always(outer_stable) gives itself and, by R1 on the weaker premise,
@@ -67,7 +29,8 @@ pub proof fn lemma_round_trip_per_cr(spec: TempPred<ClusterState>, k: SyncKind, 
     let synced = lift_state(spec_synced(k, outer));
     let settled_and_stable = |settled: SyncedStatusView|
         always(stable.and(lift_state(inner_settled(k, outer, settled))));
-    let reported = |settled: SyncedStatusView| always(lift_state(status_synced(k, outer, settled)));
+    let reported = |settled: SyncedStatusView|
+        always(lift_state(status_synced(k, outer, settled)).and(lift_state(inner_settled(k, outer, settled))));
 
     // always(outer_stable) leads to itself.
     leads_to_self::<ClusterState>(always(stable));
@@ -77,9 +40,8 @@ pub proof fn lemma_round_trip_per_cr(spec: TempPred<ClusterState>, k: SyncKind, 
     // on top of it, so R1 applies.
     assert(stable.entails(spec_stable));
     entails_preserved_by_always::<ClusterState>(stable, spec_stable);
-    lemma_valid_entails_always(spec, always(stable).implies(always(spec_stable)));
-    lemma_valid_entails_always(spec, always(synced).implies(always(synced)));
-    leads_to_weaken::<ClusterState>(spec, always(spec_stable), always(synced), always(stable), always(synced));
+    entails_implies_leads_to::<ClusterState>(spec, always(stable), always(spec_stable));
+    leads_to_trans::<ClusterState>(spec, always(stable), always(spec_stable), always(synced));
 
     // Together: the outer copy stays stable and the mirror carries its spec.
     leads_to_always_and::<ClusterState>(spec, always(stable), stable, synced);
@@ -89,10 +51,29 @@ pub proof fn lemma_round_trip_per_cr(spec: TempPred<ClusterState>, k: SyncKind, 
 
     // R2 turns each such status into the outer copy stably carrying it.
     assert forall |settled: SyncedStatusView| #[trigger] spec.entails(settled_and_stable(settled).leads_to(tla_exists(reported))) by {
-        // R2 for this status, with the closures beta-reduced onto its shape.
+        // R2 for this status, with the closure beta-reduced onto its shape.
         assert(spec.entails(widget_status_eventually_mirrored_per_cr(k, b, outer, settled)));
         assert(settled_and_stable(settled) == always(stable.and(lift_state(inner_settled(k, outer, settled)))));
-        assert(reported(settled) == always(lift_state(status_synced(k, outer, settled))));
+
+        // The premise is itself an always, so it leads to itself; carrying it
+        // through is what keeps inner_settled beside status_synced.
+        leads_to_self::<ClusterState>(settled_and_stable(settled));
+        assert(spec.entails(settled_and_stable(settled).leads_to(settled_and_stable(settled))));
+        leads_to_always_and::<ClusterState>(spec, settled_and_stable(settled),
+            lift_state(status_synced(k, outer, settled)), stable.and(lift_state(inner_settled(k, outer, settled))));
+        assert(lift_state(status_synced(k, outer, settled))
+            .and(stable.and(lift_state(inner_settled(k, outer, settled))))
+            .entails(lift_state(status_synced(k, outer, settled)).and(lift_state(inner_settled(k, outer, settled)))));
+        entails_preserved_by_always::<ClusterState>(
+            lift_state(status_synced(k, outer, settled)).and(stable.and(lift_state(inner_settled(k, outer, settled)))),
+            lift_state(status_synced(k, outer, settled)).and(lift_state(inner_settled(k, outer, settled))));
+        entails_implies_leads_to::<ClusterState>(spec,
+            always(lift_state(status_synced(k, outer, settled)).and(stable.and(lift_state(inner_settled(k, outer, settled))))),
+            reported(settled));
+        leads_to_trans::<ClusterState>(spec, settled_and_stable(settled),
+            always(lift_state(status_synced(k, outer, settled)).and(stable.and(lift_state(inner_settled(k, outer, settled))))),
+            reported(settled));
+
         entails_exists_intro::<ClusterState, SyncedStatusView>(reported, settled);
         entails_implies_leads_to::<ClusterState>(spec, reported(settled), tla_exists(reported));
         leads_to_trans::<ClusterState>(spec, settled_and_stable(settled), reported(settled), tla_exists(reported));

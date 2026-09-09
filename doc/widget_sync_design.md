@@ -22,10 +22,12 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   gone is eventually removed; R3s, no mirror pointing at a departed parent
   persists. All four are ESR-style properties in the sense of the Anvil paper.
 - Also proved: the **round trip**, R1 and R2 chained -- once an outer copy stops
-  changing, it eventually and stably carries a status the inner side produced for
-  the spec it was given. R1's conclusion does not reach R2's premise on its own,
-  so the chain needs D4 (below), and the status is existentially quantified
-  because nothing in R1 chooses which one the inner side settles on.
+  changing, it eventually and stably carries the status derived from one its
+  mirror is itself stably holding, for a mirror that carries the copy's spec.
+  R1's conclusion does not reach R2's premise, so the chain needs D4 (below). It
+  is proved for a cluster that runs a modelled inner implementation, not for the
+  one section 3.4 closes over, and it is not part of the sync controller's ESR:
+  it does not travel through composition or into the multi-store theorems.
 - Assumed: D3, the inner side eventually releases terminating objects; D4, the
   inner implementation eventually settles on a status for the spec it was given;
   exactly one outer cluster per inner cluster; the operational items in
@@ -680,24 +682,33 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
 | D3 | `∀key, u. inner_terminating_object(k, b, key, u) ~> object_is_gone(key, u)`, per binding `b` (the premise fixes `key.kind == inner_kind(k, b)`) | assumed |
 | D4 | `∀outer. □(outer_stable(outer) ∧ spec_synced(outer)) ~> ∃settled. □(outer_stable(outer) ∧ inner_settled(outer, settled))` | assumed |
-| RT | `∀outer. □outer_stable(outer) ~> ∃settled. □status_synced(outer, settled)` | `proof/liveness/round_trip.rs` |
+| RT | `∀outer. □outer_stable(outer) ~> ∃settled. □(status_synced(outer, settled) ∧ inner_settled(outer, settled))` | `proof/liveness/round_trip.rs` |
 
-RT is R1 and R2 chained, and D4 is the step between them. R2's premise,
-`inner_settled`, is R1's conclusion plus two facts R1 does not supply and no
-proof about the sync controller can: that the inner status observes the mirror's
-current generation, and that it is the particular `settled` R2 is stated for.
-Both are about the implementation running in the inner cluster, which Anvil does
-not model. `model/inner_impl_reconciler.rs` is a modelled implementation that
-would discharge D4 under a fairness assumption for it, which the model does not
-make -- deliberately, so that R2 holds for any implementation.
+RT is R1 and R2 chained; D4 is the step between them. R2's premise,
+`inner_settled`, is R1's conclusion plus two facts R1 does not supply: that the
+inner status observes the mirror's current generation, and that it is the
+particular `settled` R2 is stated for. Both are about the implementation running
+in the inner cluster, which Anvil does not model.
 
-RT quantifies the status existentially, and that is why R1 and R2 do not compose
-as they stand: R2 is a family of properties indexed by a status, and nothing in
-R1 chooses one. So RT is weaker than R2 -- it does not name the status the user
-will see. It is also the only one of the two whose premise a user can establish,
-by not editing the object. `widget_round_trip_holds`
-(`composition/widget_sync_reconciler.rs`) states RT for any cluster the closed
-statement covers.
+RT's conclusion keeps `inner_settled` beside `status_synced`. That is what makes
+it a round trip. `status_synced` alone, with `settled` existentially quantified
+and unconstrained, says only that the outer copy holds some status of the merge's
+shape -- which (G-shape) already gives. The two together say the reported status
+is the merge of one the mirror is holding.
+
+`settled` must be existentially quantified, and that is why R1 and R2 do not
+compose as they stand: R2 is a family of properties indexed by a status, and
+nothing in R1 chooses one. RT's conclusion is therefore weaker than R2's: it does
+not name the status the user will see. Its premise is the one a user can
+establish, by not editing the object.
+
+`widget_round_trip_holds` (`composition/widget_inner_impl_reconciler.rs`) states
+RT for a cluster running the pair and the inner implementation of section 2.5.
+Stating it over the cluster of section 3.4 would be vacuous: no member there
+writes a mirror status, so `inner_caught_up` is false in every reachable state,
+D4's conclusion cannot hold, and D4 with R1 would make RT's own premise
+unreachable. RT is not a conjunct of `widget_sync_esr`, so it does not travel
+through Welder composition and is in none of the multi-store theorems.
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
 (spec constant, not being deleted, same uid), and whoever was editing the
