@@ -486,16 +486,41 @@ Its guarantee (`proof/inner_impl.rs`: every request it has in flight is a status
 Patch of its own mirror, of its own kind) implies both reconcilers' relies. The
 sync reconciler's rely asks only that a status Patch not name the outer kind,
 and the janitor's constrains Creates and Updates, of which it sends neither.
+`composition/widget_inner_impl_reconciler.rs` composes it with the pair through
+Welder, as the disturber is composed: `widget_implemented_core_holds_for` is the
+closed statement for any one-binding configuration, and
+`widget_implemented_core_holds` the demo's instance. Both are one-store
+readings; the multi-store one needs the implementation's commutation lemma and
+`widget_other_controller_ok`, which the disturber has and this does not.
+
+The status it writes has an empty remainder, and that is forced rather than
+chosen: `status_rest_ok` is uninterpreted and `empty_status_rest_ok` is its only
+axiom (section 3), so the empty remainder is the only one a model can be shown
+to write. The testbed's echo controller writes a populated one, with a reason
+and a message. So the modelled execution exercises the conditions half of the
+return path and not the payload half: `settled.rest` is the default remainder
+there, and `status_synced` cannot tell a mirrored remainder from a defaulted
+one. The echo controller also tests nothing on its patch, where the model tests
+uid and generation, so the model is neither an over- nor an under-approximation
+of it.
 
 What this settles and what it does not. Before it, no modelled controller
-anywhere wrote an inner status, so `inner_settled` -- the premise of R2 -- and
-D3 held of no execution of any modelled cluster, and the row in 2.3 above
-described coverage with nothing to point at. The premise is now producible.
-That is not the same as R2 being reached: reaching it needs the implementation
-to be live, and no fairness is assumed for it, deliberately (3.3). R2 is stated
-for whatever status the inner side has settled on, so that it holds for any
-implementation, and the price of that generality is that the theorem says
-nothing about when the settling happens.
+anywhere wrote an inner status, so `inner_settled` -- the premise of R2 -- held
+in no state of any modelled cluster, and the row in 2.3 above described coverage
+with nothing to point at. The premise is now producible: the status the model
+writes reports the mirror as caught up with the generation it tested
+(`lemma_inner_impl_status_is_caught_up`), and a status write keeps the metadata
+and the spec (`status_updated_object`), so `spec_synced` survives it.
+
+Three things that does not amount to. It is not R2 being reached: reaching it
+needs the implementation to be live, and no fairness is assumed for it,
+deliberately (3.3) -- R2 is stated for whatever status the inner side has
+settled on so that it holds for any implementation, and the price of that
+generality is that the theorem says nothing about when the settling happens. It
+is not a claim about D3, whose premise nothing writes and which therefore still
+holds vacuously. And the guarantee and the composition are compatibility facts:
+both would verify unchanged of a controller that sent no request at all, which
+is why the producibility above is a separate lemma.
 
 ## 3. Specification
 
@@ -695,13 +720,15 @@ is a framework kind (`widget_kinds_distinct_from_framework`); that each
 configured outer kind is none of the four is a hypothesis, discharged for the
 demo from its literals.
 
-The concrete instances exercise neither R2's premise nor D3: nothing in them
-writes inner status or finalizers. That is by decision: the inner controller is
-whatever the workload cluster runs, the sync controller stays agnostic to it,
-and D3 is an assumption about it, not a proof obligation. The echo controller
-in the testbed is an unverified stand-in. A separate concrete instance adds the
-disturber (section 2.4) as a third member with an empty ESR and no rely;
-`widget_disturbed_core_holds` composes it with the pair.
+The pair's own instances exercise neither R2's premise nor D3, and D3 stays
+unexercised: nothing writes finalizers, so its premise is never met and it holds
+vacuously. That is by decision -- the inner controller is whatever the workload
+cluster runs, the sync controller stays agnostic to it, and D3 is an assumption
+about it, not a proof obligation. The echo controller in the testbed is an
+unverified stand-in. Two separate instances add a third member with an empty ESR
+and no rely: `widget_disturbed_core_holds` composes the disturber (section 2.4)
+with the pair, and `widget_implemented_core_holds` the inner implementation
+(section 2.5), whose status write is what R2's premise is about.
 
 ### 3.5 Assumptions
 
@@ -865,7 +892,7 @@ instantiation included, carry no budget.
 | R1, R2, R3, R3s | `widget_sync_controller/proof/liveness/{sync_spec_proof,sync_status_proof,janitor_proof,cleanup_proof}.rs` |
 | Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
 | The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
-| The inner implementation: model and guarantee | `widget_sync_controller/model/inner_impl_reconciler.rs`, `proof/inner_impl.rs` |
+| The inner implementation: model, guarantee, composition with the pair | `widget_sync_controller/model/inner_impl_reconciler.rs`, `proof/inner_impl.rs`, `composition/widget_inner_impl_reconciler.rs` |
 | Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
 | Configured kinds composed with each other | `composition/widget_two_kinds.rs` |
 | Multi-store model | `kubernetes_cluster/spec/multi_cluster.rs` |

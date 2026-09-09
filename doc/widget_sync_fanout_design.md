@@ -656,9 +656,11 @@ The other controllers of the deployment are admitted, not assumed: the sync
 controller and janitors of every other kind, and the janitors of the other
 bindings of the same kind. Nothing else runs: `kinds_deployed` fixes the
 cluster's controllers to be the deployment's, where `widget_multi_cluster_theorem`
-admits any other controller meeting its hypotheses. So this cluster, like the
-concrete instances of the main design, section 3.4, exercises neither R2's
-premise nor D3 -- nothing in it writes an inner status or a finalizer. Each
+admits any other controller meeting its hypotheses. So this cluster exercises
+neither R2's premise nor D3 -- nothing in it writes an inner status or a
+finalizer. The inner implementation of the main design, section 2.5, is composed
+with the pair on one store and could be admitted here too, but it is not among
+the deployment's controllers and no multi-store instance names it. Each
 is admitted by its model, which sends only requests the refinement handles and
 commutes with the relabeling (`lemma_sync_model_ok`, `lemma_janitor_model_ok`
 and the commutation lemmas, all already stated with the kind and the binding as
