@@ -164,7 +164,15 @@ pub open spec fn synced_installed_type(spec_ok: spec_fn(Value) -> bool, selector
         unmarshallable_spec: |v: Value| true,
         unmarshallable_status: |v: Value| unmarshal_status(v) is Ok,
         valid_object: |obj: DynamicObjectView| spec_ok(obj.spec),
-        valid_transition: |obj, old_obj: DynamicObjectView| cluster_of_dynamic(selector, obj) == cluster_of_dynamic(selector, old_obj),
+        // The cluster an object selects is immutable. A field selector needs a
+        // rule for that; a name selector does not, because an object keeps the
+        // name it is stored under -- Kubernetes has no rename -- so the real API
+        // server enforces it with no rule at all
+        // (lemma_api_server_step_preserves_cluster_of reads the name off the key).
+        // Stating it as a rule anyway would make the validation read metadata,
+        // which the multi-store refinement forbids.
+        valid_transition: |obj, old_obj: DynamicObjectView|
+            selector is Field ==> cluster_of_dynamic(selector, obj) == cluster_of_dynamic(selector, old_obj),
         marshalled_default_status: || marshal_status(None),
     }
 }

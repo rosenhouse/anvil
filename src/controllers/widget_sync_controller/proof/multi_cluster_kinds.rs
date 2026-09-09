@@ -49,7 +49,6 @@ pub open spec fn kinds_deployed(setups: Map<SyncKind, KindSetup>, cluster: Clust
         let c = setups[k];
         &&& sync_kind_ok(k)
         &&& bindings_ok(k)
-        &&& k.selector is Field
         &&& ids_ok(k.bindings, c.janitor_ids, c.sync_id)
         &&& cluster.controller_models.contains_pair(c.sync_id, widget_sync_controller_model(k))
         &&& cluster.synced_type_is_installed(k.outer_kind, c.spec_ok, k.selector)
@@ -296,7 +295,6 @@ proof fn lemma_one_kind_deployed(k: SyncKind, spec_ok: spec_fn(Value) -> bool, s
     requires
         sync_kind_ok(k),
         bindings_ok(k),
-        k.selector is Field,
         ids_ok(k.bindings, ids, sync_id),
     ensures kinds_deployed(
         Map::<SyncKind, KindSetup>::empty().insert(k, KindSetup { spec_ok: spec_ok, sync_id: sync_id, janitor_ids: ids }),
