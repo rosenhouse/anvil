@@ -174,8 +174,8 @@ pub open spec fn widget_janitor_rely(k: SyncKind, other_id: int) -> StatePred<Cl
 // The status patch the sync reconciler sends for the outer copy at `outer_key`:
 // it tests the copy's uid and generation, and (G-gen) the status it writes carries
 // observedGeneration equal to the tested generation, as do its Synced, Ready and
-// Stalled conditions; and (G-merge) the status is one the reconciler's own merge
-// produced.
+// Stalled conditions; and (G-merge) the status is outer_status_for of some source
+// status and outcome.
 pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, outer_key: ObjectRef) -> bool {
     let status = unmarshal_status(req.status);
     &&& req.kind == k.outer_kind
@@ -193,13 +193,10 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& status->Ok_0->0.stalled_condition() is Some
     &&& status->Ok_0->0.stalled_condition()->0.observed_generation == req.tests.generation
     // (G-merge) The status is outer_status_for of a source status and an outcome,
-    // so its three conditions report the outcome and the source's own Ready and
-    // Stalled, and its remaining fields are the source's. The reconciler never
-    // reports a status it made up. Where the outcome is Synced the source is the
-    // mirror's own status, taken from a mirror that carries the outer copy's spec
-    // and observes its own current generation (model/sync_reconciler.rs); this
-    // clause does not say so, because relating the source to the store needs the
-    // Get response that produced it, which no state keeps (#49, finding 2).
+    // so its conditions and its mirrored remainder are that function's
+    // (outer_status_for in spec_types.rs). Where the source came from is not
+    // stated: relating it to the mirror's stored status needs the Get response
+    // that produced it, which no state keeps (#49, finding 2).
     &&& exists |source: SyncedStatusView, outcome: SyncOutcomeView|
             status->Ok_0->0 == #[trigger] outer_status_for(req.tests.generation, source, outcome)
 }

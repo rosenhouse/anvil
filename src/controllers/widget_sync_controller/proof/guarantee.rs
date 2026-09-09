@@ -563,8 +563,8 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
         outer.object_ref() == outer_key,
         outer.metadata.uid is Some,
         outer.metadata.generation is Some,
-        // The status is the reconciler's own merge of a source and an outcome,
-        // which is what carries (G-merge) into the guarantee.
+        // status_rest_ok(source.rest) is what written_status_shape needs; the rest
+        // of the clause discharges (G-merge).
         exists |source: SyncedStatusView, outcome: SyncOutcomeView|
             req == sync_reconciler::outer_status_patch(k, outer, outer_status_for(outer.metadata.generation, source, outcome))
             && status_rest_ok(source.rest),

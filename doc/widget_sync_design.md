@@ -573,7 +573,16 @@ namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
-`observedGeneration` (G-gen). Nothing else.
+`observedGeneration` (G-gen), and which is `outer_status_for` of some source
+status and outcome (G-merge). Nothing else.
+
+(G-merge) fixes the shape of the written status without saying where the source
+came from. It gives the three conditions in that order and no others, `Synced`
+`True` exactly when the outcome is `Synced`, `Ready` `True` only then, and
+`Ready` and `Stalled` never both `True`. It leaves the source's mirrored
+remainder and the `Ready` and `Stalled` text unconstrained. Relating the source
+to the status the mirror actually held needs the `Get` response that produced
+it, which no state keeps (issue #49, finding 2).
 
 **Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
 mirror's namespace, or a `Delete` of the mirror with a uid precondition.
