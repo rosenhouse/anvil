@@ -1,16 +1,16 @@
-// Every step of the two-store model is, through the abstraction, a step of the
+// Every step of the multi-store model is, through the abstraction, a step of the
 // one-store model: for each kind of step, the one-store action with the
 // relabeled input takes abs(s) to abs(s'), and the invariants the abstraction
 // relies on are kept.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::kubernetes_cluster::proof::two_cluster::{api_server::*, relabel::*};
+use crate::kubernetes_cluster::proof::multi_cluster::{api_server::*, finite::*, relabel::*};
 use crate::kubernetes_cluster::spec::{
     api_server::state_machine::*, api_server::types::*, builtin_controllers::garbage_collector::*,
     builtin_controllers::state_machine::*, builtin_controllers::types::*, cluster::*,
     controller::state_machine::*, controller::types::*, message::*, network::state_machine::*,
-    network::types::*, pod_monkey::state_machine::*, pod_monkey::types::*, two_cluster::*,
+    network::types::*, pod_monkey::state_machine::*, pod_monkey::types::*, multi_cluster::*,
 };
 use crate::state_machine::action::*;
 use crate::state_machine::state_machine::*;
@@ -19,32 +19,36 @@ use vstd::{map_lib::*, multiset::*, prelude::*, seq_lib::*, set_lib::*};
 verus! {
 
 // ---------------------------------------------------------------------------
-// Invariants of the two-store model that the simulation relies on.
+// Invariants of the multi-store model that the simulation relies on.
 // ---------------------------------------------------------------------------
 
 // Every in-flight request is one the refinement handles.
-pub open spec fn msgs_ok(tc: TwoCluster, s: TwoClusterState) -> bool {
+pub open spec fn msgs_ok<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
     forall |m: Message| #[trigger] s.in_flight().contains(m) && m.content is APIRequest ==> tc.request_ok(m.content->APIRequest_0)
 }
 
-pub open spec fn controllers_present(tc: TwoCluster, s: TwoClusterState) -> bool {
+pub open spec fn controllers_present<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> s.controller_and_externals.contains_key(id)
 }
 
 // Every object a reconcile is scheduled with or runs on is a stored object
 // under its own key.
-pub open spec fn controller_crs_ok(tc: TwoCluster, c: ControllerState) -> bool {
+pub open spec fn controller_crs_ok<S>(tc: MultiCluster<S>, c: ControllerState) -> bool {
     &&& forall |key: ObjectRef| #[trigger] c.scheduled_reconciles.contains_key(key)
         ==> c.scheduled_reconciles[key].kind == key.kind && stored_object_ok(tc, c.scheduled_reconciles[key])
     &&& forall |key: ObjectRef| #[trigger] c.ongoing_reconciles.contains_key(key)
         ==> c.ongoing_reconciles[key].triggering_cr.kind == key.kind && stored_object_ok(tc, c.ongoing_reconciles[key].triggering_cr)
 }
 
-pub open spec fn crs_ok(tc: TwoCluster, s: TwoClusterState) -> bool {
+pub open spec fn crs_ok<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> controller_crs_ok(tc, s.controller_and_externals[id].controller)
 }
 
-pub open spec fn inv(tc: TwoCluster, s: TwoClusterState) -> bool {
+// Opaque for the same reason as step_compatible: the simulation carries it at
+// every position, and the quantifiers inside would otherwise be instantiated at
+// every state the solver sees. Revealed by the lemmas that read its conjuncts.
+#[verifier::opaque]
+pub open spec fn inv<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
     &&& stores_sided(tc, s)
     &&& msgs_ok(tc, s)
     &&& controllers_present(tc, s)
@@ -55,14 +59,14 @@ pub open spec fn inv(tc: TwoCluster, s: TwoClusterState) -> bool {
 // Hypotheses on the controllers.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_resp_content(tc: TwoCluster, r: Relabeling, c: Option<ResponseContent>) -> Option<ResponseContent> {
+pub open spec fn relabel_resp_content<S>(tc: MultiCluster<S>, r: Relabeling<S>, c: Option<ResponseContent>) -> Option<ResponseContent> {
     match c {
         Some(ResponseContent::KubernetesResponse(x)) => Some(ResponseContent::KubernetesResponse(relabel_resp(tc, r, x))),
         _ => c,
     }
 }
 
-pub open spec fn relabel_req_content(tc: TwoCluster, r: Relabeling, c: Option<RequestContent>) -> Option<RequestContent> {
+pub open spec fn relabel_req_content<S>(tc: MultiCluster<S>, r: Relabeling<S>, c: Option<RequestContent>) -> Option<RequestContent> {
     match c {
         Some(RequestContent::KubernetesRequest(x)) => Some(RequestContent::KubernetesRequest(relabel_req(tc, r, x))),
         _ => c,
@@ -71,7 +75,7 @@ pub open spec fn relabel_req_content(tc: TwoCluster, r: Relabeling, c: Option<Re
 
 // No controller has an external system, and every request a controller sends
 // is one the refinement handles.
-pub open spec fn models_ok(tc: TwoCluster) -> bool {
+pub open spec fn models_ok<S>(tc: MultiCluster<S>) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> {
         let m = tc.cluster.controller_models[id];
         &&& m.external_model is None
@@ -86,7 +90,7 @@ pub open spec fn models_ok(tc: TwoCluster) -> bool {
 // response, it reaches the same local state and sends the relabeled request. Only
 // objects a reconcile can run on are asked about: stored objects of the model's
 // kind.
-pub open spec fn models_commute(tc: TwoCluster, r: Relabeling) -> bool {
+pub open spec fn models_commute<S>(tc: MultiCluster<S>, r: Relabeling<S>) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> {
         let m = tc.cluster.controller_models[id].reconcile_model;
         let t = m.transition;
@@ -101,7 +105,7 @@ pub open spec fn models_commute(tc: TwoCluster, r: Relabeling) -> bool {
 // Steps and counters.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_step(tc: TwoCluster, r: Relabeling, step: Step) -> Step {
+pub open spec fn relabel_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, step: Step) -> Step {
     match step {
         Step::APIServerStep(input) => Step::APIServerStep(relabel_opt_msg(tc, r, input)),
         Step::ControllerStep(input) => Step::ControllerStep((input.0, relabel_opt_msg(tc, r, input.1), input.2)),
@@ -111,40 +115,59 @@ pub open spec fn relabel_step(tc: TwoCluster, r: Relabeling, step: Step) -> Step
     }
 }
 
-pub open spec fn uid_sum(s: TwoClusterState) -> int {
-    s.primary.uid_counter + s.remote.uid_counter
+// The counters of every side, added up: what the one-store counters count.
+pub open spec fn uid_sum<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> int {
+    set_sum(tc.sides, |side: S| s.store(side).uid_counter)
 }
 
-pub open spec fn rv_sum(s: TwoClusterState) -> int {
-    s.primary.resource_version_counter + s.remote.resource_version_counter
+pub open spec fn rv_sum<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> int {
+    set_sum(tc.sides, |side: S| s.store(side).resource_version_counter)
 }
 
 // The global counters after the step from s to s_prime.
-pub open spec fn uid_next_after(s: TwoClusterState, s_prime: TwoClusterState, uid_next: Uid) -> Uid {
-    uid_next + uid_sum(s_prime) - uid_sum(s)
+pub open spec fn uid_next_after<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, uid_next: Uid) -> Uid {
+    uid_next + uid_sum(tc, s_prime) - uid_sum(tc, s)
 }
 
-pub open spec fn rv_next_after(s: TwoClusterState, s_prime: TwoClusterState, rv_next: ResourceVersion) -> ResourceVersion {
-    rv_next + rv_sum(s_prime) - rv_sum(s)
+pub open spec fn rv_next_after<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, rv_next: ResourceVersion) -> ResourceVersion {
+    rv_next + rv_sum(tc, s_prime) - rv_sum(tc, s)
 }
 
-// Whatever a step allocates on either side relabels to the global counter.
-pub open spec fn step_compatible(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion) -> bool {
-    &&& alloc_compatible(tc, r, s, Side::Primary, s_prime.primary, uid_next, rv_next)
-    &&& alloc_compatible(tc, r, s, Side::Remote, s_prime.remote, uid_next, rv_next)
+// Whatever a step allocates on any side relabels to the global counter. Opaque:
+// the simulation carries it at every position, and the side quantifier inside
+// would otherwise be instantiated at every state the solver sees.
+#[verifier::opaque]
+pub open spec fn step_compatible<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion) -> bool {
+    forall |side: S| #[trigger] tc.sides.contains(side) ==> alloc_compatible(tc, r, s, side, s_prime.store(side), uid_next, rv_next)
 }
 
 pub open spec fn counter_step(a: int, b: int) -> bool {
     b == a || b == a + 1
 }
 
+// Every store but the one of `side` is as it was.
+pub open spec fn stores_agree_except<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S) -> bool {
+    forall |other: S| #[trigger] tc.sides.contains(other) && other != side ==> s_prime.store(other) == s.store(other)
+}
+
 // A step moves the counters of at most one store, each by at most one.
-pub open spec fn counters_step(s: TwoClusterState, s_prime: TwoClusterState) -> bool {
-    &&& counter_step(s.primary.uid_counter, s_prime.primary.uid_counter)
-    &&& counter_step(s.primary.resource_version_counter, s_prime.primary.resource_version_counter)
-    &&& counter_step(s.remote.uid_counter, s_prime.remote.uid_counter)
-    &&& counter_step(s.remote.resource_version_counter, s_prime.remote.resource_version_counter)
-    &&& s_prime.primary == s.primary || s_prime.remote == s.remote
+pub open spec fn counters_step<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>) -> bool {
+    &&& forall |side: S| #[trigger] tc.sides.contains(side) ==> {
+        &&& counter_step(s.store(side).uid_counter, s_prime.store(side).uid_counter)
+        &&& counter_step(s.store(side).resource_version_counter, s_prime.store(side).resource_version_counter)
+    }
+    &&& forall |side: S| #[trigger] tc.sides.contains(side) && s_prime.store(side) != s.store(side) ==> stores_agree_except(tc, s, s_prime, side)
+}
+
+// A step that leaves every store alone leaves the global counters alone.
+pub proof fn lemma_sums_same_stores<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>)
+    requires s_prime.stores == s.stores,
+    ensures
+        uid_sum(tc, s_prime) == uid_sum(tc, s),
+        rv_sum(tc, s_prime) == rv_sum(tc, s),
+{
+    lemma_set_sum_pointwise_eq(tc.sides, |side: S| s.store(side).uid_counter, |side: S| s_prime.store(side).uid_counter);
+    lemma_set_sum_pointwise_eq(tc.sides, |side: S| s.store(side).resource_version_counter, |side: S| s_prime.store(side).resource_version_counter);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,12 +192,12 @@ pub proof fn lemma_map_values_empty<K, V, W>(f: spec_fn(V) -> W)
     assert(Map::<K, V>::empty().map_values(f) =~= Map::<K, W>::empty());
 }
 
-pub proof fn lemma_resp_matches_relabel(tc: TwoCluster, r: Relabeling, resp: Message, req: Message)
+pub proof fn lemma_resp_matches_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, resp: Message, req: Message)
     ensures resp_msg_matches_req_msg(relabel_msg(tc, r, resp), relabel_msg(tc, r, req)) == resp_msg_matches_req_msg(resp, req),
 {
 }
 
-pub proof fn lemma_err_resp_relabel(tc: TwoCluster, r: Relabeling, m: Message, err: APIError)
+pub proof fn lemma_err_resp_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, m: Message, err: APIError)
     requires m.content is APIRequest,
     ensures relabel_msg(tc, r, form_matched_err_resp_msg(m, err)) == form_matched_err_resp_msg(relabel_msg(tc, r, m), err),
 {
@@ -194,7 +217,7 @@ pub proof fn lemma_err_resp_relabel(tc: TwoCluster, r: Relabeling, m: Message, e
 }
 
 // The controller state of `id` in the abstraction is the relabeled controller state.
-pub proof fn lemma_abs_controller(tc: TwoCluster, r: Relabeling, s: TwoClusterState, id: int, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_abs_controller<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, id: int, uid_next: Uid, rv_next: ResourceVersion)
     requires s.controller_and_externals.contains_key(id),
     ensures
         abs(tc, r, s, uid_next, rv_next).controller_and_externals.contains_key(id),
@@ -207,8 +230,9 @@ pub proof fn lemma_abs_controller(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
 // ---------------------------------------------------------------------------
 
 #[verifier::rlimit(60)]
-pub proof fn lemma_api_server_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: Option<Message>, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_api_server_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, input: Option<Message>, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.sides.contains(side),
         relabel_hyps(tc, r),
         inv(tc, s),
         tc.api_server_next(side).forward(input)(s, s_prime),
@@ -216,26 +240,38 @@ pub proof fn lemma_api_server_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
     ensures
         tc.cluster.api_server_next().forward(relabel_opt_msg(tc, r, input))(
             abs(tc, r, s, uid_next, rv_next),
-            abs(tc, r, s_prime, uid_next_after(s, s_prime, uid_next), rv_next_after(s, s_prime, rv_next))
+            abs(tc, r, s_prime, uid_next_after(tc, s, s_prime, uid_next), rv_next_after(tc, s, s_prime, rv_next))
         ),
         inv(tc, s_prime),
-        counters_step(s, s_prime),
+        counters_step(tc, s, s_prime),
 {
+    reveal(inv);
+    reveal(step_compatible);
     let it = tc.cluster.installed_types;
     let msg = input->0;
     let msg1 = relabel_msg(tc, r, msg);
     let st = s.store(side);
     let (s1, resp) = transition_by_etcd(it, msg, st);
     let a = abs(tc, r, s, uid_next, rv_next);
-    let u1 = uid_next_after(s, s_prime, uid_next);
-    let v1 = rv_next_after(s, s_prime, rv_next);
+    let u1 = uid_next_after(tc, s, s_prime, uid_next);
+    let v1 = rv_next_after(tc, s, s_prime, rv_next);
     let a_prime = abs(tc, r, s_prime, u1, v1);
+    assert(s_prime.stores == s.stores.insert(side, s1));
     assert(s_prime.store(side) == s1);
-    assert(s_prime.store(side.other()) == s.store(side.other()));
+    assert forall |other: S| #[trigger] tc.sides.contains(other) && other != side implies s_prime.store(other) == s.store(other) by {}
     lemma_etcd_counters(it, msg, st);
     lemma_transition_by_etcd_relabel(tc, r, s, side, msg, uid_next, rv_next);
+    assert(stores_sided(tc, s_prime)) by {
+        assert(stores_sided(tc, with_store(s, side, s1)));
+        assert(s_prime.stores.dom() =~= tc.sides);
+        assert forall |other: S| #[trigger] tc.sides.contains(other) implies store_sided(tc, other, s_prime.stores[other].resources) by {
+            assert(s_prime.stores[other] == with_store(s, side, s1).stores[other]);
+        }
+    }
     assert(a_prime.api_server == abs_after(tc, r, s, side, s1, uid_next, rv_next)) by {
-        lemma_abs_store_unchanged(tc, r, s_prime, with_store(s, side, s1));
+        lemma_abs_store_same_stores(tc, r, with_store(s, side, s1), s_prime);
+        lemma_set_sum_diff_at(tc.sides, |x: S| s.store(x).uid_counter, |x: S| s_prime.store(x).uid_counter, side);
+        lemma_set_sum_diff_at(tc.sides, |x: S| s.store(x).resource_version_counter, |x: S| s_prime.store(x).resource_version_counter, side);
     }
     let in_flight = s.network.in_flight;
     lemma_relabel_msgs_contains(tc, r, in_flight, msg);
@@ -247,9 +283,12 @@ pub proof fn lemma_api_server_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
     // The one-store step.
     assert(tc.cluster.api_server_next().forward(Some(msg1))(a, a_prime));
     // Invariants.
-    assert(stores_sided(tc, s_prime));
     assert forall |m: Message| #[trigger] s_prime.in_flight().contains(m) && m.content is APIRequest implies tc.request_ok(m.content->APIRequest_0) by {
         if m != resp { assert(s.in_flight().contains(m)); }
+    }
+    // Counters: the store of `side` moved by at most one, every other is as it was.
+    assert forall |x: S| #[trigger] tc.sides.contains(x) && s_prime.store(x) != s.store(x) implies stores_agree_except(tc, s, s_prime, x) by {
+        assert(x == side);
     }
 }
 
@@ -279,13 +318,13 @@ proof fn lemma_etcd_counters(it: InstalledTypes, msg: Message, st: APIServerStat
 // The controller step.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_controller_input(tc: TwoCluster, r: Relabeling, input: ControllerActionInput) -> ControllerActionInput {
+pub open spec fn relabel_controller_input<S>(tc: MultiCluster<S>, r: Relabeling<S>, input: ControllerActionInput) -> ControllerActionInput {
     ControllerActionInput { recv: relabel_opt_msg(tc, r, input.recv), ..input }
 }
 
 // Each controller action is enabled on the relabeled state and input exactly
 // when it is enabled on the original ones.
-pub proof fn lemma_controller_action_pre_relabel(tc: TwoCluster, r: Relabeling, model: ReconcileModel, id: int, input: ControllerActionInput, c: ControllerState, step: ControllerStep)
+pub proof fn lemma_controller_action_pre_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, model: ReconcileModel, id: int, input: ControllerActionInput, c: ControllerState, step: ControllerStep)
     ensures ({
         let sm = controller(model, id);
         ((sm.step_to_action)(step).precondition)(relabel_controller_input(tc, r, input), relabel_controller(tc, r, c))
@@ -310,8 +349,9 @@ pub proof fn lemma_controller_action_pre_relabel(tc: TwoCluster, r: Relabeling, 
     }
 }
 
-pub proof fn lemma_controller_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: (int, Option<Message>, Option<ObjectRef>), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_controller_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, input: (int, Option<Message>, Option<ObjectRef>), uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         relabel_hyps(tc, r),
         models_ok(tc),
         models_commute(tc, r),
@@ -323,9 +363,11 @@ pub proof fn lemma_controller_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
             abs(tc, r, s_prime, uid_next, rv_next)
         ),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let id = input.0;
     let msg = input.1;
     let key_o = input.2;
@@ -458,16 +500,19 @@ pub proof fn lemma_controller_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
 // Scheduling, the garbage collector, and the environment steps.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_schedule_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: (int, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_schedule_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, input: (int, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.sides.contains(side),
         inv(tc, s),
         tc.schedule_controller_reconcile(side).forward(input)(s, s_prime),
     ensures
         tc.cluster.schedule_controller_reconcile().forward(input)(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let id = input.0;
     let key = input.1;
     let a = abs(tc, r, s, uid_next, rv_next);
@@ -493,17 +538,20 @@ pub proof fn lemma_schedule_step(tc: TwoCluster, r: Relabeling, s: TwoClusterSta
     }
 }
 
-pub proof fn lemma_builtin_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, input: (BuiltinControllerChoice, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_builtin_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, input: (BuiltinControllerChoice, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.sides.contains(side),
         relabel_hyps(tc, r),
         inv(tc, s),
         tc.builtin_controllers_next(side).forward(input)(s, s_prime),
     ensures
         tc.cluster.builtin_controllers_next().forward(input)(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let key = input.1;
     let a = abs(tc, r, s, uid_next, rv_next);
     let a_prime = abs(tc, r, s_prime, uid_next, rv_next);
@@ -545,16 +593,19 @@ pub proof fn lemma_builtin_step(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
     }
 }
 
-pub proof fn lemma_restart_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: int, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_restart_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, input: int, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.restart_controller().forward(input)(s, s_prime),
     ensures
         tc.cluster.restart_controller().forward(input)(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let id = input;
     let a = abs(tc, r, s, uid_next, rv_next);
     let a_prime = abs(tc, r, s_prime, uid_next, rv_next);
@@ -580,16 +631,19 @@ pub proof fn lemma_restart_step(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
     }
 }
 
-pub proof fn lemma_disable_crash_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: int, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_disable_crash_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, input: int, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.disable_crash().forward(input)(s, s_prime),
     ensures
         tc.cluster.disable_crash().forward(input)(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let id = input;
     let a = abs(tc, r, s, uid_next, rv_next);
     let a_prime = abs(tc, r, s_prime, uid_next, rv_next);
@@ -605,16 +659,19 @@ pub proof fn lemma_disable_crash_step(tc: TwoCluster, r: Relabeling, s: TwoClust
     }
 }
 
-pub proof fn lemma_drop_req_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: (Message, APIError), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_drop_req_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, input: (Message, APIError), uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.drop_req().forward(input)(s, s_prime),
     ensures
         tc.cluster.drop_req().forward((relabel_msg(tc, r, input.0), input.1))(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let msg = input.0;
     let err = input.1;
     let a = abs(tc, r, s, uid_next, rv_next);
@@ -630,32 +687,39 @@ pub proof fn lemma_drop_req_step(tc: TwoCluster, r: Relabeling, s: TwoClusterSta
     }
 }
 
-pub proof fn lemma_disable_req_drop_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_disable_req_drop_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.disable_req_drop().forward(())(s, s_prime),
     ensures
         tc.cluster.disable_req_drop().forward(())(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
 }
 
-pub proof fn lemma_disable_pod_monkey_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_disable_pod_monkey_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.disable_pod_monkey().forward(())(s, s_prime),
     ensures
         tc.cluster.disable_pod_monkey().forward(())(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
 }
 
-pub proof fn lemma_stutter_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_stutter_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.stutter().forward(())(s, s_prime),
     ensures
@@ -663,25 +727,31 @@ pub proof fn lemma_stutter_step(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
         inv(tc, s_prime),
         s_prime == s,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
 }
 
 // A pod the monkey may write reads the same after relabeling.
-pub proof fn lemma_pod_ok_fixed(tc: TwoCluster, r: Relabeling, pod: PodView)
+pub proof fn lemma_pod_ok_fixed<S>(tc: MultiCluster<S>, r: Relabeling<S>, pod: PodView)
     requires tc.pod_ok(pod),
     ensures relabel_obj(tc, r, pod.marshal()) == pod.marshal(),
 {
 }
 
-pub proof fn lemma_pod_monkey_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, input: PodView, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_pod_monkey_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, input: PodView, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         inv(tc, s),
         tc.pod_monkey_next().forward(input)(s, s_prime),
     ensures
         tc.cluster.pod_monkey_next().forward(input)(abs(tc, r, s, uid_next, rv_next), abs(tc, r, s_prime, uid_next, rv_next)),
         inv(tc, s_prime),
-        s_prime.primary == s.primary,
-        s_prime.remote == s.remote,
+        s_prime.stores == s.stores,
 {
+    reveal(inv);
+    assert(s_prime.stores =~= s.stores);
+    lemma_abs_store_same_stores(tc, r, s, s_prime);
     let a = abs(tc, r, s, uid_next, rv_next);
     let a_prime = abs(tc, r, s_prime, uid_next, rv_next);
     let sm = tc.cluster.pod_monkey();
@@ -711,8 +781,9 @@ pub proof fn lemma_pod_monkey_step(tc: TwoCluster, r: Relabeling, s: TwoClusterS
 // Every step.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_next_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_next_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, step: Step, uid_next: Uid, rv_next: ResourceVersion)
     requires
+        tc.wf(),
         relabel_hyps(tc, r),
         models_ok(tc),
         models_commute(tc, r),
@@ -722,29 +793,61 @@ pub proof fn lemma_next_step(tc: TwoCluster, r: Relabeling, s: TwoClusterState, 
     ensures
         tc.cluster.next_step(
             abs(tc, r, s, uid_next, rv_next),
-            abs(tc, r, s_prime, uid_next_after(s, s_prime, uid_next), rv_next_after(s, s_prime, rv_next)),
+            abs(tc, r, s_prime, uid_next_after(tc, s, s_prime, uid_next), rv_next_after(tc, s, s_prime, rv_next)),
             relabel_step(tc, r, step)
         ),
         inv(tc, s_prime),
-        counters_step(s, s_prime),
+        counters_step(tc, s, s_prime),
 {
+    // Only the API server allocates; every other step leaves the stores, and so
+    // the global counters, as they were.
     match step {
         Step::APIServerStep(input) => { lemma_api_server_step(tc, r, s, s_prime, side, input, uid_next, rv_next); },
-        Step::BuiltinControllersStep(input) => { lemma_builtin_step(tc, r, s, s_prime, side, input, uid_next, rv_next); },
-        Step::ControllerStep(input) => { lemma_controller_step(tc, r, s, s_prime, input, uid_next, rv_next); },
-        Step::ScheduleControllerReconcileStep(input) => { lemma_schedule_step(tc, r, s, s_prime, side, input, uid_next, rv_next); },
-        Step::RestartControllerStep(input) => { lemma_restart_step(tc, r, s, s_prime, input, uid_next, rv_next); },
-        Step::DisableCrashStep(input) => { lemma_disable_crash_step(tc, r, s, s_prime, input, uid_next, rv_next); },
-        Step::DropReqStep(input) => { lemma_drop_req_step(tc, r, s, s_prime, input, uid_next, rv_next); },
-        Step::DisableReqDropStep => { lemma_disable_req_drop_step(tc, r, s, s_prime, uid_next, rv_next); },
-        Step::PodMonkeyStep(input) => { lemma_pod_monkey_step(tc, r, s, s_prime, input, uid_next, rv_next); },
-        Step::DisablePodMonkeyStep => { lemma_disable_pod_monkey_step(tc, r, s, s_prime, uid_next, rv_next); },
+        Step::BuiltinControllersStep(input) => {
+            lemma_builtin_step(tc, r, s, s_prime, side, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::ControllerStep(input) => {
+            lemma_controller_step(tc, r, s, s_prime, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::ScheduleControllerReconcileStep(input) => {
+            lemma_schedule_step(tc, r, s, s_prime, side, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::RestartControllerStep(input) => {
+            lemma_restart_step(tc, r, s, s_prime, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::DisableCrashStep(input) => {
+            lemma_disable_crash_step(tc, r, s, s_prime, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::DropReqStep(input) => {
+            lemma_drop_req_step(tc, r, s, s_prime, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::DisableReqDropStep => {
+            lemma_disable_req_drop_step(tc, r, s, s_prime, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::PodMonkeyStep(input) => {
+            lemma_pod_monkey_step(tc, r, s, s_prime, input, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
+        Step::DisablePodMonkeyStep => {
+            lemma_disable_pod_monkey_step(tc, r, s, s_prime, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
         Step::ExternalStep(input) => {
             // No controller has an external system, so this step is never enabled.
             assert(tc.cluster.controller_models.contains_key(input.0));
             assert(false);
         },
-        Step::StutterStep => { lemma_stutter_step(tc, r, s, s_prime, uid_next, rv_next); },
+        Step::StutterStep => {
+            lemma_stutter_step(tc, r, s, s_prime, uid_next, rv_next);
+            lemma_sums_same_stores(tc, s, s_prime);
+        },
     }
 }
 

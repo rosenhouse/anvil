@@ -1,17 +1,17 @@
 // Weak fairness of the one-store actions on the abstract execution follows from
-// weak fairness of the two-store actions on the execution. The one point of
+// weak fairness of the multi-store actions on the execution. The one point of
 // care is a message: a one-store action waits on a relabeled message, and the
-// two-store message behind it must be the same one for as long as the wait
+// multi-store message behind it must be the same one for as long as the wait
 // lasts. It is, because a message leaves the network only when a step consumes
 // it, that step consumes the relabeled message too, and the one-store network
 // never holds two copies of a message.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::kubernetes_cluster::proof::two_cluster::{api_server::*, execution::*, relabel::*, steps::*};
+use crate::kubernetes_cluster::proof::multi_cluster::{api_server::*, execution::*, relabel::*, steps::*};
 use crate::kubernetes_cluster::spec::{
     api_server::state_machine::*, api_server::types::*, builtin_controllers::types::*, cluster::*,
-    controller::state_machine::*, controller::types::*, message::*, network::types::*, two_cluster::*,
+    controller::state_machine::*, controller::types::*, message::*, network::types::*, multi_cluster::*,
 };
 use crate::state_machine::action::*;
 use crate::state_machine::state_machine::*;
@@ -35,14 +35,14 @@ pub open spec fn consumes(step: Step, m: Message) -> bool {
     }
 }
 
-pub proof fn lemma_consumes_relabel(tc: TwoCluster, r: Relabeling, step: Step, m: Message)
+pub proof fn lemma_consumes_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, step: Step, m: Message)
     requires consumes(step, m),
     ensures consumes(relabel_step(tc, r, step), relabel_msg(tc, r, m)),
 {
 }
 
-// A two-store step that does not consume m keeps it in flight.
-pub proof fn lemma_kept(tc: TwoCluster, s: TwoClusterState, s_prime: TwoClusterState, side: Side, step: Step, m: Message)
+// A multi-store step that does not consume m keeps it in flight.
+pub proof fn lemma_kept<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, step: Step, m: Message)
     requires
         tc.next_step(s, s_prime, side, step),
         s.in_flight().contains(m),
@@ -149,13 +149,13 @@ pub proof fn lemma_consumed_gone(cluster: Cluster, a: ClusterState, a_prime: Clu
 // The abstract execution satisfies the one-store message invariants.
 // ---------------------------------------------------------------------------
 
-pub open spec fn fair_sim(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>) -> bool {
+pub open spec fn fair_sim<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>) -> bool {
     &&& simulation(tc, r, ex)
     &&& forall |i: nat| m1_msg_invs(#[trigger] abs_at(tc, r, ex, i))
 }
 
 // An always-property of the abstract execution, read at position i.
-proof fn lemma_always_at(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, p: StatePred<ClusterState>, i: nat)
+proof fn lemma_always_at<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, p: StatePred<ClusterState>, i: nat)
     requires always(lift_state(p)).satisfied_by(alpha(tc, r, ex)),
     ensures p(abs_at(tc, r, ex, i)),
 {
@@ -165,7 +165,7 @@ proof fn lemma_always_at(tc: TwoCluster, r: Relabeling, ex: Execution<TwoCluster
 }
 
 #[verifier::rlimit(50)]
-pub proof fn lemma_fair_sim(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>)
+pub proof fn lemma_fair_sim<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>)
     requires
         simulation(tc, r, ex),
         lift_state(tc.cluster.init()).satisfied_by(alpha(tc, r, ex)),
@@ -191,12 +191,12 @@ pub proof fn lemma_fair_sim(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClus
 }
 
 // The relabeled message m1 is in flight at every abstract state from t on.
-pub open spec fn in_flight_from(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, t: nat, m1: Message) -> bool {
+pub open spec fn in_flight_from<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, t: nat, m1: Message) -> bool {
     forall |k: nat| abs_at(tc, r, ex, #[trigger] (t + k)).in_flight().contains(m1)
 }
 
 // One step: if m1 is still in flight afterwards, the message behind it still is.
-proof fn lemma_msg_stays_step(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, i: nat, m1: Message, m2: Message)
+proof fn lemma_msg_stays_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, i: nat, m1: Message, m2: Message)
     requires
         fair_sim(tc, r, ex),
         relabel_msg(tc, r, m2) == m1,
@@ -207,7 +207,7 @@ proof fn lemma_msg_stays_step(tc: TwoCluster, r: Relabeling, ex: Execution<TwoCl
     let s = state_at(ex, i);
     let s_prime = state_at(ex, i + 1);
     assert(tc.next()(s, s_prime));
-    let (side, step) = choose |side: Side, step: Step| tc.next_step(s, s_prime, side, step);
+    let (side, step) = choose |side: S, step: Step| tc.next_step(s, s_prime, side, step);
     if consumes(step, m2) {
         lemma_consumes_relabel(tc, r, step, m2);
         lemma_alpha_step_of(tc, r, ex, i, side, step);
@@ -220,7 +220,7 @@ proof fn lemma_msg_stays_step(tc: TwoCluster, r: Relabeling, ex: Execution<TwoCl
 }
 
 // While m1 stays in flight in the abstract execution, the message behind it stays in flight too.
-pub proof fn lemma_msg_stays(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, t: nat, m1: Message, m2: Message, d: nat)
+pub proof fn lemma_msg_stays<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, t: nat, m1: Message, m2: Message, d: nat)
     requires
         fair_sim(tc, r, ex),
         relabel_msg(tc, r, m2) == m1,
@@ -244,7 +244,7 @@ pub proof fn lemma_msg_stays(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClu
 // ---------------------------------------------------------------------------
 
 // Positions along the two executions.
-proof fn lemma_suffix_heads(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, t: nat, k: nat)
+proof fn lemma_suffix_heads<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, t: nat, k: nat)
     ensures
         ex.suffix(t).suffix(k).head() == state_at(ex, t + k),
         ex.suffix(t).suffix(k).head_next() == state_at(ex, t + k + 1),
@@ -255,7 +255,7 @@ proof fn lemma_suffix_heads(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClus
 
 // The API server of the message's side is enabled on it when the one-store API
 // server is enabled on its relabeling.
-proof fn lemma_api_pre_from_abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, m2: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_api_pre_from_abs<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, m2: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         s.in_flight().contains(m2),
         tc.cluster.api_server_next().pre(Some(relabel_msg(tc, r, m2)))(abs(tc, r, s, uid_next, rv_next)),
@@ -263,8 +263,8 @@ proof fn lemma_api_pre_from_abs(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
 {
 }
 
-// A two-store API server step is the one-store step on the relabeled message.
-proof fn lemma_api_forward_transfer(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, i: nat, side: Side, m2: Message)
+// A multi-store API server step is the one-store step on the relabeled message.
+proof fn lemma_api_forward_transfer<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, i: nat, side: S, m2: Message)
     requires
         fair_sim(tc, r, ex),
         tc.api_server_next(side).forward(Some(m2))(state_at(ex, i), state_at(ex, i + 1)),
@@ -272,27 +272,27 @@ proof fn lemma_api_forward_transfer(tc: TwoCluster, r: Relabeling, ex: Execution
 {
     let s = state_at(ex, i);
     let s_prime = state_at(ex, i + 1);
-    lemma_api_server_step(tc, r, s, s_prime, side, Some(m2), uid_sum(s), rv_sum(s));
-    assert(uid_next_after(s, s_prime, uid_sum(s)) == uid_sum(s_prime));
-    assert(rv_next_after(s, s_prime, rv_sum(s)) == rv_sum(s_prime));
+    lemma_api_server_step(tc, r, s, s_prime, side, Some(m2), uid_sum(tc, s), rv_sum(tc, s));
+    assert(uid_next_after(tc, s, s_prime, uid_sum(tc, s)) == uid_sum(tc, s_prime));
+    assert(rv_next_after(tc, s, s_prime, rv_sum(tc, s)) == rv_sum(tc, s_prime));
 }
 
 // The action is enabled at every position from t on.
-pub open spec fn always_enabled_from<I>(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, act: Action<ClusterState, I, ()>, input: I, t: nat) -> bool {
+pub open spec fn always_enabled_from<S, I>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, act: Action<ClusterState, I, ()>, input: I, t: nat) -> bool {
     forall |k: nat| #[trigger] act.pre(input)(abs_at(tc, r, ex, t + k))
 }
 
 // The action is taken at some position from t on.
-pub open spec fn step_from<I>(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, act: Action<ClusterState, I, ()>, input: I, t: nat) -> bool {
+pub open spec fn step_from<S, I>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, act: Action<ClusterState, I, ()>, input: I, t: nat) -> bool {
     exists |d: nat| #[trigger] act.forward(input)(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1))
 }
 
-pub open spec fn two_step_from<I>(ex: Execution<TwoClusterState>, act: Action<TwoClusterState, I, ()>, input: I, t: nat) -> bool {
+pub open spec fn two_step_from<S, I>(ex: Execution<MultiClusterState<S>>, act: Action<MultiClusterState<S>, I, ()>, input: I, t: nat) -> bool {
     exists |d: nat| #[trigger] act.forward(input)(state_at(ex, t + d), state_at(ex, t + d + 1))
 }
 
-// From a fairness premise on the two-store execution to the step it promises.
-proof fn lemma_wf_apply<I>(act: Action<TwoClusterState, I, ()>, input: I, ex: Execution<TwoClusterState>, t: nat)
+// From a fairness premise on the multi-store execution to the step it promises.
+proof fn lemma_wf_apply<S, I>(act: Action<MultiClusterState<S>, I, ()>, input: I, ex: Execution<MultiClusterState<S>>, t: nat)
     requires
         act.weak_fairness(input).satisfied_by(ex),
         forall |k: nat| #[trigger] act.pre(input)(state_at(ex, t + k)),
@@ -311,7 +311,7 @@ proof fn lemma_wf_apply<I>(act: Action<TwoClusterState, I, ()>, input: I, ex: Ex
 
 // Weak fairness of a one-store action on the abstract execution, from a step at
 // every position where the action is always enabled.
-proof fn lemma_wf_from_steps<I>(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, act: Action<ClusterState, I, ()>, input: I)
+proof fn lemma_wf_from_steps<S, I>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, act: Action<ClusterState, I, ()>, input: I)
     requires forall |t: nat| always_enabled_from(tc, r, ex, act, input, t) ==> #[trigger] step_from(tc, r, ex, act, input, t),
     ensures act.weak_fairness(input).satisfied_by(alpha(tc, r, ex)),
 {
@@ -332,10 +332,10 @@ proof fn lemma_wf_from_steps<I>(tc: TwoCluster, r: Relabeling, ex: Execution<Two
     }
 }
 
-pub proof fn lemma_wf_api_server(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, input1: Option<Message>)
+pub proof fn lemma_wf_api_server<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, input1: Option<Message>)
     requires
         fair_sim(tc, r, ex),
-        forall |side: Side, input: Option<Message>| #[trigger] tc.api_server_next(side).weak_fairness(input).satisfied_by(ex),
+        forall |side: S, input: Option<Message>| tc.sides.contains(side) ==> #[trigger] tc.api_server_next(side).weak_fairness(input).satisfied_by(ex),
     ensures tc.cluster.api_server_next().weak_fairness(input1).satisfied_by(alpha(tc, r, ex)),
 {
     let act1 = tc.cluster.api_server_next();
@@ -348,6 +348,7 @@ pub proof fn lemma_wf_api_server(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
         let m2 = choose |m2: Message| s_t.in_flight().contains(m2) && relabel_msg(tc, r, m2) == m1;
         let side = tc.side_of_msg(m2);
         let act2 = tc.api_server_next(side);
+        assert(tc.sides.contains(side));
         assert forall |k: nat| abs_at(tc, r, ex, #[trigger] (t + k)).in_flight().contains(m1) by {
             assert(act1.pre(input1)(abs_at(tc, r, ex, t + k)));
         }
@@ -355,7 +356,7 @@ pub proof fn lemma_wf_api_server(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
             lemma_msg_stays(tc, r, ex, t, m1, m2, k);
             let s = state_at(ex, t + k);
             assert(act1.pre(input1)(abs_at(tc, r, ex, t + k)));
-            lemma_api_pre_from_abs(tc, r, s, m2, uid_sum(s), rv_sum(s));
+            lemma_api_pre_from_abs(tc, r, s, m2, uid_sum(tc, s), rv_sum(tc, s));
         }
         lemma_wf_apply(act2, Some(m2), ex, t);
         let d = choose |d: nat| #[trigger] act2.forward(Some(m2))(state_at(ex, t + d), state_at(ex, t + d + 1));
@@ -364,7 +365,7 @@ pub proof fn lemma_wf_api_server(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
     lemma_wf_from_steps(tc, r, ex, act1, input1);
 }
 
-proof fn lemma_controller_forward_transfer(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, i: nat, input: (int, Option<Message>, Option<ObjectRef>))
+proof fn lemma_controller_forward_transfer<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, i: nat, input: (int, Option<Message>, Option<ObjectRef>))
     requires
         fair_sim(tc, r, ex),
         tc.controller_next().forward(input)(state_at(ex, i), state_at(ex, i + 1)),
@@ -372,12 +373,11 @@ proof fn lemma_controller_forward_transfer(tc: TwoCluster, r: Relabeling, ex: Ex
 {
     let s = state_at(ex, i);
     let s_prime = state_at(ex, i + 1);
-    lemma_controller_step(tc, r, s, s_prime, input, uid_sum(s), rv_sum(s));
-    assert(uid_sum(s_prime) == uid_sum(s));
-    assert(rv_sum(s_prime) == rv_sum(s));
+    lemma_controller_step(tc, r, s, s_prime, input, uid_sum(tc, s), rv_sum(tc, s));
+    lemma_sums_same_stores(tc, s, s_prime);
 }
 
-pub proof fn lemma_wf_controller(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int, input1: (Option<Message>, Option<ObjectRef>))
+pub proof fn lemma_wf_controller<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, id: int, input1: (Option<Message>, Option<ObjectRef>))
     requires
         fair_sim(tc, r, ex),
         forall |msg: Option<Message>, key: Option<ObjectRef>| #[trigger] tc.controller_next().weak_fairness((id, msg, key)).satisfied_by(ex),
@@ -389,7 +389,7 @@ pub proof fn lemma_wf_controller(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
     let key_o = input1.1;
     assert forall |t: nat| always_enabled_from(tc, r, ex, act1, i1, t) implies #[trigger] step_from(tc, r, ex, act1, i1, t) by {
         assert(act1.pre(i1)(abs_at(tc, r, ex, t + 0)));
-        // The two-store message behind the input, if any.
+        // The multi-store message behind the input, if any.
         let msg2: Option<Message> = if input1.0 is Some {
             let m1 = input1.0->0;
             let s_t = state_at(ex, t);
@@ -412,7 +412,7 @@ pub proof fn lemma_wf_controller(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
             if input1.0 is Some {
                 lemma_msg_stays(tc, r, ex, t, input1.0->0, msg2->0, k);
             }
-            lemma_controller_pre_from_abs(tc, r, s, i2, uid_sum(s), rv_sum(s));
+            lemma_controller_pre_from_abs(tc, r, s, i2, uid_sum(tc, s), rv_sum(tc, s));
         }
         lemma_wf_apply(act2, i2, ex, t);
         let d = choose |d: nat| #[trigger] act2.forward(i2)(state_at(ex, t + d), state_at(ex, t + d + 1));
@@ -421,15 +421,16 @@ pub proof fn lemma_wf_controller(tc: TwoCluster, r: Relabeling, ex: Execution<Tw
     lemma_wf_from_steps(tc, r, ex, act1, i1);
 }
 
-// The two-store controller action is enabled when the one-store one is enabled on
+// The multi-store controller action is enabled when the one-store one is enabled on
 // the abstraction, once the message behind the input is in flight.
-pub proof fn lemma_controller_pre_from_abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, input: (int, Option<Message>, Option<ObjectRef>), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_controller_pre_from_abs<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, input: (int, Option<Message>, Option<ObjectRef>), uid_next: Uid, rv_next: ResourceVersion)
     requires
         inv(tc, s),
         tc.cluster.controller_next().pre((input.0, relabel_opt_msg(tc, r, input.1), input.2))(abs(tc, r, s, uid_next, rv_next)),
         input.1 is Some ==> s.in_flight().contains(input.1->0),
     ensures tc.controller_next().pre(input)(s),
 {
+    reveal(inv);
     let id = input.0;
     let msg = input.1;
     let key_o = input.2;
@@ -448,10 +449,10 @@ pub proof fn lemma_controller_pre_from_abs(tc: TwoCluster, r: Relabeling, s: Two
     assert(sm.next_result(in2, c) is Enabled);
 }
 
-pub proof fn lemma_wf_schedule(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int, key: ObjectRef)
+pub proof fn lemma_wf_schedule<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, id: int, key: ObjectRef)
     requires
         fair_sim(tc, r, ex),
-        forall |side: Side, key: ObjectRef| #[trigger] tc.schedule_controller_reconcile(side).weak_fairness((id, key)).satisfied_by(ex),
+        forall |side: S, key: ObjectRef| tc.sides.contains(side) ==> #[trigger] tc.schedule_controller_reconcile(side).weak_fairness((id, key)).satisfied_by(ex),
     ensures tc.cluster.schedule_controller_reconcile().weak_fairness((id, key)).satisfied_by(alpha(tc, r, ex)),
 {
     let act1 = tc.cluster.schedule_controller_reconcile();
@@ -462,15 +463,16 @@ pub proof fn lemma_wf_schedule(tc: TwoCluster, r: Relabeling, ex: Execution<TwoC
         assert forall |k: nat| #[trigger] act2.pre(i1)(state_at(ex, t + k)) by {
             let s = state_at(ex, t + k);
             assert(act1.pre(i1)(abs_at(tc, r, ex, t + k)));
+            lemma_inv_parts_at(tc, r, ex, t + k);
             lemma_abs_store_index(tc, r, s, key);
         }
+        assert(tc.sides.contains(side));
         lemma_wf_apply(act2, i1, ex, t);
         let d = choose |d: nat| #[trigger] act2.forward(i1)(state_at(ex, t + d), state_at(ex, t + d + 1));
         let s = state_at(ex, t + d);
         let s_prime = state_at(ex, t + d + 1);
-        lemma_schedule_step(tc, r, s, s_prime, side, i1, uid_sum(s), rv_sum(s));
-        assert(uid_sum(s_prime) == uid_sum(s));
-        assert(rv_sum(s_prime) == rv_sum(s));
+        lemma_schedule_step(tc, r, s, s_prime, side, i1, uid_sum(tc, s), rv_sum(tc, s));
+        lemma_sums_same_stores(tc, s, s_prime);
         assert(act1.forward(i1)(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1)));
     }
     lemma_wf_from_steps(tc, r, ex, act1, i1);
@@ -478,13 +480,14 @@ pub proof fn lemma_wf_schedule(tc: TwoCluster, r: Relabeling, ex: Execution<TwoC
 
 // The garbage collector of the key's side is enabled when the one-store one is
 // enabled on the abstraction.
-pub proof fn lemma_builtin_pre_from_abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, input: (BuiltinControllerChoice, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_builtin_pre_from_abs<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, input: (BuiltinControllerChoice, ObjectRef), uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         inv(tc, s),
         tc.cluster.builtin_controllers_next().pre(input)(abs(tc, r, s, uid_next, rv_next)),
     ensures tc.builtin_controllers_next(tc.side_of_kind(input.1.kind)).pre(input)(s),
 {
+    reveal(inv);
     let key = input.1;
     let side = tc.side_of_kind(key.kind);
     let a = abs(tc, r, s, uid_next, rv_next);
@@ -512,10 +515,10 @@ pub proof fn lemma_builtin_pre_from_abs(tc: TwoCluster, r: Relabeling, s: TwoClu
     }
 }
 
-pub proof fn lemma_wf_builtin(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, input1: (BuiltinControllerChoice, ObjectRef))
+pub proof fn lemma_wf_builtin<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, input1: (BuiltinControllerChoice, ObjectRef))
     requires
         fair_sim(tc, r, ex),
-        forall |side: Side, input: (BuiltinControllerChoice, ObjectRef)| #[trigger] tc.builtin_controllers_next(side).weak_fairness(input).satisfied_by(ex),
+        forall |side: S, input: (BuiltinControllerChoice, ObjectRef)| tc.sides.contains(side) ==> #[trigger] tc.builtin_controllers_next(side).weak_fairness(input).satisfied_by(ex),
     ensures tc.cluster.builtin_controllers_next().weak_fairness(input1).satisfied_by(alpha(tc, r, ex)),
 {
     let act1 = tc.cluster.builtin_controllers_next();
@@ -525,21 +528,21 @@ pub proof fn lemma_wf_builtin(tc: TwoCluster, r: Relabeling, ex: Execution<TwoCl
         assert forall |k: nat| #[trigger] act2.pre(input1)(state_at(ex, t + k)) by {
             let s = state_at(ex, t + k);
             assert(act1.pre(input1)(abs_at(tc, r, ex, t + k)));
-            lemma_builtin_pre_from_abs(tc, r, s, input1, uid_sum(s), rv_sum(s));
+            lemma_builtin_pre_from_abs(tc, r, s, input1, uid_sum(tc, s), rv_sum(tc, s));
         }
+        assert(tc.sides.contains(side));
         lemma_wf_apply(act2, input1, ex, t);
         let d = choose |d: nat| #[trigger] act2.forward(input1)(state_at(ex, t + d), state_at(ex, t + d + 1));
         let s = state_at(ex, t + d);
         let s_prime = state_at(ex, t + d + 1);
-        lemma_builtin_step(tc, r, s, s_prime, side, input1, uid_sum(s), rv_sum(s));
-        assert(uid_sum(s_prime) == uid_sum(s));
-        assert(rv_sum(s_prime) == rv_sum(s));
+        lemma_builtin_step(tc, r, s, s_prime, side, input1, uid_sum(tc, s), rv_sum(tc, s));
+        lemma_sums_same_stores(tc, s, s_prime);
         assert(act1.forward(input1)(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1)));
     }
     lemma_wf_from_steps(tc, r, ex, act1, input1);
 }
 
-pub proof fn lemma_wf_disable_crash(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int)
+pub proof fn lemma_wf_disable_crash<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, id: int)
     requires
         fair_sim(tc, r, ex),
         forall |input: int| #[trigger] tc.disable_crash().weak_fairness(input).satisfied_by(ex),
@@ -555,13 +558,14 @@ pub proof fn lemma_wf_disable_crash(tc: TwoCluster, r: Relabeling, ex: Execution
         let d = choose |d: nat| #[trigger] act2.forward(id)(state_at(ex, t + d), state_at(ex, t + d + 1));
         let s = state_at(ex, t + d);
         let s_prime = state_at(ex, t + d + 1);
-        lemma_disable_crash_step(tc, r, s, s_prime, id, uid_sum(s), rv_sum(s));
+        lemma_disable_crash_step(tc, r, s, s_prime, id, uid_sum(tc, s), rv_sum(tc, s));
+        lemma_sums_same_stores(tc, s, s_prime);
         assert(act1.forward(id)(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1)));
     }
     lemma_wf_from_steps(tc, r, ex, act1, id);
 }
 
-pub proof fn lemma_wf_disable_req_drop(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>)
+pub proof fn lemma_wf_disable_req_drop<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>)
     requires
         fair_sim(tc, r, ex),
         tc.disable_req_drop().weak_fairness(()).satisfied_by(ex),
@@ -575,13 +579,14 @@ pub proof fn lemma_wf_disable_req_drop(tc: TwoCluster, r: Relabeling, ex: Execut
         let d = choose |d: nat| #[trigger] act2.forward(())(state_at(ex, t + d), state_at(ex, t + d + 1));
         let s = state_at(ex, t + d);
         let s_prime = state_at(ex, t + d + 1);
-        lemma_disable_req_drop_step(tc, r, s, s_prime, uid_sum(s), rv_sum(s));
+        lemma_disable_req_drop_step(tc, r, s, s_prime, uid_sum(tc, s), rv_sum(tc, s));
+        lemma_sums_same_stores(tc, s, s_prime);
         assert(act1.forward(())(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1)));
     }
     lemma_wf_from_steps(tc, r, ex, act1, ());
 }
 
-pub proof fn lemma_wf_disable_pod_monkey(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>)
+pub proof fn lemma_wf_disable_pod_monkey<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>)
     requires
         fair_sim(tc, r, ex),
         tc.disable_pod_monkey().weak_fairness(()).satisfied_by(ex),
@@ -595,7 +600,8 @@ pub proof fn lemma_wf_disable_pod_monkey(tc: TwoCluster, r: Relabeling, ex: Exec
         let d = choose |d: nat| #[trigger] act2.forward(())(state_at(ex, t + d), state_at(ex, t + d + 1));
         let s = state_at(ex, t + d);
         let s_prime = state_at(ex, t + d + 1);
-        lemma_disable_pod_monkey_step(tc, r, s, s_prime, uid_sum(s), rv_sum(s));
+        lemma_disable_pod_monkey_step(tc, r, s, s_prime, uid_sum(tc, s), rv_sum(tc, s));
+        lemma_sums_same_stores(tc, s, s_prime);
         assert(act1.forward(())(abs_at(tc, r, ex, t + d), abs_at(tc, r, ex, t + d + 1)));
     }
     lemma_wf_from_steps(tc, r, ex, act1, ());
@@ -603,7 +609,7 @@ pub proof fn lemma_wf_disable_pod_monkey(tc: TwoCluster, r: Relabeling, ex: Exec
 
 // No controller has an external system, so the external action is never enabled
 // and its fairness holds vacuously.
-pub proof fn lemma_wf_external(tc: TwoCluster, r: Relabeling, ex: Execution<TwoClusterState>, id: int, input1: Option<Message>)
+pub proof fn lemma_wf_external<S>(tc: MultiCluster<S>, r: Relabeling<S>, ex: Execution<MultiClusterState<S>>, id: int, input1: Option<Message>)
     requires fair_sim(tc, r, ex),
     ensures tc.cluster.external_next().weak_fairness((id, input1)).satisfied_by(alpha(tc, r, ex)),
 {

@@ -68,6 +68,12 @@ pub open spec fn binding_ok(b: Binding) -> bool {
     cluster_ref_ok(b)
 }
 
+// Every binding the kind serves is well formed. Discharged for a concrete
+// configuration by the boot check on each binding's names.
+pub open spec fn bindings_ok(k: SyncKind) -> bool {
+    forall |b: Binding| #[trigger] k.bindings.contains(b) ==> binding_ok(b)
+}
+
 // The outer kind is never a mirror kind.
 pub proof fn lemma_outer_kind_is_not_inner(k: SyncKind, b: Binding)
     requires sync_kind_ok(k),
