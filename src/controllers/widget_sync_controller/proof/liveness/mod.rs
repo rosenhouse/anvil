@@ -8,9 +8,11 @@
 // sync_status_proof.rs R2, the outer copy carries the mirrored status
 // janitor_proof.rs    R3, a mirror whose parent is gone is removed
 // cleanup_proof.rs    R3s, and none pointing at that parent comes back
+// round_trip.rs       R1 and R2 chained across D4
 pub mod api_actions;
 pub mod cleanup_proof;
 pub mod janitor_proof;
+pub mod round_trip;
 pub mod spec;
 pub mod sync_spec_proof;
 pub mod sync_status_proof;

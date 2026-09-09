@@ -17,7 +17,7 @@ use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::{api_server::types::*, cluster::*, message::*};
 use crate::widget_sync_controller::model::install::*;
-use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::spec::*, liveness::sync_spec_proof::*, liveness::sync_status_proof::*};
+use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::spec::*, liveness::round_trip::*, liveness::sync_spec_proof::*, liveness::sync_status_proof::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;
@@ -907,6 +907,85 @@ pub proof fn widget_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, syn
         }
     }
     widget_fanout_core_holds(k, spec_ok, cluster, ids, sync_id);
+}
+
+// The premises the closed statement discharges the ESRs against: the members'
+// guarantees, the partial relies on non-members, the liveness dependency and the
+// environment relies. Naming them once keeps the round trip below readable.
+pub open spec fn widget_core_premises(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>) -> TempPred<ClusterState> {
+    let cluster = widget_core_cluster_for(k, spec_ok, sync_id, ids);
+    let s = widget_core_set_for(k, sync_id, ids);
+    let g = tla_forall(|c: int| if s.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() });
+    let r = tla_forall(|pair: (int, int)| if s.members.contains(pair.0) && !s.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() });
+    let env = tla_forall(|c: int| if s.members.contains(c) { cluster.registry[c].environment_rely } else { true_pred::<ClusterState>() });
+    g.and(r.and(s.liveness_dependency).and(env))
+}
+
+// The round trip, closed: in any cluster the closed statement covers, once an
+// outer copy stops changing, it eventually and stably carries a status the inner
+// side produced for the spec it was given -- given D4 for the binding.
+//
+// D4 is the one premise here that is not discharged anywhere. It is an assumption
+// about the implementation running in the inner cluster, and this theorem is the
+// statement of what it buys: the round trip #49 finding 1 observed was missing,
+// with the step between R1 and R2 named rather than left implicit.
+pub proof fn widget_round_trip_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, sync_id: int, ids: Map<Binding, int>, b: Binding)
+    requires
+        sync_kind_ok(k),
+        forall |b2: Binding| #[trigger] k.bindings.contains(b2) ==> binding_ok(b2),
+        ids_ok(k.bindings, ids, sync_id),
+        k.bindings.contains(b),
+    ensures
+        cluster_model(widget_core_cluster_for(k, spec_ok, sync_id, ids))
+            .and(widget_core_premises(k, spec_ok, sync_id, ids))
+            .and(inner_impl_settles(k, b))
+            .entails(widget_round_trip(k, b)),
+{
+    broadcast use Set::lemma_map_contains;
+    let cluster = widget_core_cluster_for(k, spec_ok, sync_id, ids);
+    let s = widget_core_set_for(k, sync_id, ids);
+    let premises = widget_core_premises(k, spec_ok, sync_id, ids);
+    let spec = cluster_model(cluster).and(premises).and(inner_impl_settles(k, b));
+    let esr_fn = |c: int| if s.members.contains(c) { cluster.registry[c].esr } else { true_pred::<ClusterState>() };
+
+    // core gives the ESRs under exactly these premises.
+    widget_core_holds(k, spec_ok, sync_id, ids);
+    let g = tla_forall(|c: int| if s.members.contains(c) { cluster.registry[c].safety_guarantee } else { true_pred::<ClusterState>() });
+    let r = tla_forall(|pair: (int, int)| if s.members.contains(pair.0) && !s.members.contains(pair.1) { (cluster.registry[pair.0].safety_partial_rely)(pair.1) } else { true_pred::<ClusterState>() });
+    let env = tla_forall(|c: int| if s.members.contains(c) { cluster.registry[c].environment_rely } else { true_pred::<ClusterState>() });
+    let rest = r.and(s.liveness_dependency).and(env);
+    assert(premises == g.and(rest));
+    assert(spec.entails(cluster_model(cluster)));
+    entails_trans::<ClusterState>(spec, cluster_model(cluster), g.and(rest.implies(tla_forall(esr_fn))));
+    lemma_entails_and_elim(spec, g, rest.implies(tla_forall(esr_fn)));
+    assert(spec.entails(rest));
+    lemma_entails_modus_ponens(spec, rest, tla_forall(esr_fn));
+
+    // The sync reconciler is a member, so its ESR is one of them.
+    lemma_widget_cluster_for_models(k, spec_ok, sync_id, ids);
+    assert(s.members.contains(sync_id));
+    spec_entails_tla_forall_apply::<ClusterState, int>(spec, esr_fn, sync_id);
+    assert(esr_fn(sync_id) == widget_sync_esr(k));
+
+    // R1, R2 and R3s for this binding, from the ESR's forall over bindings.
+    let per_b = |b2: Binding| if k.bindings.contains(b2) {
+        widget_spec_eventually_synced(k, b2)
+            .and(widget_status_eventually_mirrored(k, b2))
+            .and(widget_mirrors_stably_collected(k, b2))
+    } else {
+        true_pred::<ClusterState>()
+    };
+    assert(widget_sync_esr(k) == tla_forall(per_b));
+    spec_entails_tla_forall_apply::<ClusterState, Binding>(spec, per_b, b);
+    assert(per_b(b) == widget_spec_eventually_synced(k, b)
+        .and(widget_status_eventually_mirrored(k, b))
+        .and(widget_mirrors_stably_collected(k, b)));
+    lemma_entails_and_elim(spec,
+        widget_spec_eventually_synced(k, b).and(widget_status_eventually_mirrored(k, b)),
+        widget_mirrors_stably_collected(k, b));
+    lemma_entails_and_elim(spec, widget_spec_eventually_synced(k, b), widget_status_eventually_mirrored(k, b));
+
+    lemma_round_trip(spec, k, b);
 }
 
 // ---------------------------------------------------------------------------

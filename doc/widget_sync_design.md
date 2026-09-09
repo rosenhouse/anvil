@@ -21,8 +21,15 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   stamped with the outer generation; R3, a mirror whose parent is
   gone is eventually removed; R3s, no mirror pointing at a departed parent
   persists. All four are ESR-style properties in the sense of the Anvil paper.
-- Assumed: D3, the inner side eventually releases terminating objects; exactly
-  one outer cluster per inner cluster; the operational items in section 3.5.
+- Also proved: the **round trip**, R1 and R2 chained -- once an outer copy stops
+  changing, it eventually and stably carries a status the inner side produced for
+  the spec it was given. R1's conclusion does not reach R2's premise on its own,
+  so the chain needs D4 (below), and the status is existentially quantified
+  because nothing in R1 chooses which one the inner side settles on.
+- Assumed: D3, the inner side eventually releases terminating objects; D4, the
+  inner implementation eventually settles on a status for the spec it was given;
+  exactly one outer cluster per inner cluster; the operational items in
+  section 3.5.
 - Framework additions (section 5): `metadata.generation` in the model, a JSON
   patch primitive, and a cluster tag on the exec wrappers with routing in the
   shim.
@@ -672,6 +679,25 @@ mirror_collected(k, a)(s)    := no mirror pointing at a is at k
 | R3 | `∀k, a, u. (□parent_absent(k, a) ∧ mirror_object_is(k, a, u)) ~> object_is_gone(k, u)` | `proof/liveness/janitor_proof.rs` |
 | R3s | `∀k, a. □parent_absent(k, a) ~> □mirror_collected(k, a)` | `proof/liveness/cleanup_proof.rs` |
 | D3 | `∀key, u. inner_terminating_object(k, b, key, u) ~> object_is_gone(key, u)`, per binding `b` (the premise fixes `key.kind == inner_kind(k, b)`) | assumed |
+| D4 | `∀outer. □(outer_stable(outer) ∧ spec_synced(outer)) ~> ∃settled. □(outer_stable(outer) ∧ inner_settled(outer, settled))` | assumed |
+| RT | `∀outer. □outer_stable(outer) ~> ∃settled. □status_synced(outer, settled)` | `proof/liveness/round_trip.rs` |
+
+RT is R1 and R2 chained, and D4 is the step between them. R2's premise,
+`inner_settled`, is R1's conclusion plus two facts R1 does not supply and no
+proof about the sync controller can: that the inner status observes the mirror's
+current generation, and that it is the particular `settled` R2 is stated for.
+Both are about the implementation running in the inner cluster, which Anvil does
+not model. `model/inner_impl_reconciler.rs` is a modelled implementation that
+would discharge D4 under a fairness assumption for it, which the model does not
+make -- deliberately, so that R2 holds for any implementation.
+
+RT quantifies the status existentially, and that is why R1 and R2 do not compose
+as they stand: R2 is a family of properties indexed by a status, and nothing in
+R1 chooses one. So RT is weaker than R2 -- it does not name the status the user
+will see. It is also the only one of the two whose premise a user can establish,
+by not editing the object. `widget_round_trip_holds`
+(`composition/widget_sync_reconciler.rs`) states RT for any cluster the closed
+statement covers.
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
 (spec constant, not being deleted, same uid), and whoever was editing the
@@ -769,7 +795,7 @@ with the pair, and `widget_implemented_core_holds` the inner implementation
 2. Weak fairness of the API server, both reconcilers, `schedule_controller_reconcile`, `disable_crash`, `disable_req_drop`, `disable_pod_monkey` and the built-in controllers. Read: the process stops crashing, lost responses stop, every API server stops failing requests.
 3. Both kinds installed; both controller models registered under distinct ids.
 4. The relies of 3.2 for every other controller id.
-5. D3.
+5. D3, and, for the round trip only, D4. R1, R2, R3 and R3s do not need D4.
 6. Generation semantics as in section 5.1 on both real API servers (true for CRDs with the status subresource).
 7. The hypotheses of the refinement in 2.2, and one outer cluster per inner cluster.
 8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec.
