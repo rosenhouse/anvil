@@ -704,7 +704,7 @@ pub open spec fn synced_kind_names(k: SyncKind) -> Set<StringView> {
 // Those names, each installed with the shape's type for the kind's schema and
 // selector: the installed types of a cluster that serves `k`. Nothing else is
 // installed, which is what makes every hypothesis about the installed types of
-// the two-store refinement one case.
+// the multi-store refinement one case.
 pub open spec fn widget_installed_types(k: SyncKind, spec_ok: spec_fn(Value) -> bool) -> InstalledTypes {
     Map::new(
         synced_kind_names(k),
@@ -792,7 +792,7 @@ pub proof fn lemma_widget_cluster_for_models(k: SyncKind, spec_ok: spec_fn(Value
 }
 
 // The cluster of a configuration in which only one binding's janitor runs. The
-// two-store refinement is read one binding at a time
+// multi-store theorems are read one binding at a time
 // (doc/widget_sync_fanout_design.md, section 5.2), and this is the cluster its
 // closed statements are read on: the sync controller of `k`, the janitor of `b`,
 // and the model kinds of the whole configuration installed, because the sync
@@ -806,7 +806,7 @@ pub open spec fn widget_pair_cluster_for(k: SyncKind, b: Binding, spec_ok: spec_
     }
 }
 
-// When the configuration has the one binding, the two clusters are the same.
+// When the configuration has the one binding, the two values are the same.
 pub proof fn lemma_widget_cluster_for_is_pair(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, sync_id: int, janitor_id: int)
     requires
         k.bindings == Set::<Binding>::empty().insert(b),
@@ -969,7 +969,7 @@ pub proof fn widget_kinds_distinct()
     lemma_outer_kind_is_not_inner(widget_kind(), widget_binding());
 }
 
-// The demo's cluster as the two-store statements read it: the sync controller and
+// The demo's cluster as the multi-store statements read it: the sync controller and
 // the one binding's janitor. lemma_widget_cluster_for_is_pair says it is the same
 // value as widget_core_cluster().cluster.
 pub open spec fn widget_cluster_instance() -> Cluster {

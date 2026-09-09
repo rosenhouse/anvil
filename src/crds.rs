@@ -168,8 +168,8 @@ impl VStatefulSetSpec {
     }
 }
 
-// Widget is the custom resource mirrored between two clusters by the widget sync
-// controller. The same kind is installed in both clusters: the outer copy is
+// Widget is the custom resource the widget sync controller mirrors from the
+// outer cluster into an inner one. The same kind is installed in both: the outer copy is
 // reconciled by the widget sync controller, the inner copy by whatever
 // implementation the inner cluster runs (in the demo, the widget echo controller).
 // `clusterName` selects the cluster (the kind's selector is `field:spec.clusterName`);

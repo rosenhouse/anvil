@@ -223,4 +223,39 @@ pub proof fn lemma_model_kind_distinct(k1: StringView, c1: ClusterIdView, k2: St
     }
 }
 
+// The cluster a model kind names: the inverse of model_kind on the names and
+// clusters it is injective on. Every other kind, built in or not of the shape,
+// is read as the primary cluster's. This is the routing of the registry
+// (doc/widget_sync_fanout_design.md, section 2.4) as a function of the kind.
+pub open spec fn cluster_of_kind(kind: Kind) -> ClusterIdView {
+    if exists |name: StringView, r: ClusterRefView| kind_name_ok(name) && cluster_ref_ok(r) && kind == #[trigger] model_kind(name, ClusterIdView::Remote(r)) {
+        let (name, r) = choose |name: StringView, r: ClusterRefView| kind_name_ok(name) && cluster_ref_ok(r) && kind == #[trigger] model_kind(name, ClusterIdView::Remote(r));
+        ClusterIdView::Remote(r)
+    } else {
+        ClusterIdView::Primary
+    }
+}
+
+pub proof fn lemma_cluster_of_model_kind(name: StringView, cluster: ClusterIdView)
+    requires
+        kind_name_ok(name),
+        cluster_id_ok(cluster),
+    ensures cluster_of_kind(model_kind(name, cluster)) == cluster,
+{
+    let kind = model_kind(name, cluster);
+    match cluster {
+        ClusterIdView::Primary => {
+            if exists |n2: StringView, r2: ClusterRefView| kind_name_ok(n2) && cluster_ref_ok(r2) && kind == #[trigger] model_kind(n2, ClusterIdView::Remote(r2)) {
+                let (n2, r2) = choose |n2: StringView, r2: ClusterRefView| kind_name_ok(n2) && cluster_ref_ok(r2) && kind == #[trigger] model_kind(n2, ClusterIdView::Remote(r2));
+                lemma_remote_kind_name_is_not_primary(name, n2, r2);
+            }
+        },
+        ClusterIdView::Remote(r) => {
+            assert(kind == model_kind(name, ClusterIdView::Remote(r)));
+            let (n2, r2) = choose |n2: StringView, r2: ClusterRefView| kind_name_ok(n2) && cluster_ref_ok(r2) && kind == #[trigger] model_kind(n2, ClusterIdView::Remote(r2));
+            lemma_remote_kind_name_injective(name, r, n2, r2);
+        },
+    }
+}
+
 }

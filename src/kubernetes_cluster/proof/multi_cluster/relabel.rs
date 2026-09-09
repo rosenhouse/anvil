@@ -1,10 +1,10 @@
-// The abstraction from a two-cluster state to a one-store state.
+// The abstraction from a multi-store state to a one-store state.
 //
-// The two API servers of TwoCluster count uids and resource versions
+// The API servers of MultiCluster count uids and resource versions
 // independently. The one-store model counts them once. The abstraction unions
-// the two stores and relabels every counter value by an injective map per side,
-// chosen (by the refinement proof) so that the k-th allocation overall gets the
-// value k. Counter values sit in object metadata (uid, resourceVersion, owner
+// the stores and relabels every counter value by a map injective across the
+// sides, chosen (by the refinement proof) so that the k-th allocation overall
+// gets the value k. Counter values sit in object metadata (uid, resourceVersion, owner
 // references), in request preconditions and patch tests, and, for a controller
 // that copies a uid into an annotation, in annotation values; the last is
 // covered by a per-kind annotation hook that the controller's own commutation
@@ -14,29 +14,34 @@ use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_cluster::spec::{
     api_server::state_machine::*, api_server::types::*, builtin_controllers::types::*,
-    cluster::*, controller::types::*, message::*, network::types::*, two_cluster::*,
+    cluster::*, controller::types::*, message::*, network::types::*, multi_cluster::*,
 };
 use crate::vstd_ext::string_view::*;
 use vstd::{map_lib::*, multiset::*, prelude::*, seq_lib::*, set_lib::*};
 
 verus! {
 
-pub struct Relabeling {
-    pub uid: spec_fn(Side, Uid) -> Uid,
-    pub rv: spec_fn(Side, ResourceVersion) -> ResourceVersion,
+#[verifier::reject_recursive_types(S)]
+pub struct Relabeling<S> {
+    pub uid: spec_fn(S, Uid) -> Uid,
+    pub rv: spec_fn(S, ResourceVersion) -> ResourceVersion,
     // (kind of the object, annotation key, annotation value) -> relabeled value.
     pub annotation: spec_fn(Kind, StringView, StringView) -> StringView,
 }
 
-// Injective per side, with disjoint images across sides.
-pub open spec fn uid_map_injective(u: spec_fn(Side, Uid) -> Uid) -> bool {
-    &&& forall |side: Side, a: Uid, b: Uid| #[trigger] u(side, a) == #[trigger] u(side, b) ==> a == b
-    &&& forall |a: Uid, b: Uid| #[trigger] u(Side::Primary, a) != #[trigger] u(Side::Remote, b)
+// Injective across the sides of the cluster: two counter values, of one side
+// or of two, never relabel alike. Nothing is asked about a side the cluster
+// does not have.
+pub open spec fn uid_map_injective<S>(sides: Set<S>, u: spec_fn(S, Uid) -> Uid) -> bool {
+    forall |side_a: S, a: Uid, side_b: S, b: Uid|
+        sides.contains(side_a) && sides.contains(side_b) && #[trigger] u(side_a, a) == #[trigger] u(side_b, b)
+        ==> side_a == side_b && a == b
 }
 
-pub open spec fn rv_map_injective(v: spec_fn(Side, ResourceVersion) -> ResourceVersion) -> bool {
-    &&& forall |side: Side, a: ResourceVersion, b: ResourceVersion| #[trigger] v(side, a) == #[trigger] v(side, b) ==> a == b
-    &&& forall |a: ResourceVersion, b: ResourceVersion| #[trigger] v(Side::Primary, a) != #[trigger] v(Side::Remote, b)
+pub open spec fn rv_map_injective<S>(sides: Set<S>, v: spec_fn(S, ResourceVersion) -> ResourceVersion) -> bool {
+    forall |side_a: S, a: ResourceVersion, side_b: S, b: ResourceVersion|
+        sides.contains(side_a) && sides.contains(side_b) && #[trigger] v(side_a, a) == #[trigger] v(side_b, b)
+        ==> side_a == side_b && a == b
 }
 
 // Injective per kind and key.
@@ -44,9 +49,9 @@ pub open spec fn annotation_injective(h: spec_fn(Kind, StringView, StringView) -
     forall |kind: Kind, key: StringView, a: StringView, b: StringView| #[trigger] h(kind, key, a) == #[trigger] h(kind, key, b) ==> a == b
 }
 
-pub open spec fn injective(r: Relabeling) -> bool {
-    &&& uid_map_injective(r.uid)
-    &&& rv_map_injective(r.rv)
+pub open spec fn injective<S>(tc: MultiCluster<S>, r: Relabeling<S>) -> bool {
+    &&& uid_map_injective(tc.sides, r.uid)
+    &&& rv_map_injective(tc.sides, r.rv)
     &&& annotation_injective(r.annotation)
 }
 
@@ -54,39 +59,39 @@ pub open spec fn injective(r: Relabeling) -> bool {
 // Relabeling of objects.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_opt_uid(r: Relabeling, side: Side, u: Option<Uid>) -> Option<Uid> {
+pub open spec fn relabel_opt_uid<S>(r: Relabeling<S>, side: S, u: Option<Uid>) -> Option<Uid> {
     match u {
         Some(x) => Some((r.uid)(side, x)),
         None => None,
     }
 }
 
-pub open spec fn relabel_opt_rv(r: Relabeling, side: Side, v: Option<ResourceVersion>) -> Option<ResourceVersion> {
+pub open spec fn relabel_opt_rv<S>(r: Relabeling<S>, side: S, v: Option<ResourceVersion>) -> Option<ResourceVersion> {
     match v {
         Some(x) => Some((r.rv)(side, x)),
         None => None,
     }
 }
 
-pub open spec fn relabel_owner_ref(tc: TwoCluster, r: Relabeling, o: OwnerReferenceView) -> OwnerReferenceView {
+pub open spec fn relabel_owner_ref<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: OwnerReferenceView) -> OwnerReferenceView {
     OwnerReferenceView { uid: (r.uid)(tc.side_of_kind(o.kind), o.uid), ..o }
 }
 
-pub open spec fn relabel_owner_refs(tc: TwoCluster, r: Relabeling, o: Option<Seq<OwnerReferenceView>>) -> Option<Seq<OwnerReferenceView>> {
+pub open spec fn relabel_owner_refs<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: Option<Seq<OwnerReferenceView>>) -> Option<Seq<OwnerReferenceView>> {
     match o {
         Some(refs) => Some(refs.map_values(|x: OwnerReferenceView| relabel_owner_ref(tc, r, x))),
         None => None,
     }
 }
 
-pub open spec fn relabel_annotations(r: Relabeling, kind: Kind, a: Option<Map<StringView, StringView>>) -> Option<Map<StringView, StringView>> {
+pub open spec fn relabel_annotations<S>(r: Relabeling<S>, kind: Kind, a: Option<Map<StringView, StringView>>) -> Option<Map<StringView, StringView>> {
     match a {
         Some(m) => Some(Map::new(m.dom(), |k: StringView| (r.annotation)(kind, k, m[k]))),
         None => None,
     }
 }
 
-pub open spec fn relabel_meta(tc: TwoCluster, r: Relabeling, kind: Kind, m: ObjectMetaView) -> ObjectMetaView {
+pub open spec fn relabel_meta<S>(tc: MultiCluster<S>, r: Relabeling<S>, kind: Kind, m: ObjectMetaView) -> ObjectMetaView {
     let side = tc.side_of_kind(kind);
     ObjectMetaView {
         resource_version: relabel_opt_rv(r, side, m.resource_version),
@@ -97,7 +102,7 @@ pub open spec fn relabel_meta(tc: TwoCluster, r: Relabeling, kind: Kind, m: Obje
     }
 }
 
-pub open spec fn relabel_obj(tc: TwoCluster, r: Relabeling, o: DynamicObjectView) -> DynamicObjectView {
+pub open spec fn relabel_obj<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView) -> DynamicObjectView {
     DynamicObjectView {
         kind: o.kind,
         metadata: relabel_meta(tc, r, o.kind, o.metadata),
@@ -106,7 +111,7 @@ pub open spec fn relabel_obj(tc: TwoCluster, r: Relabeling, o: DynamicObjectView
     }
 }
 
-pub open spec fn relabel_preconditions(r: Relabeling, side: Side, p: Option<PreconditionsView>) -> Option<PreconditionsView> {
+pub open spec fn relabel_preconditions<S>(r: Relabeling<S>, side: S, p: Option<PreconditionsView>) -> Option<PreconditionsView> {
     match p {
         Some(pre) => Some(PreconditionsView {
             uid: relabel_opt_uid(r, side, pre.uid),
@@ -116,17 +121,17 @@ pub open spec fn relabel_preconditions(r: Relabeling, side: Side, p: Option<Prec
     }
 }
 
-pub open spec fn relabel_tests(r: Relabeling, side: Side, t: PatchTestsView) -> PatchTestsView {
+pub open spec fn relabel_tests<S>(r: Relabeling<S>, side: S, t: PatchTestsView) -> PatchTestsView {
     PatchTestsView { uid: relabel_opt_uid(r, side, t.uid), ..t }
 }
 
 // A list response is relabeled as a set: the one-store List orders its result by
 // Set::to_seq of the relabeled set, so the abstraction takes the same order.
-pub open spec fn relabel_list(tc: TwoCluster, r: Relabeling, objs: Seq<DynamicObjectView>) -> Seq<DynamicObjectView> {
+pub open spec fn relabel_list<S>(tc: MultiCluster<S>, r: Relabeling<S>, objs: Seq<DynamicObjectView>) -> Seq<DynamicObjectView> {
     objs.to_set().map(|o: DynamicObjectView| relabel_obj(tc, r, o)).to_seq()
 }
 
-pub open spec fn relabel_obj_result(tc: TwoCluster, r: Relabeling, res: Result<DynamicObjectView, APIError>) -> Result<DynamicObjectView, APIError> {
+pub open spec fn relabel_obj_result<S>(tc: MultiCluster<S>, r: Relabeling<S>, res: Result<DynamicObjectView, APIError>) -> Result<DynamicObjectView, APIError> {
     match res {
         Ok(o) => Ok(relabel_obj(tc, r, o)),
         Err(e) => Err(e),
@@ -137,7 +142,7 @@ pub open spec fn relabel_obj_result(tc: TwoCluster, r: Relabeling, res: Result<D
 // Relabeling of messages.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_req(tc: TwoCluster, r: Relabeling, req: APIRequest) -> APIRequest {
+pub open spec fn relabel_req<S>(tc: MultiCluster<S>, r: Relabeling<S>, req: APIRequest) -> APIRequest {
     match req {
         APIRequest::GetRequest(x) => APIRequest::GetRequest(x),
         APIRequest::ListRequest(x) => APIRequest::ListRequest(x),
@@ -165,7 +170,7 @@ pub open spec fn relabel_req(tc: TwoCluster, r: Relabeling, req: APIRequest) -> 
     }
 }
 
-pub open spec fn relabel_resp(tc: TwoCluster, r: Relabeling, resp: APIResponse) -> APIResponse {
+pub open spec fn relabel_resp<S>(tc: MultiCluster<S>, r: Relabeling<S>, resp: APIResponse) -> APIResponse {
     match resp {
         APIResponse::GetResponse(x) => APIResponse::GetResponse(GetResponse { res: relabel_obj_result(tc, r, x.res) }),
         APIResponse::ListResponse(x) => APIResponse::ListResponse(ListResponse {
@@ -183,7 +188,7 @@ pub open spec fn relabel_resp(tc: TwoCluster, r: Relabeling, resp: APIResponse) 
     }
 }
 
-pub open spec fn relabel_content(tc: TwoCluster, r: Relabeling, c: MessageContent) -> MessageContent {
+pub open spec fn relabel_content<S>(tc: MultiCluster<S>, r: Relabeling<S>, c: MessageContent) -> MessageContent {
     match c {
         MessageContent::APIRequest(req) => MessageContent::APIRequest(relabel_req(tc, r, req)),
         MessageContent::APIResponse(resp) => MessageContent::APIResponse(relabel_resp(tc, r, resp)),
@@ -192,11 +197,11 @@ pub open spec fn relabel_content(tc: TwoCluster, r: Relabeling, c: MessageConten
     }
 }
 
-pub open spec fn relabel_msg(tc: TwoCluster, r: Relabeling, m: Message) -> Message {
+pub open spec fn relabel_msg<S>(tc: MultiCluster<S>, r: Relabeling<S>, m: Message) -> Message {
     Message { content: relabel_content(tc, r, m.content), ..m }
 }
 
-pub open spec fn relabel_opt_msg(tc: TwoCluster, r: Relabeling, m: Option<Message>) -> Option<Message> {
+pub open spec fn relabel_opt_msg<S>(tc: MultiCluster<S>, r: Relabeling<S>, m: Option<Message>) -> Option<Message> {
     match m {
         Some(x) => Some(relabel_msg(tc, r, x)),
         None => None,
@@ -206,15 +211,15 @@ pub open spec fn relabel_opt_msg(tc: TwoCluster, r: Relabeling, m: Option<Messag
 // The multiset of relabeled messages: the count of m1 is the number of messages
 // of ms that relabel to m1, with multiplicity. (Only the order of a list response
 // is forgotten by relabeling, so this is the count of the preimage in practice.)
-pub open spec fn relabel_image(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>) -> Set<Message> {
+pub open spec fn relabel_image<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>) -> Set<Message> {
     ms.dom().map(|m2: Message| relabel_msg(tc, r, m2))
 }
 
-pub open spec fn relabel_preimages(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m1: Message) -> Multiset<Message> {
+pub open spec fn relabel_preimages<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>, m1: Message) -> Multiset<Message> {
     ms.filter(|m2: Message| relabel_msg(tc, r, m2) == m1)
 }
 
-pub open spec fn relabel_msgs(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>) -> Multiset<Message> {
+pub open spec fn relabel_msgs<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>) -> Multiset<Message> {
     Multiset::from_map(Map::new(relabel_image(tc, r, ms), |m1: Message| relabel_preimages(tc, r, ms, m1).len()))
 }
 
@@ -222,7 +227,7 @@ pub open spec fn relabel_msgs(tc: TwoCluster, r: Relabeling, ms: Multiset<Messag
 // Relabeling of controller and cluster state.
 // ---------------------------------------------------------------------------
 
-pub open spec fn relabel_ongoing(tc: TwoCluster, r: Relabeling, o: OngoingReconcile) -> OngoingReconcile {
+pub open spec fn relabel_ongoing<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: OngoingReconcile) -> OngoingReconcile {
     OngoingReconcile {
         triggering_cr: relabel_obj(tc, r, o.triggering_cr),
         pending_req_msg: relabel_opt_msg(tc, r, o.pending_req_msg),
@@ -230,7 +235,7 @@ pub open spec fn relabel_ongoing(tc: TwoCluster, r: Relabeling, o: OngoingReconc
     }
 }
 
-pub open spec fn relabel_controller(tc: TwoCluster, r: Relabeling, c: ControllerState) -> ControllerState {
+pub open spec fn relabel_controller<S>(tc: MultiCluster<S>, r: Relabeling<S>, c: ControllerState) -> ControllerState {
     ControllerState {
         ongoing_reconciles: c.ongoing_reconciles.map_values(|o: OngoingReconcile| relabel_ongoing(tc, r, o)),
         scheduled_reconciles: c.scheduled_reconciles.map_values(|o: DynamicObjectView| relabel_obj(tc, r, o)),
@@ -238,20 +243,35 @@ pub open spec fn relabel_controller(tc: TwoCluster, r: Relabeling, c: Controller
     }
 }
 
-pub open spec fn relabel_cae(tc: TwoCluster, r: Relabeling, c: ControllerAndExternalState) -> ControllerAndExternalState {
+pub open spec fn relabel_cae<S>(tc: MultiCluster<S>, r: Relabeling<S>, c: ControllerAndExternalState) -> ControllerAndExternalState {
     ControllerAndExternalState { controller: relabel_controller(tc, r, c.controller), ..c }
 }
 
-pub open spec fn relabel_store(tc: TwoCluster, r: Relabeling, store: StoredState) -> StoredState {
+pub open spec fn relabel_store<S>(tc: MultiCluster<S>, r: Relabeling<S>, store: StoredState) -> StoredState {
     store.map_values(|o: DynamicObjectView| relabel_obj(tc, r, o))
 }
 
-// The union of the two relabeled stores. Under stores_sided the two have disjoint keys.
-pub open spec fn abs_store(tc: TwoCluster, r: Relabeling, s: TwoClusterState) -> StoredState {
-    relabel_store(tc, r, s.primary.resources).union_prefer_right(relabel_store(tc, r, s.remote.resources))
+// The union of the relabeled stores of `sides`, taken one side at a time.
+#[verifier::opaque]
+pub open spec fn store_union<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, sides: Set<S>) -> StoredState
+    decreases sides.len(),
+{
+    if sides.len() > 0 {
+        let side = sides.choose();
+        relabel_store(tc, r, s.store(side).resources).union_prefer_right(store_union(tc, r, s, sides.remove(side)))
+    } else {
+        Map::<ObjectRef, DynamicObjectView>::empty()
+    }
 }
 
-pub open spec fn abs_api_server(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion) -> APIServerState {
+// The union of the relabeled stores. Under stores_sided the stores have
+// disjoint keys, and the object under a key is the relabeled object under that
+// key in the store of the key's kind.
+pub open spec fn abs_store<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>) -> StoredState {
+    store_union(tc, r, s, tc.sides)
+}
+
+pub open spec fn abs_api_server<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion) -> APIServerState {
     APIServerState {
         resources: abs_store(tc, r, s),
         uid_counter: uid_next,
@@ -260,7 +280,7 @@ pub open spec fn abs_api_server(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
 }
 
 // The one-store state: the union of the relabeled stores, with the global counters.
-pub open spec fn abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next: Uid, rv_next: ResourceVersion) -> ClusterState {
+pub open spec fn abs<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, uid_next: Uid, rv_next: ResourceVersion) -> ClusterState {
     ClusterState {
         api_server: abs_api_server(tc, r, s, uid_next, rv_next),
         controller_and_externals: s.controller_and_externals.map_values(|c: ControllerAndExternalState| relabel_cae(tc, r, c)),
@@ -274,7 +294,7 @@ pub open spec fn abs(tc: TwoCluster, r: Relabeling, s: TwoClusterState, uid_next
 // An object a store may hold or a reconcile may be scheduled with: object_ok
 // (of a known kind, with owner references to kinds of its own side), with a
 // uid, and unmarshallable.
-pub open spec fn stored_object_ok(tc: TwoCluster, o: DynamicObjectView) -> bool {
+pub open spec fn stored_object_ok<S>(tc: MultiCluster<S>, o: DynamicObjectView) -> bool {
     &&& tc.object_ok(o)
     &&& o.metadata.uid is Some
     &&& unmarshallable_object(o, tc.cluster.installed_types)
@@ -282,7 +302,7 @@ pub open spec fn stored_object_ok(tc: TwoCluster, o: DynamicObjectView) -> bool 
 
 // Every object of a store is under a key of its own kind, of a kind of that
 // store's side, and stored_object_ok.
-pub open spec fn store_sided(tc: TwoCluster, side: Side, store: StoredState) -> bool {
+pub open spec fn store_sided<S>(tc: MultiCluster<S>, side: S, store: StoredState) -> bool {
     forall |k: ObjectRef| #[trigger] store.contains_key(k) ==> tc.side_of_kind(k.kind) == side && store[k].kind == k.kind && stored_object_ok(tc, store[k])
 }
 
@@ -294,7 +314,7 @@ pub open spec fn installed_types_coherent(it: InstalledTypes) -> bool {
 
 // A freshly created object, whose status is the default one, unmarshals if its
 // spec does.
-pub proof fn lemma_created_object_unmarshallable(tc: TwoCluster, o: DynamicObjectView)
+pub proof fn lemma_created_object_unmarshallable<S>(tc: MultiCluster<S>, o: DynamicObjectView)
     requires
         installed_types_coherent(tc.cluster.installed_types),
         tc.kind_ok(o.kind),
@@ -317,16 +337,33 @@ pub proof fn lemma_created_object_unmarshallable(tc: TwoCluster, o: DynamicObjec
     }
 }
 
-pub open spec fn stores_sided(tc: TwoCluster, s: TwoClusterState) -> bool {
-    &&& store_sided(tc, Side::Primary, s.primary.resources)
-    &&& store_sided(tc, Side::Remote, s.remote.resources)
+// Every side has a store, and each store is sided.
+pub open spec fn stores_sided<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
+    &&& s.stores.dom() == tc.sides
+    &&& forall |side: S| #[trigger] tc.sides.contains(side) ==> store_sided(tc, side, s.stores[side].resources)
 }
+
+// Every store holds keys of its own side only: what the abstraction needs to
+// find an object in the store of its kind.
+pub open spec fn stores_keyed<S>(tc: MultiCluster<S>, s: MultiClusterState<S>) -> bool {
+    forall |side: S, k: ObjectRef| tc.sides.contains(side) && #[trigger] s.store(side).resources.contains_key(k) ==> tc.side_of_kind(k.kind) == side
+}
+
+pub proof fn lemma_stores_sided_keyed<S>(tc: MultiCluster<S>, s: MultiClusterState<S>)
+    requires stores_sided(tc, s),
+    ensures stores_keyed(tc, s),
+{
+    assert forall |side: S, k: ObjectRef| tc.sides.contains(side) && #[trigger] s.store(side).resources.contains_key(k) implies tc.side_of_kind(k.kind) == side by {
+        assert(store_sided(tc, side, s.stores[side].resources));
+    }
+}
+
 
 // ---------------------------------------------------------------------------
 // What relabeling keeps.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_relabel_obj_keeps_identity(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+pub proof fn lemma_relabel_obj_keeps_identity<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView)
     ensures
         relabel_obj(tc, r, o).kind == o.kind,
         relabel_obj(tc, r, o).object_ref() == o.object_ref(),
@@ -346,9 +383,10 @@ pub proof fn lemma_relabel_obj_keeps_identity(tc: TwoCluster, r: Relabeling, o: 
 {
 }
 
-pub proof fn lemma_relabel_meta_injective(tc: TwoCluster, r: Relabeling, kind: Kind, a: ObjectMetaView, b: ObjectMetaView)
+pub proof fn lemma_relabel_meta_injective<S>(tc: MultiCluster<S>, r: Relabeling<S>, kind: Kind, a: ObjectMetaView, b: ObjectMetaView)
     requires
-        injective(r),
+        tc.wf(),
+        injective(tc, r),
         relabel_meta(tc, r, kind, a) == relabel_meta(tc, r, kind, b),
     ensures a == b,
 {
@@ -405,18 +443,20 @@ pub proof fn lemma_relabel_meta_injective(tc: TwoCluster, r: Relabeling, kind: K
     }
 }
 
-pub proof fn lemma_relabel_obj_injective(tc: TwoCluster, r: Relabeling, a: DynamicObjectView, b: DynamicObjectView)
+pub proof fn lemma_relabel_obj_injective<S>(tc: MultiCluster<S>, r: Relabeling<S>, a: DynamicObjectView, b: DynamicObjectView)
     requires
-        injective(r),
+        tc.wf(),
+        injective(tc, r),
         relabel_obj(tc, r, a) == relabel_obj(tc, r, b),
     ensures a == b,
 {
     lemma_relabel_meta_injective(tc, r, a.kind, a.metadata, b.metadata);
 }
 
-pub proof fn lemma_relabel_owner_ref_injective(tc: TwoCluster, r: Relabeling, a: OwnerReferenceView, b: OwnerReferenceView)
+pub proof fn lemma_relabel_owner_ref_injective<S>(tc: MultiCluster<S>, r: Relabeling<S>, a: OwnerReferenceView, b: OwnerReferenceView)
     requires
-        injective(r),
+        tc.wf(),
+        injective(tc, r),
         relabel_owner_ref(tc, r, a) == relabel_owner_ref(tc, r, b),
     ensures a == b,
 {
@@ -424,8 +464,10 @@ pub proof fn lemma_relabel_owner_ref_injective(tc: TwoCluster, r: Relabeling, a:
 }
 
 // Membership of an owner reference in a relabeled sequence.
-pub proof fn lemma_relabel_owner_refs_contains(tc: TwoCluster, r: Relabeling, refs: Seq<OwnerReferenceView>, o: OwnerReferenceView)
-    requires injective(r),
+pub proof fn lemma_relabel_owner_refs_contains<S>(tc: MultiCluster<S>, r: Relabeling<S>, refs: Seq<OwnerReferenceView>, o: OwnerReferenceView)
+    requires
+        tc.wf(),
+        injective(tc, r),
     ensures
         refs.map_values(|x: OwnerReferenceView| relabel_owner_ref(tc, r, x)).contains(relabel_owner_ref(tc, r, o)) == refs.contains(o),
 {
@@ -436,95 +478,7 @@ pub proof fn lemma_relabel_owner_refs_contains(tc: TwoCluster, r: Relabeling, re
     }
     if mapped.contains(relabel_owner_ref(tc, r, o)) {
         let i = choose |i: int| 0 <= i < mapped.len() && mapped[i] == relabel_owner_ref(tc, r, o);
-        lemma_relabel_owner_ref_injective(tc, r, refs[i], o);
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Messages and multisets of messages.
-// ---------------------------------------------------------------------------
-
-pub proof fn lemma_relabel_req_injective(tc: TwoCluster, r: Relabeling, a: APIRequest, b: APIRequest)
-    requires
-        injective(r),
-        relabel_req(tc, r, a) == relabel_req(tc, r, b),
-    ensures a == b,
-{
-    match (a, b) {
-        (APIRequest::CreateRequest(x), APIRequest::CreateRequest(y)) => { lemma_relabel_obj_injective(tc, r, x.obj, y.obj); },
-        (APIRequest::DeleteRequest(x), APIRequest::DeleteRequest(y)) => {
-            let side = tc.side_of_kind(x.key.kind);
-            match (x.preconditions, y.preconditions) {
-                (Some(px), Some(py)) => {
-                    match (px.uid, py.uid) { (Some(u), Some(v)) => { assert((r.uid)(side, u) == (r.uid)(side, v)); }, _ => {} }
-                    match (px.resource_version, py.resource_version) { (Some(u), Some(v)) => { assert((r.rv)(side, u) == (r.rv)(side, v)); }, _ => {} }
-                },
-                _ => {},
-            }
-        },
-        (APIRequest::UpdateRequest(x), APIRequest::UpdateRequest(y)) => { lemma_relabel_obj_injective(tc, r, x.obj, y.obj); },
-        (APIRequest::UpdateStatusRequest(x), APIRequest::UpdateStatusRequest(y)) => { lemma_relabel_obj_injective(tc, r, x.obj, y.obj); },
-        (APIRequest::GetThenDeleteRequest(x), APIRequest::GetThenDeleteRequest(y)) => { lemma_relabel_owner_ref_injective(tc, r, x.owner_ref, y.owner_ref); },
-        (APIRequest::GetThenUpdateRequest(x), APIRequest::GetThenUpdateRequest(y)) => {
-            lemma_relabel_owner_ref_injective(tc, r, x.owner_ref, y.owner_ref);
-            lemma_relabel_obj_injective(tc, r, x.obj, y.obj);
-        },
-        (APIRequest::GetThenUpdateStatusRequest(x), APIRequest::GetThenUpdateStatusRequest(y)) => {
-            lemma_relabel_owner_ref_injective(tc, r, x.owner_ref, y.owner_ref);
-            lemma_relabel_obj_injective(tc, r, x.obj, y.obj);
-        },
-        (APIRequest::PatchRequest(x), APIRequest::PatchRequest(y)) => {
-            let side = tc.side_of_kind(x.kind);
-            match (x.tests.uid, y.tests.uid) { (Some(u), Some(v)) => { assert((r.uid)(side, u) == (r.uid)(side, v)); }, _ => {} }
-        },
-        (APIRequest::PatchStatusRequest(x), APIRequest::PatchStatusRequest(y)) => {
-            let side = tc.side_of_kind(x.kind);
-            match (x.tests.uid, y.tests.uid) { (Some(u), Some(v)) => { assert((r.uid)(side, u) == (r.uid)(side, v)); }, _ => {} }
-        },
-        _ => {},
-    }
-}
-
-pub proof fn lemma_relabel_list_injective(tc: TwoCluster, r: Relabeling, a: Seq<DynamicObjectView>, b: Seq<DynamicObjectView>)
-    requires
-        injective(r),
-        relabel_list(tc, r, a) == relabel_list(tc, r, b),
-    ensures a.to_set() == b.to_set(),
-{
-    let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
-    let sa = a.to_set().map(f);
-    let sb = b.to_set().map(f);
-    sa.lemma_to_seq_to_set_id();
-    sb.lemma_to_seq_to_set_id();
-    assert(sa =~= sb);
-    assert forall |o: DynamicObjectView| a.to_set().contains(o) <==> b.to_set().contains(o) by {
-        a.to_set().lemma_map_contains(f, f(o));
-        b.to_set().lemma_map_contains(f, f(o));
-        if a.to_set().contains(o) {
-            assert(sa.contains(f(o)));
-            assert(sb.contains(f(o)));
-            let o2 = choose |o2: DynamicObjectView| b.to_set().contains(o2) && f(o) == f(o2);
-            lemma_relabel_obj_injective(tc, r, o, o2);
-        }
-        if b.to_set().contains(o) {
-            assert(sb.contains(f(o)));
-            assert(sa.contains(f(o)));
-            let o2 = choose |o2: DynamicObjectView| a.to_set().contains(o2) && f(o) == f(o2);
-            lemma_relabel_obj_injective(tc, r, o, o2);
-        }
-    }
-    assert(a.to_set() =~= b.to_set());
-}
-
-pub proof fn lemma_relabel_obj_result_injective(tc: TwoCluster, r: Relabeling, a: Result<DynamicObjectView, APIError>, b: Result<DynamicObjectView, APIError>)
-    requires
-        injective(r),
-        relabel_obj_result(tc, r, a) == relabel_obj_result(tc, r, b),
-    ensures a == b,
-{
-    match (a, b) {
-        (Ok(x), Ok(y)) => { lemma_relabel_obj_injective(tc, r, x, y); },
-        _ => {},
+        lemma_relabel_owner_ref_injective(tc, r, o, refs[i]);
     }
 }
 
@@ -532,130 +486,184 @@ pub proof fn lemma_relabel_obj_result_injective(tc: TwoCluster, r: Relabeling, a
 // Stores.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_relabel_store_index(tc: TwoCluster, r: Relabeling, store: StoredState, k: ObjectRef)
+pub proof fn lemma_relabel_store_index<S>(tc: MultiCluster<S>, r: Relabeling<S>, store: StoredState, k: ObjectRef)
     ensures
         relabel_store(tc, r, store).contains_key(k) == store.contains_key(k),
         store.contains_key(k) ==> relabel_store(tc, r, store)[k] == relabel_obj(tc, r, store[k]),
-        relabel_store(tc, r, store).dom() == store.dom(),
-{
-    assert(relabel_store(tc, r, store).dom() =~= store.dom());
-}
-
-pub proof fn lemma_relabel_store_insert(tc: TwoCluster, r: Relabeling, store: StoredState, k: ObjectRef, o: DynamicObjectView)
-    ensures relabel_store(tc, r, store.insert(k, o)) == relabel_store(tc, r, store).insert(k, relabel_obj(tc, r, o)),
-{
-    let lhs = relabel_store(tc, r, store.insert(k, o));
-    let rhs = relabel_store(tc, r, store).insert(k, relabel_obj(tc, r, o));
-    assert forall |j: ObjectRef| lhs.contains_key(j) <==> rhs.contains_key(j) by {
-        lemma_relabel_store_index(tc, r, store.insert(k, o), j);
-        lemma_relabel_store_index(tc, r, store, j);
-    }
-    assert forall |j: ObjectRef| #[trigger] lhs.contains_key(j) implies lhs[j] == rhs[j] by {
-        lemma_relabel_store_index(tc, r, store.insert(k, o), j);
-        lemma_relabel_store_index(tc, r, store, j);
-    }
-    assert(lhs =~= rhs);
-}
-
-pub proof fn lemma_relabel_store_remove(tc: TwoCluster, r: Relabeling, store: StoredState, k: ObjectRef)
-    ensures relabel_store(tc, r, store.remove(k)) == relabel_store(tc, r, store).remove(k),
-{
-    let lhs = relabel_store(tc, r, store.remove(k));
-    let rhs = relabel_store(tc, r, store).remove(k);
-    assert forall |j: ObjectRef| lhs.contains_key(j) <==> rhs.contains_key(j) by {
-        lemma_relabel_store_index(tc, r, store.remove(k), j);
-        lemma_relabel_store_index(tc, r, store, j);
-    }
-    assert forall |j: ObjectRef| #[trigger] lhs.contains_key(j) implies lhs[j] == rhs[j] by {
-        lemma_relabel_store_index(tc, r, store.remove(k), j);
-        lemma_relabel_store_index(tc, r, store, j);
-    }
-    assert(lhs =~= rhs);
-}
-
-
-pub proof fn lemma_relabel_store_contains_key(tc: TwoCluster, r: Relabeling, store: StoredState, k: ObjectRef)
-    ensures relabel_store(tc, r, store).contains_key(k) == store.contains_key(k),
 {
 }
 
-pub proof fn lemma_abs_store_index(tc: TwoCluster, r: Relabeling, s: TwoClusterState, k: ObjectRef)
-    requires stores_sided(tc, s),
-    ensures
-        abs_store(tc, r, s).contains_key(k) == s.store(tc.side_of_kind(k.kind)).resources.contains_key(k),
-        s.store(tc.side_of_kind(k.kind)).resources.contains_key(k)
-            ==> abs_store(tc, r, s)[k] == relabel_obj(tc, r, s.store(tc.side_of_kind(k.kind)).resources[k]),
-        abs_store(tc, r, s).contains_key(k) ==> tc.side_of_kind(abs_store(tc, r, s)[k].kind) == tc.side_of_kind(k.kind)
-            && abs_store(tc, r, s)[k].kind == k.kind,
-{
-    lemma_relabel_store_index(tc, r, s.primary.resources, k);
-    lemma_relabel_store_index(tc, r, s.remote.resources, k);
-}
-
-pub proof fn lemma_abs_store_unchanged(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState)
+// What the union of the stores of `sides` holds under a key: the relabeled
+// object of the store of the key's kind, if that side is one of `sides`.
+proof fn lemma_store_union_index<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, sides: Set<S>, k: ObjectRef)
     requires
-        s_prime.primary.resources == s.primary.resources,
-        s_prime.remote.resources == s.remote.resources,
+        sides.subset_of(tc.sides),
+        stores_keyed(tc, s),
+    ensures ({
+        let side = tc.side_of_kind(k.kind);
+        &&& store_union(tc, r, s, sides).contains_key(k) == (sides.contains(side) && s.store(side).resources.contains_key(k))
+        &&& sides.contains(side) && s.store(side).resources.contains_key(k)
+            ==> store_union(tc, r, s, sides)[k] == relabel_obj(tc, r, s.store(side).resources[k])
+    }),
+    decreases sides.len(),
+{
+    reveal(store_union);
+    let side = tc.side_of_kind(k.kind);
+    if sides.len() > 0 {
+        let x = sides.choose();
+        let rest = sides.remove(x);
+        lemma_store_union_index(tc, r, s, rest, k);
+        lemma_relabel_store_index(tc, r, s.store(x).resources, k);
+        if x != side {
+            assert(!s.store(x).resources.contains_key(k));
+        }
+    }
+}
+
+// The union reads only the stores.
+proof fn lemma_store_union_same_stores<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, sides: Set<S>)
+    requires s_prime.stores == s.stores,
+    ensures store_union(tc, r, s_prime, sides) == store_union(tc, r, s, sides),
+    decreases sides.len(),
+{
+    reveal(store_union);
+    if sides.len() > 0 {
+        lemma_store_union_same_stores(tc, r, s, s_prime, sides.remove(sides.choose()));
+    }
+}
+
+pub proof fn lemma_abs_store_same_stores<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>)
+    requires s_prime.stores == s.stores,
     ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s),
 {
+    lemma_store_union_same_stores(tc, r, s, s_prime, tc.sides);
 }
 
-pub proof fn lemma_abs_store_insert(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, k: ObjectRef, o: DynamicObjectView)
+// The stores stay sided when one of them is replaced by a sided store.
+pub broadcast proof fn lemma_stores_sided_with_store<S>(tc: MultiCluster<S>, s: MultiClusterState<S>, side: S, st: APIServerState)
     requires
         stores_sided(tc, s),
-        tc.side_of_kind(k.kind) == side,
-        s_prime.store(side).resources == s.store(side).resources.insert(k, o),
-        s_prime.store(side.other()).resources == s.store(side.other()).resources,
-    ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s).insert(k, relabel_obj(tc, r, o)),
+        tc.sides.contains(side),
+        store_sided(tc, side, st.resources),
+    ensures #[trigger] stores_sided(tc, MultiClusterState { stores: s.stores.insert(side, st), ..s }),
 {
+    let s_prime = MultiClusterState { stores: s.stores.insert(side, st), ..s };
+    assert(s_prime.stores.dom() =~= tc.sides);
+    assert forall |other: S| #[trigger] tc.sides.contains(other) implies store_sided(tc, other, s_prime.stores[other].resources) by {
+        if other != side { assert(s_prime.stores[other] == s.stores[other]); }
+    }
+}
+
+// The abstraction indexed, needing only that the stores are keyed by side.
+pub proof fn lemma_abs_store_index_keyed<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, k: ObjectRef)
+    requires stores_keyed(tc, s),
+    ensures ({
+        let side = tc.side_of_kind(k.kind);
+        &&& abs_store(tc, r, s).contains_key(k) == (tc.sides.contains(side) && s.store(side).resources.contains_key(k))
+        &&& tc.sides.contains(side) && s.store(side).resources.contains_key(k)
+            ==> abs_store(tc, r, s)[k] == relabel_obj(tc, r, s.store(side).resources[k])
+    }),
+{
+    lemma_store_union_index(tc, r, s, tc.sides, k);
+}
+
+pub proof fn lemma_abs_store_index<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, k: ObjectRef)
+    requires stores_sided(tc, s),
+    ensures ({
+        let side = tc.side_of_kind(k.kind);
+        &&& abs_store(tc, r, s).contains_key(k) == (tc.sides.contains(side) && s.store(side).resources.contains_key(k))
+        &&& tc.sides.contains(side) && s.store(side).resources.contains_key(k)
+            ==> abs_store(tc, r, s)[k] == relabel_obj(tc, r, s.store(side).resources[k])
+        &&& abs_store(tc, r, s).contains_key(k) ==> tc.side_of_kind(abs_store(tc, r, s)[k].kind) == side
+            && abs_store(tc, r, s)[k].kind == k.kind
+    }),
+{
+    lemma_stores_sided_keyed(tc, s);
+    lemma_store_union_index(tc, r, s, tc.sides, k);
+    let side = tc.side_of_kind(k.kind);
+    if tc.sides.contains(side) && s.store(side).resources.contains_key(k) {
+        assert(store_sided(tc, side, s.store(side).resources));
+        lemma_relabel_obj_keeps_identity(tc, r, s.store(side).resources[k]);
+    }
+}
+
+// The stores' contents unchanged on every side: the abstraction is unchanged.
+pub proof fn lemma_abs_store_unchanged<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>)
+    requires
+        stores_sided(tc, s),
+        forall |side: S| #[trigger] tc.sides.contains(side) ==> s_prime.store(side).resources == s.store(side).resources,
+    ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s),
+{
+    lemma_stores_sided_keyed(tc, s);
+    assert(stores_keyed(tc, s_prime));
     let lhs = abs_store(tc, r, s_prime);
-    let rhs = abs_store(tc, r, s).insert(k, relabel_obj(tc, r, o));
-    lemma_relabel_store_insert(tc, r, s.store(side).resources, k, o);
+    let rhs = abs_store(tc, r, s);
     assert forall |j: ObjectRef| lhs.contains_key(j) <==> rhs.contains_key(j) by {
-        lemma_relabel_store_index(tc, r, s.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s.remote.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.remote.resources, j);
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
     }
     assert forall |j: ObjectRef| #[trigger] lhs.contains_key(j) implies lhs[j] == rhs[j] by {
-        lemma_relabel_store_index(tc, r, s.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s.remote.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.remote.resources, j);
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
     }
     assert(lhs =~= rhs);
 }
 
-pub proof fn lemma_abs_store_remove(tc: TwoCluster, r: Relabeling, s: TwoClusterState, s_prime: TwoClusterState, side: Side, k: ObjectRef)
+// A step on `side` inserts under a key of that side and leaves the other stores alone.
+pub proof fn lemma_abs_store_insert<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, k: ObjectRef, o: DynamicObjectView)
     requires
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(k.kind) == side,
-        s_prime.store(side).resources == s.store(side).resources.remove(k),
-        s_prime.store(side.other()).resources == s.store(side.other()).resources,
-    ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s).remove(k),
+        s_prime.store(side).resources == s.store(side).resources.insert(k, o),
+        forall |other: S| #[trigger] tc.sides.contains(other) && other != side ==> s_prime.store(other).resources == s.store(other).resources,
+    ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s).insert(k, relabel_obj(tc, r, o)),
 {
+    lemma_stores_sided_keyed(tc, s);
+    assert(stores_keyed(tc, s_prime));
     let lhs = abs_store(tc, r, s_prime);
-    let rhs = abs_store(tc, r, s).remove(k);
-    lemma_relabel_store_remove(tc, r, s.store(side).resources, k);
+    let rhs = abs_store(tc, r, s).insert(k, relabel_obj(tc, r, o));
     assert forall |j: ObjectRef| lhs.contains_key(j) <==> rhs.contains_key(j) by {
-        lemma_relabel_store_index(tc, r, s.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s.remote.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.remote.resources, j);
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
     }
     assert forall |j: ObjectRef| #[trigger] lhs.contains_key(j) implies lhs[j] == rhs[j] by {
-        lemma_relabel_store_index(tc, r, s.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s.remote.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.primary.resources, j);
-        lemma_relabel_store_index(tc, r, s_prime.remote.resources, j);
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
+    }
+    assert(lhs =~= rhs);
+}
+
+pub proof fn lemma_abs_store_remove<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, s_prime: MultiClusterState<S>, side: S, k: ObjectRef)
+    requires
+        stores_sided(tc, s),
+        tc.sides.contains(side),
+        tc.side_of_kind(k.kind) == side,
+        s_prime.store(side).resources == s.store(side).resources.remove(k),
+        forall |other: S| #[trigger] tc.sides.contains(other) && other != side ==> s_prime.store(other).resources == s.store(other).resources,
+    ensures abs_store(tc, r, s_prime) == abs_store(tc, r, s).remove(k),
+{
+    lemma_stores_sided_keyed(tc, s);
+    assert(stores_keyed(tc, s_prime));
+    let lhs = abs_store(tc, r, s_prime);
+    let rhs = abs_store(tc, r, s).remove(k);
+    assert forall |j: ObjectRef| lhs.contains_key(j) <==> rhs.contains_key(j) by {
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
+    }
+    assert forall |j: ObjectRef| #[trigger] lhs.contains_key(j) implies lhs[j] == rhs[j] by {
+        lemma_abs_store_index_keyed(tc, r, s, j);
+        lemma_abs_store_index_keyed(tc, r, s_prime, j);
     }
     assert(lhs =~= rhs);
 }
 
 // The objects of one namespace and kind in the union are the relabeled objects of
 // that namespace and kind in the store of the kind's side.
-pub proof fn lemma_abs_store_list(tc: TwoCluster, r: Relabeling, s: TwoClusterState, namespace: StringView, kind: Kind)
-    requires stores_sided(tc, s),
+pub proof fn lemma_abs_store_list<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, namespace: StringView, kind: Kind)
+    requires
+        stores_sided(tc, s),
+        tc.sides.contains(tc.side_of_kind(kind)),
     ensures ({
         let sel = |o: DynamicObjectView| {
             &&& o.object_ref().namespace == namespace
@@ -706,7 +714,7 @@ pub proof fn lemma_abs_store_list(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
 // Multisets of messages.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_relabel_msgs_count(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m1: Message)
+pub proof fn lemma_relabel_msgs_count<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>, m1: Message)
     ensures relabel_msgs(tc, r, ms).count(m1) == relabel_preimages(tc, r, ms, m1).len(),
 {
     broadcast use group_multiset_axioms, Multiset::dom_ensures;
@@ -729,7 +737,7 @@ pub proof fn lemma_relabel_msgs_count(tc: TwoCluster, r: Relabeling, ms: Multise
     }
 }
 
-pub proof fn lemma_relabel_msgs_empty(tc: TwoCluster, r: Relabeling)
+pub proof fn lemma_relabel_msgs_empty<S>(tc: MultiCluster<S>, r: Relabeling<S>)
     ensures relabel_msgs(tc, r, Multiset::<Message>::empty()) == Multiset::<Message>::empty(),
 {
     broadcast use group_multiset_axioms;
@@ -743,7 +751,7 @@ pub proof fn lemma_relabel_msgs_empty(tc: TwoCluster, r: Relabeling)
     assert(lhs =~= Multiset::<Message>::empty());
 }
 
-pub proof fn lemma_relabel_msgs_contains(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m: Message)
+pub proof fn lemma_relabel_msgs_contains<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>, m: Message)
     ensures
         ms.contains(m) ==> relabel_msgs(tc, r, ms).contains(relabel_msg(tc, r, m)),
         relabel_msgs(tc, r, ms).contains(m) ==> exists |m2: Message| #[trigger] ms.contains(m2) && relabel_msg(tc, r, m2) == m,
@@ -763,7 +771,7 @@ pub proof fn lemma_relabel_msgs_contains(tc: TwoCluster, r: Relabeling, ms: Mult
     }
 }
 
-pub proof fn lemma_relabel_msgs_insert(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m: Message)
+pub proof fn lemma_relabel_msgs_insert<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>, m: Message)
     ensures relabel_msgs(tc, r, ms.insert(m)) == relabel_msgs(tc, r, ms).insert(relabel_msg(tc, r, m)),
 {
     broadcast use group_multiset_axioms, group_multiset_properties;
@@ -783,7 +791,7 @@ pub proof fn lemma_relabel_msgs_insert(tc: TwoCluster, r: Relabeling, ms: Multis
     assert(lhs =~= rhs);
 }
 
-pub proof fn lemma_relabel_msgs_remove(tc: TwoCluster, r: Relabeling, ms: Multiset<Message>, m: Message)
+pub proof fn lemma_relabel_msgs_remove<S>(tc: MultiCluster<S>, r: Relabeling<S>, ms: Multiset<Message>, m: Message)
     requires ms.contains(m),
     ensures relabel_msgs(tc, r, ms.remove(m)) == relabel_msgs(tc, r, ms).remove(relabel_msg(tc, r, m)),
 {
@@ -830,7 +838,7 @@ pub open spec fn installed_types_ignore_metadata(it: InstalledTypes) -> bool {
             == (it[name].valid_transition)(o, old)
 }
 
-pub proof fn lemma_owner_refs_filter_relabel(tc: TwoCluster, r: Relabeling, refs: Seq<OwnerReferenceView>)
+pub proof fn lemma_owner_refs_filter_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, refs: Seq<OwnerReferenceView>)
     ensures ({
         let p = |o: OwnerReferenceView| o.controller is Some && o.controller->0;
         let g = |x: OwnerReferenceView| relabel_owner_ref(tc, r, x);
@@ -852,7 +860,7 @@ pub proof fn lemma_owner_refs_filter_relabel(tc: TwoCluster, r: Relabeling, refs
     }
 }
 
-pub proof fn lemma_metadata_validity_check_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+pub proof fn lemma_metadata_validity_check_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView)
     ensures metadata_validity_check(relabel_obj(tc, r, o)) == metadata_validity_check(o),
 {
     match o.metadata.owner_references {
@@ -861,17 +869,17 @@ pub proof fn lemma_metadata_validity_check_relabel(tc: TwoCluster, r: Relabeling
     }
 }
 
-pub proof fn lemma_metadata_transition_validity_check_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView, old: DynamicObjectView)
+pub proof fn lemma_metadata_transition_validity_check_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView, old: DynamicObjectView)
     ensures metadata_transition_validity_check(relabel_obj(tc, r, o), relabel_obj(tc, r, old)) == metadata_transition_validity_check(o, old),
 {
 }
 
-pub proof fn lemma_unmarshallable_object_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+pub proof fn lemma_unmarshallable_object_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView)
     ensures unmarshallable_object(relabel_obj(tc, r, o), tc.cluster.installed_types) == unmarshallable_object(o, tc.cluster.installed_types),
 {
 }
 
-pub proof fn lemma_valid_object_ignores_metadata(tc: TwoCluster, o: DynamicObjectView, m: ObjectMetaView)
+pub proof fn lemma_valid_object_ignores_metadata<S>(tc: MultiCluster<S>, o: DynamicObjectView, m: ObjectMetaView)
     requires
         installed_types_ignore_metadata(tc.cluster.installed_types),
         tc.kind_ok(o.kind),
@@ -887,7 +895,7 @@ pub proof fn lemma_valid_object_ignores_metadata(tc: TwoCluster, o: DynamicObjec
     }
 }
 
-pub proof fn lemma_valid_transition_ignores_metadata(tc: TwoCluster, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView)
+pub proof fn lemma_valid_transition_ignores_metadata<S>(tc: MultiCluster<S>, o: DynamicObjectView, old: DynamicObjectView, m: ObjectMetaView, m_old: ObjectMetaView)
     requires
         installed_types_ignore_metadata(tc.cluster.installed_types),
         tc.kind_ok(o.kind),
@@ -904,7 +912,7 @@ pub proof fn lemma_valid_transition_ignores_metadata(tc: TwoCluster, o: DynamicO
     }
 }
 
-pub proof fn lemma_valid_object_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView)
+pub proof fn lemma_valid_object_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView)
     requires
         installed_types_ignore_metadata(tc.cluster.installed_types),
         tc.kind_ok(o.kind),
@@ -913,7 +921,7 @@ pub proof fn lemma_valid_object_relabel(tc: TwoCluster, r: Relabeling, o: Dynami
     lemma_valid_object_ignores_metadata(tc, o, relabel_obj(tc, r, o).metadata);
 }
 
-pub proof fn lemma_valid_transition_relabel(tc: TwoCluster, r: Relabeling, o: DynamicObjectView, old: DynamicObjectView)
+pub proof fn lemma_valid_transition_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, o: DynamicObjectView, old: DynamicObjectView)
     requires
         installed_types_ignore_metadata(tc.cluster.installed_types),
         tc.kind_ok(o.kind),

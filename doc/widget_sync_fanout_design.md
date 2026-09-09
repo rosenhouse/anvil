@@ -33,9 +33,10 @@ assumed.
   binding). R1, R2, R3 and R3s are stated with the kind, the selector and
   the bindings as parameters; distinctness of the model kinds and their
   assignment to sides are hypotheses.
-- The two-store refinement stays at one remote side and is applied per
-  binding. What that leaves unstated is section 5.3; the (n+1)-store
-  refinement is a follow-up.
+- The refinement of the main design gives one store per cluster: the primary,
+  and one per binding (section 5.2). R1 to R3s and the janitor's delete
+  soundness hold for every (kind, binding) of a whole deployment on that model
+  (section 5.3).
 
 ## 1. Bindings and cluster selection
 
@@ -391,7 +392,7 @@ reconcile is the one of the main design, section 1.2, with two changes:
   guarded by the same test; that guard is unreachable at run time (Init already
   refused) and is there so that every Create the model emits names a mirror kind
   of `k.bindings` for *any* triggering object, which is what `models_ok` of the
-  two-store refinement asks (section 5.2).
+  multi-store refinement asks (section 5.2).
 - The mirror key is `inner_key(k, outer) = (inner_kind(k, binding_of(k, outer)), ns, name)`,
   where `binding_of(k, outer) = (outer.metadata.namespace, cluster_of(outer))` --
   the mirror kind carries the namespace as well as the cluster name, because a
@@ -589,104 +590,124 @@ literals are used for.
   distinct ids; the relies of section 3.2 of the main design hold of every
   other id, now stated per inner kind.
 
-### 5.2 Two stores, per binding
+### 5.2 One store per cluster
 
-The two-store refinement is applied per binding: for binding `b`, the
-remote kinds are the inner kinds `{inner_kind(k, b) | k}`. The sync
-controller and the janitors of the other bindings appear on the primary
-side as other controllers; they meet the refinement's hypotheses 1 to 3
-(they are the same reconcilers, whose commutation lemmas are proved once
-with the data as parameters). R1 to R3s and the delete soundness are then
-read on two-store executions per binding, as today.
+The refinement of section 2.2 of the main design is applied with one store per
+side: the primary cluster, and the inner cluster of every binding. `side_of`
+routes a model kind to the cluster its name records (`cluster_of_kind`,
+`kubernetes_api_objects/spec/model_kind.rs`), so the outer copies of every kind
+live in the primary store and the mirrors of binding `b` in `b`'s store.
+`widget_multi_cluster_for(cluster, bindings)` is that model for a one-store
+cluster and a set of bindings; a kind whose name records a cluster outside
+`bindings` -- a mirror kind nobody serves, never installed -- is routed to the
+primary store, which keeps the routing total.
 
-Three hypotheses the fixed pair did not need appear here. First, the folded
+`widget_multi_cluster_theorem` (`widget_sync_controller/proof/multi_cluster.rs`)
+states R1 to R3s and the janitor's delete soundness for one (kind, binding) on
+that model, for any cluster meeting the refinement's hypotheses. R3s is read
+there with its one-store premise, `bound_parent_absent`, which fixes the mirror
+key's kind; the delete-soundness clause is read with the conjuncts of
+`parent_absent_forever` (the parent is an outer copy of `k` that selects `b`'s
+cluster), not over every stored object.
+
+Two hypotheses the fixed pair did not need appear here. First, the folded
 one-store cluster installs the mirror kind of every binding of `k.bindings`,
 not only of `b`: the sync controller of `k` serves all of them, so a Create it
 sends for an outer copy of another *served* binding must still name a known kind
-(`TwoCluster::request_ok`, which `models_ok` asks of the reconcile model as a
+(`MultiCluster::request_ok`, which `models_ok` asks of the reconcile model as a
 function, for every object it could be triggered by, not only the stored ones).
-The mirrors of the other served bindings then live on the primary side, which is
-what the paragraph above says. Second, the selector of `k` must be a *field* of
-the spec, not `metadata.name` (`sk.selector is Field`): the refinement asks that
-the API server's validation not read metadata
-(`installed_types_ignore_metadata`), and the immutability rule of a `name`
-selector reads `metadata.name`. That restriction is an artifact of how the model
-states validation, not a limitation of the system: a `name` selector is immutable
-because Kubernetes never renames an object, so the real API server enforces it
-with no rule at all, and it is only the model's reading of the rule as a
-`valid_transition` that has to touch metadata. Third, the theorem is read for one
-binding `b ∈ k.bindings` at a time: the ESRs it consumes and the D3 it assumes
-are `b`'s, only `b`'s mirrors are remote, and the janitors of the other bindings
-enter as other controllers, which is what "per binding" means.
+Second, the selector of `k` must be a *field* of the spec, not `metadata.name`
+(`sk.selector is Field`): the refinement asks that the API server's validation
+not read metadata (`installed_types_ignore_metadata`), and the immutability rule
+of a `name` selector reads `metadata.name`. That restriction is an artifact of
+how the model states validation, not a limitation of the system: a `name`
+selector is immutable because Kubernetes never renames an object, so the real
+API server enforces it with no rule at all, and it is only the model's reading
+of the rule as a `valid_transition` that has to touch metadata. It is a real
+cost: the deployment of section 4 configures `Gadget` with a `name` selector, so
+no multi-store theorem is read for that configuration, and no instance of the
+deployment theorem of section 5.3 names two kinds. The one-store theorems, which
+do not ask for a field selector, cover both kinds.
 
-`widget_two_cluster_theorem` (`widget_sync_controller/proof/two_cluster.rs`)
-is that statement, for any cluster meeting the hypotheses, and it is proved.
-R3s is read there with its one-store premise, `bound_parent_absent`, which
-fixes the mirror key's kind; the two-store delete-soundness clause is read
-with the conjuncts of `parent_absent_forever` (the parent is an outer copy of
-`k` that selects `b`'s cluster), not over every stored object.
+The theorem is still read for one binding `b` at a time -- the ESRs it consumes
+and the D3 it assumes are `b`'s, and the janitors of the other bindings enter as
+other controllers -- but that is the statement, not the model: every binding has
+its own store.
 
 What makes the first hypothesis satisfiable is the finite binding set of section
 3.2. The sync reconciler serves `k.bindings`: an outer copy whose binding is
 outside the set is refused at `Init` with `Failed(InnerUnreachable)`, before any
 request, and the Create of a mirror carries the same guard, so the mirror kinds
-the model can write are exactly `{inner_kind(k, b) | b ∈ k.bindings}` -- as many
+the model can write are exactly `{inner_kind(k, b) | b in k.bindings}` -- as many
 as the bindings, and `Set` is finite. `all_inner_kinds_installed` is that finite
 conjunction, and `widget_cluster_with_others` and `widget_pair_cluster` take
-`bnd ∈ k.bindings`. The closed
-statements are therefore closed for *any* configuration, not only the demo's.
-`lemma_widget_is_pair_cluster` and `widget_instance_two_cluster_theorem`
-take `k`, `bnd ∈ k.bindings`, two ids and
-the schema, under `sync_kind_ok(k)`, `binding_ok(bnd)` and a field selector, and
-read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
+`bnd` in `k.bindings`. The closed statements are therefore closed for *any*
+configuration, not only the demo's. `lemma_widget_is_pair_cluster` and
+`widget_instance_multi_cluster_theorem` take `k`, `bnd` in `k.bindings`, two ids
+and the schema, under `sync_kind_ok(k)`, `bindings_ok(k)` and a field selector,
+and read the theorem on `widget_pair_cluster_for(k, bnd, spec_ok, sync_id,
 janitor_id)`: the model kinds of the whole configuration installed, the sync
 controller, and the janitor of `bnd`.
 `lemma_widget_disturbed_is_cluster_with_others` and
-`widget_disturbed_two_cluster_theorem` do the same for the cluster with the
-disturber. `widget_demo_two_cluster_theorem` and
-`widget_demo_disturbed_two_cluster_theorem` are the demo's one-line
-applications. Those clusters install exactly `k.outer_kind` and `inner_kind(k,
-b)` for `b ∈ k.bindings`, and they are the satisfiability witness for every
-hypothesis of the general theorem.
+`widget_disturbed_multi_cluster_theorem` do the same for the cluster with the
+disturber. `widget_demo_multi_cluster_theorem` and
+`widget_demo_disturbed_multi_cluster_theorem` are the demo's one-line
+applications.
 
-Only the janitor of `bnd` runs in those clusters, and that is where the closed
-statement says what it is about: `widget_pair_cluster_for` and its disturbed twin
-register the sync controller of `k` and exactly one janitor, the janitor of
-`bnd`. `widget_instance_two_cluster_theorem` and
-`widget_disturbed_two_cluster_theorem` are therefore statements about a cluster
-running one binding's janitor, whatever `k.bindings` holds. A configuration whose other
-bindings' janitors also run needs `widget_other_controller_ok` of each of them,
-which nothing proves yet: they are the same reconciler, so their commutation
-lemma is already the one the refinement asks for, but their guarantee has not
-been carried into the one-store model as an invariant the way
-`lemma_relies_hold_of_from_welder` does for the disturber. That is what "the
-janitors of the other bindings enter as other controllers" above still costs, and
-it is what the multi-binding two-store reading waits on.
+### 5.3 A whole deployment
 
-### 5.3 What that leaves unstated
+Those clusters register one janitor. `widget_kinds_multi_cluster_theorem`
+(`widget_sync_controller/proof/multi_cluster_kinds.rs`) states R1 to R3s and the
+delete soundness for *every* (kind, binding) of a deployment, on one model that
+gives every binding its own store: for a map from configured kinds to their
+setups and a set of bindings covering theirs (`bindings_cover`), under
+`kinds_deployed` -- each kind
+well formed, with well-formed bindings, a field selector and disjoint ids; its
+kinds installed; and the cluster running exactly the deployment's controllers
+and no others.
 
-The per-binding two-store theorem for `b` merges every other inner cluster
-into the outer cluster's store, with one uid counter. It therefore never
-considers an execution in which two inner clusters have independent
-counters at the same time. Nothing the pair does compares uids across two
-inner clusters: the sync controller compares an outer uid with the
-annotation on the mirror of one binding, and the janitor of a binding
-compares its mirror's annotation with outer uids. So no behaviour of the
-controllers is uncovered; what is missing is one theorem about the
-(n+1)-cluster system as a whole, which would follow from an (n+1)-store
-refinement. That refinement generalizes `TwoCluster` to a family of stores
-indexed by cluster id and redoes `kubernetes_cluster/proof/two_cluster/`
-(about 4,000 lines) with the side as an index. It is filed as a follow-up
-and is a natural continuation, not a rework: the per-binding theorems are
-the pieces it assembles.
+The other controllers of the deployment are admitted, not assumed: the sync
+controller and janitors of every other kind, and the janitors of the other
+bindings of the same kind. Nothing else runs: `kinds_deployed` fixes the
+cluster's controllers to be the deployment's, where `widget_multi_cluster_theorem`
+admits any other controller meeting its hypotheses. So this cluster, like the
+concrete instances of the main design, section 3.4, exercises neither R2's
+premise nor D3 -- nothing in it writes an inner status or a finalizer. Each
+is admitted by its model, which sends only requests the refinement handles and
+commutes with the relabeling (`lemma_sync_model_ok`, `lemma_janitor_model_ok`
+and the commutation lemmas, all already stated with the kind and the binding as
+data), and by its guarantee, an invariant of the one-store model under init and
+next alone (`lemma_always_widget_sync_guarantee`,
+`lemma_always_widget_janitor_guarantee`), which implies the pair's relies
+through the cross implications of `composition/widget_two_kinds.rs`. No Welder
+composition is needed for it, and no fairness of the other controllers is
+assumed. `widget_fanout_demo_multi_cluster_theorem` is the one-kind,
+two-binding instance: three controllers, three stores.
 
-That refinement and the multi-binding two-store reading of section 5.2 --
-`widget_other_controller_ok` for the janitors of the other bindings -- are what
-is outstanding. Everything else this document designs is in the branch.
+Two things the theorem does not give. It is read per (kind, binding), so
+nothing compares two inner clusters -- though nothing the controllers do
+compares them either: the sync controller compares an outer uid with the
+annotation on the mirror of one binding, and the janitor of a binding compares
+its mirror's annotation with outer uids. No instance of the theorem names two
+kinds, because the demo's second kind selects its cluster by `metadata.name`;
+writing one means dropping the field-selector hypothesis of section 5.2, which
+in turn means restating the immutability rule so that it does not read
+metadata.
 
 ### 5.4 Assumptions
 
 The assumptions of the main design, section 3.5, plus:
+
+- Every bound cluster's API server is fair, and request dropping stops
+  everywhere at once. The multi-store model has one `req_drop_enabled`, and the
+  fairness hypothesis of a theorem read for one binding asks weak fairness of
+  the API server of *every* side. So a workload cluster that never answers again
+  falsifies the hypothesis for the healthy bindings too: the theorems say what
+  converges once the whole fleet is reachable, not what one binding does while
+  another is down. Nothing the controller does couples the bindings -- a
+  degraded binding is answered `Timeout` and requeued, and the process serves
+  the others (section 1.4) -- so this is a limit of the statement, not of the
+  system.
 
 - The set of bound clusters is constant over the execution the theorems speak
   about. The reconciler value of one reconcile is a snapshot (section 3.2), but

@@ -1,52 +1,51 @@
 // The API server of one side, seen through the abstraction, is the one-store API
-// server: each handler applied to a relabeled request on the union of the stores
+// server: each handler applied to a relabeled request on the abstract store
 // gives the relabeled result of the handler on the request's store, provided the
 // counter the store would allocate relabels to the global counter.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
-use crate::kubernetes_cluster::proof::two_cluster::relabel::*;
+use crate::kubernetes_cluster::proof::multi_cluster::relabel::*;
 use crate::kubernetes_cluster::spec::{
-    api_server::state_machine::*, api_server::types::*, cluster::*, message::*, two_cluster::*,
+    api_server::state_machine::*, api_server::types::*, cluster::*, message::*, multi_cluster::*,
 };
 use crate::vstd_ext::string_view::*;
 use vstd::{map_lib::*, multiset::*, prelude::*, seq_lib::*, set_lib::*};
 
 verus! {
 
+broadcast use lemma_stores_sided_with_store;
+
 // The hypotheses every commutation lemma shares.
-pub open spec fn relabel_hyps(tc: TwoCluster, r: Relabeling) -> bool {
-    &&& injective(r)
+pub open spec fn relabel_hyps<S>(tc: MultiCluster<S>, r: Relabeling<S>) -> bool {
+    &&& tc.wf()
+    &&& injective(tc, r)
     &&& installed_types_ignore_metadata(tc.cluster.installed_types)
     &&& installed_types_coherent(tc.cluster.installed_types)
 }
 
 // s with the API server state of `side` replaced.
-pub open spec fn with_store(s: TwoClusterState, side: Side, st: APIServerState) -> TwoClusterState {
-    TwoClusterState {
-        primary: if (side is Primary) { st } else { s.primary },
-        remote: if (side is Remote) { st } else { s.remote },
-        ..s
-    }
+pub open spec fn with_store<S>(s: MultiClusterState<S>, side: S, st: APIServerState) -> MultiClusterState<S> {
+    MultiClusterState { stores: s.stores.insert(side, st), ..s }
 }
 
 // The global counters after a step that takes the store of `side` from s.store(side) to st.
-pub open spec fn uid_after(s: TwoClusterState, side: Side, st: APIServerState, uid_next: Uid) -> Uid {
+pub open spec fn uid_after<S>(s: MultiClusterState<S>, side: S, st: APIServerState, uid_next: Uid) -> Uid {
     uid_next + (st.uid_counter - s.store(side).uid_counter)
 }
 
-pub open spec fn rv_after(s: TwoClusterState, side: Side, st: APIServerState, rv_next: ResourceVersion) -> ResourceVersion {
+pub open spec fn rv_after<S>(s: MultiClusterState<S>, side: S, st: APIServerState, rv_next: ResourceVersion) -> ResourceVersion {
     rv_next + (st.resource_version_counter - s.store(side).resource_version_counter)
 }
 
 // If the step allocates from a counter of the store, the value it allocates
 // relabels to the global counter.
-pub open spec fn alloc_compatible(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, st: APIServerState, uid_next: Uid, rv_next: ResourceVersion) -> bool {
+pub open spec fn alloc_compatible<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, st: APIServerState, uid_next: Uid, rv_next: ResourceVersion) -> bool {
     &&& st.uid_counter > s.store(side).uid_counter ==> (r.uid)(side, s.store(side).uid_counter) == uid_next
     &&& st.resource_version_counter > s.store(side).resource_version_counter ==> (r.rv)(side, s.store(side).resource_version_counter) == rv_next
 }
 
-pub open spec fn abs_after(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, st: APIServerState, uid_next: Uid, rv_next: ResourceVersion) -> APIServerState {
+pub open spec fn abs_after<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, st: APIServerState, uid_next: Uid, rv_next: ResourceVersion) -> APIServerState {
     abs_api_server(tc, r, with_store(s, side, st), uid_after(s, side, st, uid_next), rv_after(s, side, st, rv_next))
 }
 
@@ -54,9 +53,10 @@ pub open spec fn abs_after(tc: TwoCluster, r: Relabeling, s: TwoClusterState, si
 // Reads.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_get_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: GetRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_get_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: GetRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.key.kind) == side,
     ensures ({
         handle_get_request(req, abs_api_server(tc, r, s, uid_next, rv_next))
@@ -66,9 +66,10 @@ pub proof fn lemma_get_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState
     lemma_abs_store_index(tc, r, s, req.key);
 }
 
-pub proof fn lemma_list_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: ListRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_list_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: ListRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.kind) == side,
     ensures ({
         handle_list_request(req, abs_api_server(tc, r, s, uid_next, rv_next))
@@ -91,10 +92,11 @@ pub proof fn lemma_list_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterStat
 // Create and delete.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_create_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: CreateRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_create_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: CreateRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.obj.kind) == side,
         tc.request_ok(APIRequest::CreateRequest(req)),
         alloc_compatible(tc, r, s, side, handle_create_request(tc.cluster.installed_types, req, s.store(side)).0, uid_next, rv_next),
@@ -113,6 +115,7 @@ pub proof fn lemma_create_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     let obj1 = relabel_obj(tc, r, obj);
     let req1 = CreateRequest { obj: obj1, ..req };
     let (s1, resp) = handle_create_request(it, req, st);
+    if s1.resources == s.store(side).resources { lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1)); }
     lemma_relabel_obj_keeps_identity(tc, r, obj);
     lemma_unmarshallable_object_relabel(tc, r, obj);
     let key = obj.with_namespace(req.namespace).object_ref();
@@ -166,10 +169,11 @@ pub proof fn lemma_create_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     }
 }
 
-pub proof fn lemma_delete_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: DeleteRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_delete_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: DeleteRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.key.kind) == side,
         alloc_compatible(tc, r, s, side, handle_delete_request(req, s.store(side)).0, uid_next, rv_next),
     ensures ({
@@ -183,6 +187,7 @@ pub proof fn lemma_delete_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     let a = abs_api_server(tc, r, s, uid_next, rv_next);
     let req1 = DeleteRequest { preconditions: relabel_preconditions(r, side, req.preconditions), ..req };
     let (s1, resp) = handle_delete_request(req, st);
+    if s1.resources == s.store(side).resources { lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1)); }
     lemma_abs_store_index(tc, r, s, req.key);
     assert(delete_request_admission_check(req1, a) == delete_request_admission_check(req, st)) by {
         if st.resources.contains_key(req.key) && req.preconditions is Some {
@@ -220,10 +225,11 @@ pub proof fn lemma_delete_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
 // Update and update status.
 // ---------------------------------------------------------------------------
 
-pub proof fn lemma_update_admission_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, name: StringView, namespace: StringView, obj: DynamicObjectView, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_update_admission_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, name: StringView, namespace: StringView, obj: DynamicObjectView, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(obj.kind) == side,
     ensures
         update_request_admission_check_helper(tc.cluster.installed_types, name, namespace, relabel_obj(tc, r, obj), abs_api_server(tc, r, s, uid_next, rv_next))
@@ -247,10 +253,11 @@ pub proof fn lemma_update_admission_relabel(tc: TwoCluster, r: Relabeling, s: Tw
     }
 }
 
-pub proof fn lemma_update_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: UpdateRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_update_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: UpdateRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.obj.kind) == side,
         tc.object_ok(req.obj),
         alloc_compatible(tc, r, s, side, handle_update_request(tc.cluster.installed_types, req, s.store(side)).0, uid_next, rv_next),
@@ -267,6 +274,7 @@ pub proof fn lemma_update_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     let a = abs_api_server(tc, r, s, uid_next, rv_next);
     let req1 = UpdateRequest { obj: relabel_obj(tc, r, req.obj), ..req };
     let (s1, resp) = handle_update_request(it, req, st);
+    if s1.resources == s.store(side).resources { lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1)); }
     let key = req.key();
     assert(req1.key() == key);
     lemma_update_admission_relabel(tc, r, s, side, req.name, req.namespace, req.obj, uid_next, rv_next);
@@ -309,10 +317,11 @@ pub proof fn lemma_update_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     }
 }
 
-pub proof fn lemma_update_status_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, req: UpdateStatusRequest, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_update_status_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, req: UpdateStatusRequest, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         tc.side_of_kind(req.obj.kind) == side,
         alloc_compatible(tc, r, s, side, handle_update_status_request(tc.cluster.installed_types, req, s.store(side)).0, uid_next, rv_next),
     ensures ({
@@ -328,6 +337,7 @@ pub proof fn lemma_update_status_relabel(tc: TwoCluster, r: Relabeling, s: TwoCl
     let a = abs_api_server(tc, r, s, uid_next, rv_next);
     let req1 = UpdateStatusRequest { obj: relabel_obj(tc, r, req.obj), ..req };
     let (s1, resp) = handle_update_status_request(it, req, st);
+    if s1.resources == s.store(side).resources { lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1)); }
     let key = req.key();
     assert(req1.key() == key);
     lemma_update_admission_relabel(tc, r, s, side, req.name, req.namespace, req.obj, uid_next, rv_next);
@@ -369,10 +379,11 @@ pub proof fn lemma_update_status_relabel(tc: TwoCluster, r: Relabeling, s: TwoCl
 // The message-level handlers.
 // ---------------------------------------------------------------------------
 
-proof fn lemma_etcd_get(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_get<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -395,10 +406,11 @@ proof fn lemma_etcd_get(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side:
     lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1));
 }
 
-proof fn lemma_etcd_list(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_list<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -421,10 +433,11 @@ proof fn lemma_etcd_list(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side
     lemma_abs_store_unchanged(tc, r, s, with_store(s, side, s1));
 }
 
-proof fn lemma_etcd_create(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_create<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -446,10 +459,11 @@ proof fn lemma_etcd_create(tc: TwoCluster, r: Relabeling, s: TwoClusterState, si
     lemma_create_relabel(tc, r, s, side, req, uid_next, rv_next);
 }
 
-proof fn lemma_etcd_delete(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_delete<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -471,10 +485,11 @@ proof fn lemma_etcd_delete(tc: TwoCluster, r: Relabeling, s: TwoClusterState, si
     lemma_delete_relabel(tc, r, s, side, req, uid_next, rv_next);
 }
 
-proof fn lemma_etcd_update(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_update<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -496,10 +511,11 @@ proof fn lemma_etcd_update(tc: TwoCluster, r: Relabeling, s: TwoClusterState, si
     lemma_update_relabel(tc, r, s, side, req, uid_next, rv_next);
 }
 
-proof fn lemma_etcd_update_status(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_update_status<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -521,10 +537,11 @@ proof fn lemma_etcd_update_status(tc: TwoCluster, r: Relabeling, s: TwoClusterSt
     lemma_update_status_relabel(tc, r, s, side, req, uid_next, rv_next);
 }
 
-proof fn lemma_etcd_get_then_delete(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_get_then_delete<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -564,10 +581,11 @@ proof fn lemma_etcd_get_then_delete(tc: TwoCluster, r: Relabeling, s: TwoCluster
     }
 }
 
-proof fn lemma_etcd_get_then_update(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_get_then_update<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -627,10 +645,11 @@ proof fn lemma_etcd_get_then_update(tc: TwoCluster, r: Relabeling, s: TwoCluster
     }
 }
 
-proof fn lemma_etcd_get_then_update_status(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_get_then_update_status<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -686,10 +705,11 @@ proof fn lemma_etcd_get_then_update_status(tc: TwoCluster, r: Relabeling, s: Two
     }
 }
 
-proof fn lemma_etcd_patch(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_patch<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -734,10 +754,11 @@ proof fn lemma_etcd_patch(tc: TwoCluster, r: Relabeling, s: TwoClusterState, sid
     }
 }
 
-proof fn lemma_etcd_patch_status(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+proof fn lemma_etcd_patch_status<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
@@ -782,10 +803,11 @@ proof fn lemma_etcd_patch_status(tc: TwoCluster, r: Relabeling, s: TwoClusterSta
     }
 }
 
-pub proof fn lemma_transition_by_etcd_relabel(tc: TwoCluster, r: Relabeling, s: TwoClusterState, side: Side, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
+pub proof fn lemma_transition_by_etcd_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, side: S, msg: Message, uid_next: Uid, rv_next: ResourceVersion)
     requires
         relabel_hyps(tc, r),
         stores_sided(tc, s),
+        tc.sides.contains(side),
         msg.content is APIRequest,
         tc.side_of_msg(msg) == side,
         tc.request_ok(msg.content->APIRequest_0),
