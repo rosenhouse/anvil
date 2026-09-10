@@ -957,9 +957,10 @@ kind testbed (#14), and the pass that makes the branch reviewable upstream
 
 Out of scope by decision: a verified inner controller, so the sync controller
 stays agnostic to the inner side and D3 remains an assumption; with it, the
-owner-less transactional update that composing against one would need; and a
-spec projection for inner-owned fields, since no spec field is owned by the
-inner side.
+owner-less transactional update that composing against one would need; a spec
+projection for inner-owned fields, since no spec field is owned by the inner
+side; external compute of any kind; and operability beyond what section 4
+lists.
 
 An out-of-band edit that strips a mirror's identity stays excluded: the design
 refuses to recover from it.

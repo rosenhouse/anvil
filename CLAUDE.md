@@ -1,5 +1,13 @@
 # Working in this repository
 
+Work on the Widget sync example happens as pull requests against
+`gabe/sync-controller`. `main` tracks upstream.
+
+Issue #49 is the register of what the formal work does not cover. It says which
+gaps need a decision from the project owner before any code. Read it before
+starting work there, and do not reverse a documented design decision on your
+own.
+
 ## Attribution of GitHub posts
 
 Anything posted to GitHub from a Claude session appears under the repository
