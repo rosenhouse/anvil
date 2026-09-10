@@ -71,7 +71,7 @@ reconciler refuses to write an inner object it does not own.
 
 - No owner references across clusters: the inner garbage collector would
   delete an object whose owner does not exist there.
-- No finalizers by either reconciler. Every action is re-convergent and outer
+- Neither reconciler uses finalizers. Every action is re-convergent and outer
   deletion never blocks on a partition. The inner implementation may put its
   own finalizers on mirrors; the janitor's Delete then stamps a deletion
   timestamp and the object lingers until the inner side releases it (D3).
@@ -89,8 +89,9 @@ reconciler refuses to write an inner object it does not own.
 
 ### 1.2 The sync reconciler
 
-Triggered by an outer `Widget` with generation `g`, spec `σ`, uid `u`, and by
-same-named inner `Widget`s (a latency optimization; liveness rests on requeue).
+An outer `Widget` with generation `g`, spec `σ` and uid `u` triggers the sync
+reconciler, as does a same-named inner `Widget` (a latency optimization;
+liveness rests on requeue).
 
 ```
 Init
@@ -156,7 +157,7 @@ rule.
 
 ### 1.3 The janitor
 
-Triggered by an inner `Widget`.
+An inner `Widget` triggers the janitor.
 
 ```
 Init
@@ -565,8 +566,8 @@ remainder of a status that was never written is the shape's empty remainder,
 
 Everything the pair used to trust about its own wrappers is now the shape's,
 and lives in `kubernetes_api_objects`, where anything else generic over kinds
-shares it. That inventory, which
-`tools/check-widget-exec-hygiene.sh` pins file by file:
+shares it. `tools/check-widget-exec-hygiene.sh` pins that inventory file by
+file:
 
 | File | What is trusted there |
 |---|---|
@@ -591,7 +592,7 @@ whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
 `observedGeneration` (G-gen), and whose condition list is those three and
-nothing else, in that order (G-shape). Nothing else.
+nothing else, in that order (G-shape). It sends nothing else.
 
 (G-shape) also relates the three to each other. Each is `True` or `False`.
 `Ready` is `True` only when `Synced` is, and never at the same time as
@@ -613,8 +614,9 @@ finding 16 disputes: a workload reporting `Ready=Unknown` is reported `False`.
 (G-shape) states that merge rather than endorsing it, so changing it changes the
 guarantee.
 
-**Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
-mirror's namespace, or a `Delete` of the mirror with a uid precondition.
+**Janitor** (`widget_janitor_guarantee`). A request sent while reconciling a
+mirror is a `List` of outer copies in the mirror's namespace, or a `Delete` of
+the mirror with a uid precondition.
 
 ### 3.2 Relies
 
@@ -632,7 +634,8 @@ mirror.
 `Create` of the inner kind at `ns/n` is `make_inner(outer)` for an outer copy
 at `Outer{ns,n}` with a bound uid; updates keep identity.
 
-**Sync, on the janitor.** The janitor's guarantee, not the anonymous rely. The
+**Sync, on the janitor.** The sync reconciler relies on the janitor's
+guarantee, not on the anonymous rely. The
 sync spec's `safety_partial_rely` is a function of the other controller's id
 and names the janitor's id. What the sync proof needs beyond the guarantee, that
 a janitor `Delete` in flight targets an object whose parent is absent for good,
@@ -892,11 +895,10 @@ instantiated at every state the solver sees. A lemma that reads a conjunct of
 ## 8. Future work
 
 #49 is the register of what the formal work does not cover, and which of those
-gaps need a decision before code. Open besides it: the e2e checks that need the
-kind testbed (#30), and the pass that makes the branch reviewable upstream
-(#16).
+gaps need a decision before code. Two other issues are open: the e2e checks that need the kind testbed (#30), and
+the pass that makes the branch reviewable upstream (#16).
 
-Out of scope by decision: a verified inner controller, so the sync controller
+The following stay out of scope by decision: a verified inner controller, so the sync controller
 stays agnostic to the inner side and D3 remains an assumption; with it, the
 owner-less transactional update that composing against one would need; a spec
 projection for inner-owned fields, since no spec field is owned by the inner

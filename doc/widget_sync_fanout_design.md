@@ -56,7 +56,7 @@ A configured kind carries a **cluster selector**, one of:
   shape of Cluster API's `Cluster` object itself, and it is immutable by
   construction.
 
-No templating, no other metadata field. `cluster_of(obj)` is the selected
+The selector supports no templating and no other metadata field. `cluster_of(obj)` is the selected
 cluster name, `None` when the field is missing, which the boot check makes
 impossible for stored objects but the model does not assume.
 
@@ -160,8 +160,8 @@ cannot violate anything the proofs say. The claim only ever withholds
 requests; a refused binding is a binding whose every request fails, which
 the model covers.
 
-What the claim does not cover: two outer clusters with the same
-`kube-system` uid (a cloned management cluster). The override flag exists
+The claim does not cover two outer clusters with the same `kube-system` uid (a
+cloned management cluster). The override flag exists
 for that case.
 
 ### 1.4 Access check and readiness
@@ -184,7 +184,7 @@ The binary takes the kinds at boot:
 widget_sync_controller run --kind anvil.dev/v1/Widget:field:spec.clusterName --kind anvil.dev/v1/Gadget:name
 ```
 
-`<group>/<version>/<Kind>:<selector>`, repeated. Discovery in the outer
+The flag takes `<group>/<version>/<Kind>:<selector>` and may be repeated. Discovery in the outer
 cluster resolves the plural and confirms the kind is served and
 namespaced. `export` prints the demo CRDs.
 
@@ -332,7 +332,7 @@ which is schema parity stated as a hypothesis.
 
 ### 2.4 The registry
 
-Exec side, trusted. Built at boot from the configured kinds and the
+The registry lives on the exec side and is trusted. It is built at boot from the configured kinds and the
 discovered `ApiResource`s. It is the one place that ties a runtime kind and
 cluster to a model kind:
 
@@ -403,7 +403,7 @@ two entry points rather than one overloaded `reconcile_with`:
 
 ### 3.2 The sync reconciler
 
-One controller per kind, triggered by outer objects of that kind. Its
+The sync reconciler is one controller per kind, triggered by outer objects of that kind. Its
 reconcile is the one of the main design, section 1.2, with two changes:
 
 - At `Init`, `cluster_of(outer)` is read. `None` (the selector field is
@@ -444,7 +444,7 @@ mirrored in place of the named fields.
 
 ### 3.3 The janitor
 
-One controller per (kind, binding), triggered by mirrors of the binding's
+The janitor is one controller per (kind, binding), triggered by mirrors of the binding's
 inner kind. Its reconcile is the one of the main design, section 1.3, with
 one change: the parent is listed when some listed outer object has the
 mirror's parent uid **and** `cluster_of` equal to the binding's cluster
@@ -600,7 +600,7 @@ The statements of the main design, section 3.3, with parameters:
   is one of the four framework kinds; `core_holds_for` is its one-kind form
   and `core_holds` the demo's instance.
 
-Hypotheses added to the theorems, in place of the lemmas that today prove
+The theorems carry these hypotheses in place of the lemmas that today prove
 them from the literal strings. `sync_kind_ok(k)` and `binding_ok(b)` are real
 hypotheses of every statement that needs distinctness -- of the general theorems
 and of the closed ones alike, since the closed ones are now stated for any
@@ -702,7 +702,7 @@ composition is needed for it, and no fairness of the other controllers is
 assumed. `widget_fanout_demo_multi_cluster_theorem` is the one-kind,
 two-binding instance: three controllers, three stores.
 
-Three things the theorem does not give. It is read per (kind, binding), so
+Three things stay outside the theorem. It is read per (kind, binding), so
 nothing compares two inner clusters -- though nothing the controllers do
 compares them either: the sync controller compares an outer uid with the
 annotation on the mirror of one binding, and the janitor of a binding compares
@@ -753,10 +753,9 @@ The assumptions of the main design, section 3.5, plus:
   and leaves its mirrors in a cluster nothing of ours can reach, which is the
   case section 3.3 already says nothing about.
 - Each binding is its own inner cluster: no two bindings reach the same
-  API server. Enforced operationally by the claim (section 1.3).
-- Schema parity per kind between the outer cluster and every inner
-  cluster, and the shape of section 2.2 not shrinking while the
-  controller runs. The immutability rule on the selector field (section 1.1) is
+  API server. The claim enforces this operationally (section 1.3).
+- Every inner cluster keeps schema parity with the outer cluster per kind, and
+  the shape of section 2.2 does not shrink while the controller runs. The immutability rule on the selector field (section 1.1) is
   part of that parity, not a property of the outer CRD alone: the theorems
   install the outer kind and every inner kind with the same
   `synced_installed_type(spec_ok, selector)`, whose `valid_transition` *is* the
