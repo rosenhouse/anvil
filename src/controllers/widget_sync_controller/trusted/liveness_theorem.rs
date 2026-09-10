@@ -164,6 +164,56 @@ pub open spec fn status_synced(k: SyncKind, outer: SyncedObjectView, settled: Sy
     }
 }
 
+// D4: the inner implementation eventually settles. Once the outer copy is stable
+// and its mirror carries the copy's spec, the implementation running in the inner
+// cluster eventually reports some status for that spec and keeps reporting it.
+// That is R2's premise, which R1's conclusion does not reach on its own.
+//
+// D4 is assumed, not proved. Anvil models no inner implementation, and R2 is
+// stated for whatever status the inner side has settled on so that it holds for
+// any of them. `settled` is existentially quantified because which status the
+// implementation settles on depends on the execution.
+//
+// The outer_stable conjunct in the conclusion is free: it is a conjunct of the
+// premise, and `always` is suffix-closed, so it already holds wherever the
+// conclusion must be discharged. What a discharger owes is the inner half --
+// the mirror is caught up and holds `settled`.
+pub open spec fn inner_impl_settles(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|outer: SyncedObjectView| inner_impl_settles_per_cr(k, b, outer))
+}
+
+pub open spec fn inner_impl_settles_per_cr(k: SyncKind, b: Binding, outer: SyncedObjectView) -> TempPred<ClusterState> {
+    always(lift_state(outer_stable(k, b, outer)).and(lift_state(spec_synced(k, outer))))
+        .leads_to(tla_exists(|settled: SyncedStatusView|
+            always(lift_state(outer_stable(k, b, outer)).and(lift_state(inner_settled(k, outer, settled))))))
+}
+
+// The round trip: once the outer copy stops changing, it eventually and stably
+// carries the status the sync controller derives from one the mirror is itself
+// stably holding, for a mirror that carries the copy's spec and observes its own
+// current generation. R1 and R2 chained across D4.
+//
+// The conclusion keeps inner_settled beside status_synced, and that is what makes
+// this a round trip rather than a shape claim: status_synced alone, with `settled`
+// existentially quantified and unconstrained, says only that the outer copy holds
+// some status of the merge's shape -- which the guarantee already gives. Holding
+// the two together says the reported status is the merge of one the mirror has.
+//
+// `settled` must be existentially quantified, and that is why R1 and R2 do not
+// compose as they stand: R2 is a family of properties indexed by a status, and
+// nothing in R1 chooses one. So the round trip does not name the status the user
+// will see. Its premise, unlike R2's, is one a user can establish: stop editing
+// the object.
+pub open spec fn widget_round_trip(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|outer: SyncedObjectView| widget_round_trip_per_cr(k, b, outer))
+}
+
+pub open spec fn widget_round_trip_per_cr(k: SyncKind, b: Binding, outer: SyncedObjectView) -> TempPred<ClusterState> {
+    always(lift_state(outer_stable(k, b, outer)))
+        .leads_to(tla_exists(|settled: SyncedStatusView|
+            always(lift_state(status_synced(k, outer, settled)).and(lift_state(inner_settled(k, outer, settled))))))
+}
+
 // R3, cleanup (the janitor's ESR): once no outer copy with the parent uid that
 // names this binding exists at the mirror's namespace and name, a mirror object in
 // this binding pointing at that parent is eventually gone. Stated per mirror
