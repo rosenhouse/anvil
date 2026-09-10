@@ -809,7 +809,7 @@ with the pair, and `widget_implemented_core_holds` the inner implementation
 5. D3, and, for the round trip only, D4. R1, R2, R3 and R3s do not need D4.
 6. Generation semantics as in section 5.1 on both real API servers (true for CRDs with the status subresource).
 7. The hypotheses of the refinement in 2.2, and one outer cluster per inner cluster.
-8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec.
+8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec; the outer CRD declares the mirrored status fields, or sets `x-kubernetes-preserve-unknown-fields` on `status`, since a structural schema prunes what it does not declare (the boot check does not enforce this; it does refuse a status schema that requires a field the controller does not write).
 
 ## 4. Deployment shape
 

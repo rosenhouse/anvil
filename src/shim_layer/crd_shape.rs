@@ -47,6 +47,9 @@ pub enum ShapeError {
     StatusObservedGeneration(String),
     /// `status.conditions` row.
     StatusConditions(String),
+    /// The status schema requires a field the controller does not always write,
+    /// so the API server would reject every status write with 422.
+    StatusRequires(String),
     /// `spec` row, for a `field` selector: `path` is the dotted path.
     SelectorField { path: String, reason: String },
     /// The `spec` row on another served version of the CRD: an update sent
@@ -65,6 +68,7 @@ impl fmt::Display for ShapeError {
                 write!(f, "metadata: scope is {}, must be Namespaced", scope)
             }
             ShapeError::NoStatusSubresource => write!(f, "status subresource: not enabled"),
+            ShapeError::StatusRequires(reason) => write!(f, "status: {}", reason),
             ShapeError::NoSchema => write!(f, "schema: the served version has no openAPIV3Schema"),
             ShapeError::StatusObservedGeneration(reason) => {
                 write!(f, "status.observedGeneration: {}", reason)
@@ -189,6 +193,48 @@ fn check_status(schema: &JSONSchemaProps, errors: &mut Vec<ShapeError>) {
     if let Err(reason) = check_conditions(status) {
         errors.push(ShapeError::StatusConditions(reason));
     }
+    if let Err(reason) = check_no_unwritten_required(status, &STATUS_ALWAYS_WRITTEN, "status") {
+        errors.push(ShapeError::StatusRequires(reason));
+    }
+}
+
+// Every field the sync controller always writes, at the two levels of the status
+// it writes. A schema may require these and nothing else: the API server rejects
+// a write missing a required field, and a rejected status write is discarded
+// rather than reported (the reconcile ends in Error and requeues on the backoff),
+// so the object would carry no status at all and the only signal would be a WARN
+// per attempt.
+//
+// The controller writes no lastTransitionTime -- it reads no clocks -- and omits
+// reason and message when the condition it is mirroring has none. A CRD generated
+// from metav1.Condition marks all of lastTransitionTime, message and reason
+// required, and would otherwise pass every other row here.
+const STATUS_ALWAYS_WRITTEN: [&str; 2] = ["observedGeneration", "conditions"];
+const CONDITION_ALWAYS_WRITTEN: [&str; 3] = ["type", "status", "observedGeneration"];
+
+// `observedGeneration` is in both lists because the API server sets
+// metadata.generation on every CRD with the status subresource, and the
+// controller stamps whatever it read; it is omitted only for an object that has
+// no generation, which such a CRD does not produce.
+fn check_no_unwritten_required(schema: &JSONSchemaProps, written: &[&str], what: &str) -> Result<(), String> {
+    let required = match &schema.required {
+        Some(required) => required,
+        None => return Ok(()),
+    };
+    let mut unwritten: Vec<&str> = required
+        .iter()
+        .map(|name| name.as_str())
+        .filter(|name| !written.contains(name))
+        .collect();
+    if unwritten.is_empty() {
+        return Ok(());
+    }
+    unwritten.sort_unstable();
+    Err(format!(
+        "{} requires {}, which the controller does not always write, so the API server would reject every status write",
+        what,
+        unwritten.join(", ")
+    ))
 }
 
 fn check_conditions(status: &JSONSchemaProps) -> Result<(), String> {
@@ -223,6 +269,7 @@ fn check_conditions(status: &JSONSchemaProps) -> Result<(), String> {
             return Err(format!("conditions items: {} must be required", name));
         }
     }
+    check_no_unwritten_required(item, &CONDITION_ALWAYS_WRITTEN, "conditions items")?;
     Ok(())
 }
 
@@ -535,6 +582,49 @@ mod tests {
         let errors = check_shape(&crd, &by_field()).unwrap_err();
         assert_eq!(errors.len(), 1, "{:?}", errors);
         assert!(errors[0].to_string().contains("self == oldSelf"), "{}", errors[0]);
+    }
+
+    // A CRD generated from metav1.Condition passes every other row: it declares
+    // all five fields with the types the shape check demands, and marks type and
+    // status required. It also marks lastTransitionTime, message and reason
+    // required, and the controller writes none of them reliably, so every status
+    // write would be rejected 422 and the outer copy would carry no status at all.
+    #[test]
+    fn a_condition_schema_may_not_require_a_field_the_controller_omits() {
+        let mut status = widget_status();
+        status["properties"]["conditions"]["items"]["properties"]["lastTransitionTime"] =
+            json!({ "type": "string", "format": "date-time" });
+        status["properties"]["conditions"]["items"]["required"] =
+            json!(["lastTransitionTime", "message", "reason", "status", "type"]);
+        let errors =
+            check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        let text = errors[0].to_string();
+        assert!(text.contains("lastTransitionTime, message, reason"), "{}", text);
+        assert!(text.contains("reject every status write"), "{}", text);
+    }
+
+    // observedGeneration is written whenever the object has a generation, which
+    // a CRD with the status subresource always gives it, so requiring it is fine.
+    #[test]
+    fn a_condition_schema_may_require_observed_generation() {
+        let mut status = widget_status();
+        status["properties"]["conditions"]["items"]["required"] =
+            json!(["observedGeneration", "status", "type"]);
+        check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap();
+    }
+
+    // The same at the status level: the controller writes observedGeneration, the
+    // conditions and the mirrored remainder, and the remainder is empty on every
+    // failure path, so a required field outside the first two breaks those writes.
+    #[test]
+    fn a_status_schema_may_not_require_a_field_the_controller_omits() {
+        let mut status = widget_status();
+        status["required"] = json!(["conditions", "observedCount", "observedGeneration"]);
+        let errors =
+            check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap_err();
+        assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(errors[0].to_string().contains("observedCount"), "{}", errors[0]);
     }
 
     #[test]
