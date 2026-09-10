@@ -713,14 +713,30 @@ composition is needed for it, and no fairness of the other controllers is
 assumed. `widget_fanout_demo_multi_cluster_theorem` is the one-kind,
 two-binding instance: three controllers, three stores.
 
-Two things the theorem does not give. It is read per (kind, binding), so
+Three things the theorem does not give. It is read per (kind, binding), so
 nothing compares two inner clusters -- though nothing the controllers do
 compares them either: the sync controller compares an outer uid with the
 annotation on the mirror of one binding, and the janitor of a binding compares
-its mirror's annotation with outer uids. And no instance of it names two
+its mirror's annotation with outer uids. No instance of it names two
 kinds, so the obligations a second kind carries -- `kinds_separate`, and the
 controllers of both kinds sharing one id space and one set of installed types --
 have no witness (#50).
+
+And every closed instance is read at `widget_spec_ok() = |v| true`
+(`composition/widget_sync_reconciler.rs`), an API server that stores whatever
+spec it is sent. The theorems themselves are parameterized by `spec_ok` and hold
+for any, so what the closed instances give up is not generality but a witness:
+nothing demonstrates the statements against a server that refuses a spec.
+
+What the parameter cannot express is the case that matters in a fleet.
+`widget_installed_types` maps every kind name, the outer kind and every mirror
+kind, to one `synced_installed_type(spec_ok, selector)` -- the *same* predicate
+on both sides. That is what makes the mirror's spec storable whenever the outer
+copy's is, and it is why R1 holds for any `spec_ok` rather than only the trivial
+one. Two clusters whose CRDs validate differently are outside the model, not
+merely outside its instances, and CRD version skew between a management cluster
+and its workload clusters is the ordinary state of a fleet (issue #49,
+findings 5 and 13).
 
 ### 5.4 Assumptions
 

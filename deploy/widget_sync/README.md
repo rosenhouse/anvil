@@ -176,8 +176,8 @@ them:
 | `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
 | `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
 | `status.observedGeneration` | read on the inner copy, written on the outer copy | integer |
-| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer) |
-| every other status field | mirrored verbatim inner to outer while `Synced` | none |
+| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else |
+| every other status field | mirrored verbatim inner to outer while `Synced` | none, and `status` requires none of them |
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
 The fields in the table must be **declared, with these types**, even on a
@@ -194,10 +194,23 @@ outer copy as part of the mirrored remainder;
 `x-kubernetes-preserve-unknown-fields` on the status is how a CRD keeps such a
 remainder it does not declare.
 
+A schema may **require** only what the controller always writes: at the status
+level `observedGeneration` and `conditions`, and in a condition `type`, `status`
+and `observedGeneration`. The controller writes no `lastTransitionTime`, because
+it reads no clocks; the `Synced` condition never carries a `message`; and
+`Ready` and `Stalled` carry neither `reason` nor `message` from an inner
+condition that has none. A CRD generated from `metav1.Condition` marks
+`lastTransitionTime`, `message` and `reason` required and would otherwise pass
+every row, while making the API server reject the status write with 422 — which
+nothing reports, so the object would carry no status at all and the only sign
+would be one WARN per attempt. The boot check refuses such a schema. A required
+field that declares a `default` is accepted: defaulting runs before validation.
+
 Inner clusters are not checked for schema parity beyond serving the kind;
 parity stays an operational assumption. So does this, for now: **fields are
 not removed from a CRD while the controller runs**, so the boot check, once it
-passes, stays true. Adding fields is fine. A later pass can watch the CRDs and
+passes, stays true. Adding optional fields is fine; adding a required one
+breaks every status write, and the check does not re-run. A later pass can watch the CRDs and
 stop a kind whose shape breaks.
 
 **A refused kind.** A kind that is not served, is cluster-scoped, or whose CRD
