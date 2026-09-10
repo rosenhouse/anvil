@@ -5,8 +5,8 @@ object of a configured kind created there, a mirror with the same namespace,
 name and spec in an *inner* cluster, where a real implementation of that kind
 acts on it. It copies the inner status back onto the outer copy. The kinds are
 given at boot, not compiled in ("Kinds and their shape" below); the demo runs
-`Widget` and `Gadget`. Design and proofs: `doc/widget_sync_design.md` and, for
-the kinds and the bindings, `doc/widget_sync_fanout_design.md`.
+`Widget` and `Gadget`. `doc/widget_sync_design.md` states the design and the
+proofs; `doc/widget_sync_fanout_design.md` covers the kinds and the bindings.
 
 ## Clusters
 
@@ -579,5 +579,5 @@ inner cluster its credential needs `<plural>` get, list, watch, create, patch
 and delete per kind, and `configmaps` create in `kube-system` with get on
 `anvil-sync-claim` (`rbac_inner.yaml`). `rbac.yaml` also binds, in namespace `default`, `get` and
 `update` on the single ConfigMap `fault-injection-config`, which only the
-crash-testing mode (`controller crash`) touches; `run` mode never uses it. No
-`events` verbs: the controller emits none.
+crash-testing mode (`controller crash`) touches; `run` mode never uses it. The controller needs no
+`events` verbs: it emits none.
