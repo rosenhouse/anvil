@@ -253,9 +253,10 @@ the kind with the status subresource (discovery at bind time); parity stays an
 operational assumption, as today.
 
 Assumed for this pass: fields are not removed from a CRD while the
-controller runs, so the check, once true, stays true. Adding optional fields
-is fine; adding a required one breaks every status write, and the check does
-not re-run. A later pass can watch the CRDs and stop a kind whose shape breaks.
+controller runs, so the check, once true, stays true. Adding optional fields is
+fine; adding a required one the controller does not write breaks status writes,
+and the check does not re-run. A later pass can watch the CRDs and stop a kind
+whose shape breaks.
 
 This is the structural subtype: the controller and its proofs are about
 objects of this shape, and any CRD that has the shape can be reconciled.
@@ -713,14 +714,29 @@ composition is needed for it, and no fairness of the other controllers is
 assumed. `widget_fanout_demo_multi_cluster_theorem` is the one-kind,
 two-binding instance: three controllers, three stores.
 
-Two things the theorem does not give. It is read per (kind, binding), so
+Three things the theorem does not give. It is read per (kind, binding), so
 nothing compares two inner clusters -- though nothing the controllers do
 compares them either: the sync controller compares an outer uid with the
 annotation on the mirror of one binding, and the janitor of a binding compares
-its mirror's annotation with outer uids. And no instance of it names two
+its mirror's annotation with outer uids. No instance of it names two
 kinds, so the obligations a second kind carries -- `kinds_separate`, and the
 controllers of both kinds sharing one id space and one set of installed types --
 have no witness (#50).
+
+And every closed instance is read at `widget_spec_ok() = |v| true`
+(`composition/widget_sync_reconciler.rs`), whose schema check accepts every
+spec. The theorems are parameterized by `spec_ok` and hold for any predicate, so
+what the instances give up is a witness rather than generality: none of them
+exercises a server that refuses a spec on schema grounds. They do exercise one
+that refuses a transition, since `spec_ok` is only the `valid_object` half of
+`synced_installed_type` and the demo kind's `valid_transition` is the selector's
+immutability rule.
+
+That the outer kind and every mirror kind are installed with one predicate is a
+hypothesis of every statement, not a property of the model -- `InstalledTypes`
+maps each name separately, so a cluster whose sides validate differently is a
+legal value of it. Section 5.4 says what that hypothesis costs, and that
+equality is more than the proofs need.
 
 ### 5.4 Assumptions
 
