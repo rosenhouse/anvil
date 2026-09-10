@@ -195,22 +195,26 @@ outer copy as part of the mirrored remainder;
 remainder it does not declare.
 
 A schema may **require** only what the controller always writes: at the status
-level `observedGeneration` and `conditions`, and in a condition `type`, `status`
-and `observedGeneration`. The controller writes no `lastTransitionTime`, because
-it reads no clocks; the `Synced` condition never carries a `message`; and
-`Ready` and `Stalled` carry neither `reason` nor `message` from an inner
-condition that has none. A CRD generated from `metav1.Condition` marks
-`lastTransitionTime`, `message` and `reason` required and would otherwise pass
-every row, while making the API server reject the status write with 422 — which
-nothing reports, so the object would carry no status at all and the only sign
-would be one WARN per attempt. The boot check refuses such a schema. A required
-field that declares a `default` is accepted: defaulting runs before validation.
+level `observedGeneration` and `conditions`, and in a condition `type`,
+`status` and `observedGeneration`. The controller writes no
+`lastTransitionTime`, because it reads no clocks. The `Synced` condition never
+carries a `message`. `Ready` and `Stalled` carry neither `reason` nor `message`
+from an inner condition that has none.
+
+A CRD generated from `metav1.Condition` declares all five condition fields with
+the types the table demands and marks `lastTransitionTime`, `message` and
+`reason` required, so it passes every row above. The API server then rejects
+the status write with 422, and nothing reports that: the object carries no
+status at all and the only sign is one WARN per attempt. The boot check refuses
+such a schema. A required field that declares a `default` is accepted, because
+defaulting runs before validation.
 
 Inner clusters are not checked for schema parity beyond serving the kind;
 parity stays an operational assumption. So does this, for now: **fields are
 not removed from a CRD while the controller runs**, so the boot check, once it
-passes, stays true. Adding optional fields is fine; adding a required one
-breaks every status write, and the check does not re-run. A later pass can watch the CRDs and
+passes, stays true. Adding optional fields is fine; adding a required one the
+controller does not write breaks status writes, and the check does not re-run.
+A later pass can watch the CRDs and
 stop a kind whose shape breaks.
 
 **A refused kind.** A kind that is not served, is cluster-scoped, or whose CRD

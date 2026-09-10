@@ -253,9 +253,10 @@ the kind with the status subresource (discovery at bind time); parity stays an
 operational assumption, as today.
 
 Assumed for this pass: fields are not removed from a CRD while the
-controller runs, so the check, once true, stays true. Adding optional fields
-is fine; adding a required one breaks every status write, and the check does
-not re-run. A later pass can watch the CRDs and stop a kind whose shape breaks.
+controller runs, so the check, once true, stays true. Adding optional fields is
+fine; adding a required one the controller does not write breaks status writes,
+and the check does not re-run. A later pass can watch the CRDs and stop a kind
+whose shape breaks.
 
 This is the structural subtype: the controller and its proofs are about
 objects of this shape, and any CRD that has the shape can be reconciled.
@@ -723,20 +724,19 @@ controllers of both kinds sharing one id space and one set of installed types --
 have no witness (#50).
 
 And every closed instance is read at `widget_spec_ok() = |v| true`
-(`composition/widget_sync_reconciler.rs`), an API server that stores whatever
-spec it is sent. The theorems themselves are parameterized by `spec_ok` and hold
-for any, so what the closed instances give up is not generality but a witness:
-nothing demonstrates the statements against a server that refuses a spec.
+(`composition/widget_sync_reconciler.rs`), whose schema check accepts every
+spec. The theorems are parameterized by `spec_ok` and hold for any predicate, so
+what the instances give up is a witness rather than generality: none of them
+exercises a server that refuses a spec on schema grounds. They do exercise one
+that refuses a transition, since `spec_ok` is only the `valid_object` half of
+`synced_installed_type` and the demo kind's `valid_transition` is the selector's
+immutability rule.
 
-What the parameter cannot express is the case that matters in a fleet.
-`widget_installed_types` maps every kind name, the outer kind and every mirror
-kind, to one `synced_installed_type(spec_ok, selector)` -- the *same* predicate
-on both sides. That is what makes the mirror's spec storable whenever the outer
-copy's is, and it is why R1 holds for any `spec_ok` rather than only the trivial
-one. Two clusters whose CRDs validate differently are outside the model, not
-merely outside its instances, and CRD version skew between a management cluster
-and its workload clusters is the ordinary state of a fleet (issue #49,
-findings 5 and 13).
+That the outer kind and every mirror kind are installed with one predicate is a
+hypothesis of every statement, not a property of the model -- `InstalledTypes`
+maps each name separately, so a cluster whose sides validate differently is a
+legal value of it. Section 5.4 says what that hypothesis costs, and that
+equality is more than the proofs need.
 
 ### 5.4 Assumptions
 

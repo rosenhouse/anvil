@@ -49,12 +49,12 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   `widget_kinds_multi_cluster_theorem` states them for a whole deployment: every
   configured kind's sync controller, every binding's janitor, one store per
   binding (`doc/widget_sync_fanout_design.md`, section 5.3).
-- Which CRDs: any that has the shape of section 2.2 of the fanout design, which
-  the controller checks at boot and refuses to start without. The theorems are
-  parameterized by the API server's spec validation, but every closed instance
-  is read at the trivial one, and the model installs the same validation on both
-  clusters — so a management cluster and a workload cluster whose CRDs validate
-  differently are outside it (fanout design, section 5.3).
+- Which CRDs: any with the shape of section 2.2 of the fanout design. The
+  controller checks it at boot, in the management cluster only, and refuses to
+  start without it.
+- The theorems are parameterized by the API server's schema validation and hold
+  for any. Every closed instance is read at the trivial one, so none of them
+  exercises a server that refuses a spec (fanout design, section 5.3).
 
 ## 1. Design
 
