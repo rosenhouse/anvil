@@ -71,7 +71,7 @@ reconciler refuses to write an inner object it does not own.
 
 - No owner references across clusters: the inner garbage collector would
   delete an object whose owner does not exist there.
-- No finalizers by either reconciler. Every action is re-convergent and outer
+- Neither reconciler uses finalizers. Every action is re-convergent and outer
   deletion never blocks on a partition. The inner implementation may put its
   own finalizers on mirrors; the janitor's Delete then stamps a deletion
   timestamp and the object lingers until the inner side releases it (D3).
@@ -89,8 +89,9 @@ reconciler refuses to write an inner object it does not own.
 
 ### 1.2 The sync reconciler
 
-Triggered by an outer `Widget` with generation `g`, spec `σ`, uid `u`, and by
-same-named inner `Widget`s (a latency optimization; liveness rests on requeue).
+An outer `Widget` with generation `g`, spec `σ` and uid `u` triggers the sync
+reconciler, as does a same-named inner `Widget` (a latency optimization;
+liveness rests on requeue).
 
 ```
 Init
@@ -156,7 +157,7 @@ rule.
 
 ### 1.3 The janitor
 
-Triggered by an inner `Widget`.
+An inner `Widget` triggers the janitor.
 
 ```
 Init
@@ -387,7 +388,7 @@ two restrictions of the multi-store model:
    `marshal_status_preserves_integrity` for every type installed through
    `Cluster::installed_type`; the first is a per-type fact (`CustomResourceView`
    promises it for state validation only), checked for both Widget types in
-   `lemma_widget_instance_types`.
+   `lemma_widget_types`.
 3. Every reconciler commutes with the relabeling: run on the relabeled object
    and response it reaches the same local state and sends the relabeled
    request. A reconciler that copies a uid or resource version into data other
@@ -501,10 +502,12 @@ writes a status, and the sync controller carries that status back out. It is
 another controller under the rely, like the disturber, and
 `model/inner_impl_reconciler.rs` models one. On each reconcile it patches the
 status of the mirror it was triggered by, stamping `observedGeneration` with the
-generation it observed and reporting `Ready`. It tests that generation, so a
-patch delayed past a spec change cannot claim to have observed the newer one --
-`inner_caught_up` would otherwise hold of a status computed for an older spec,
-which is the one thing an implementation must not do. What a real
+generation it observed and reporting `Ready`. The patch tests the mirror's uid and generation. The uid test is the safety
+one: generations restart at 1 with each incarnation, so without it a patch
+delayed past a delete and a recreate would make `inner_caught_up` hold of a
+status computed for the previous incarnation's spec. The generation test keeps a
+late patch from overwriting a settled status with an older one, which
+`always(inner_settled)` needs. What a real
 implementation computes is its own business; the pair's properties are stated
 over whatever status it writes, so the model writes the cheapest one that has
 the shape.
@@ -520,34 +523,22 @@ closed statement for any one-binding configuration, and
 readings; the multi-store one needs the implementation's commutation lemma and
 `widget_other_controller_ok`, which the disturber has and this does not.
 
-The status it writes has an empty remainder, and that is forced rather than
-chosen: `status_rest_ok` is uninterpreted and `empty_status_rest_ok` is its only
-axiom (section 3), so the empty remainder is the only one a model can be shown
-to write. The testbed's echo controller writes a populated one, with a reason
-and a message. So the modelled execution exercises the conditions half of the
+The status it writes carries the empty remainder: `empty_status_rest()` is the
+cheapest remainder a model can supply, and nothing the pair proves depends on
+which one it is. The testbed's echo controller writes a populated one:
+`observedCount` for a Widget, `observedSize` for a Gadget. So the modelled execution exercises the conditions half of the
 return path and not the payload half: `settled.rest` is the default remainder
 there, and `status_synced` cannot tell a mirrored remainder from a defaulted
 one. The echo controller also tests nothing on its patch, where the model tests
 uid and generation, so the model is neither an over- nor an under-approximation
 of it.
 
-What this settles and what it does not. Before it, no modelled controller
-anywhere wrote an inner status, so `inner_settled` -- the premise of R2 -- held
-in no state of any modelled cluster, and the row in 2.3 above described coverage
-with nothing to point at. The premise is now producible: the status the model
-writes reports the mirror as caught up with the generation it tested
+R2's premise is producible in this cluster: the status the model writes reports
+the mirror as caught up with the generation it tested
 (`lemma_inner_impl_status_is_caught_up`), and a status write keeps the metadata
-and the spec (`status_updated_object`), so `spec_synced` survives it.
-
-Three things that does not amount to. It is not R2 being reached: reaching it
-needs the implementation to be live, and no fairness is assumed for it,
-deliberately (3.3) -- R2 is stated for whatever status the inner side has
-settled on so that it holds for any implementation, and the price of that
-generality is that the theorem says nothing about when the settling happens. It
-is not a claim about D3, whose premise nothing writes and which therefore still
-holds vacuously. And the guarantee and the composition are compatibility facts:
-both would verify unchanged of a controller that sent no request at all, which
-is why the producibility above is a separate lemma.
+and the spec (`status_updated_object`), so `spec_synced` survives it. No
+fairness is assumed for the implementation, so nothing here says when the inner
+side settles.
 
 ## 3. Specification
 
@@ -575,8 +566,8 @@ remainder of a status that was never written is the shape's empty remainder,
 
 Everything the pair used to trust about its own wrappers is now the shape's,
 and lives in `kubernetes_api_objects`, where anything else generic over kinds
-shares it. That inventory, which
-`tools/check-widget-exec-hygiene.sh` pins file by file:
+shares it. `tools/check-widget-exec-hygiene.sh` pins that inventory file by
+file:
 
 | File | What is trusted there |
 |---|---|
@@ -601,7 +592,7 @@ whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
 `observedGeneration` (G-gen), and whose condition list is those three and
-nothing else, in that order (G-shape). Nothing else.
+nothing else, in that order (G-shape). It sends nothing else.
 
 (G-shape) also relates the three to each other. Each is `True` or `False`.
 `Ready` is `True` only when `Synced` is, and never at the same time as
@@ -623,8 +614,9 @@ finding 16 disputes: a workload reporting `Ready=Unknown` is reported `False`.
 (G-shape) states that merge rather than endorsing it, so changing it changes the
 guarantee.
 
-**Janitor** (`widget_janitor_guarantee`). A `List` of outer copies in the
-mirror's namespace, or a `Delete` of the mirror with a uid precondition.
+**Janitor** (`widget_janitor_guarantee`). A request sent while reconciling a
+mirror is a `List` of outer copies in the mirror's namespace, or a `Delete` of
+the mirror with a uid precondition.
 
 ### 3.2 Relies
 
@@ -642,7 +634,8 @@ mirror.
 `Create` of the inner kind at `ns/n` is `make_inner(outer)` for an outer copy
 at `Outer{ns,n}` with a bound uid; updates keep identity.
 
-**Sync, on the janitor.** The janitor's guarantee, not the anonymous rely. The
+**Sync, on the janitor.** The sync reconciler relies on the janitor's
+guarantee, not on the anonymous rely. The
 sync spec's `safety_partial_rely` is a function of the other controller's id
 and names the janitor's id. What the sync proof needs beyond the guarantee, that
 a janitor `Delete` in flight targets an object whose parent is absent for good,
@@ -702,18 +695,13 @@ and unconstrained, says only that the outer copy holds some status of the merge'
 shape -- which (G-shape) already gives. The two together say the reported status
 is the merge of one the mirror is holding.
 
-`settled` must be existentially quantified, and that is why R1 and R2 do not
-compose as they stand: R2 is a family of properties indexed by a status, and
-nothing in R1 chooses one. RT's conclusion is therefore weaker than R2's: it does
-not name the status the user will see. Its premise is the one a user can
-establish, by not editing the object.
+RT's conclusion is weaker than R2's: it does not name the status the user will
+see. Its premise is the one a user can establish, by not editing the object.
 
 `widget_round_trip_holds` (`composition/widget_inner_impl_reconciler.rs`) states
 RT for a cluster running the pair and the inner implementation of section 2.5.
-Stating it over the cluster of section 3.4 would be vacuous: no member there
-writes a mirror status, so `inner_caught_up` is false in every reachable state,
-D4's conclusion cannot hold, and D4 with R1 would make RT's own premise
-unreachable. RT is not a conjunct of `widget_sync_esr`, so it does not travel
+No member of the cluster of section 3.4 writes a mirror status, so RT is stated
+over the cluster that runs the modelled implementation. RT is not a conjunct of `widget_sync_esr`, so it does not travel
 through Welder composition and is in none of the multi-store theorems.
 
 The premise of R1 and R2 says: the user has stopped editing the outer copy
@@ -819,52 +807,17 @@ with the pair, and `widget_implemented_core_holds` the inner implementation
 
 ## 4. Deployment shape
 
-The deployment is the one `doc/widget_sync_fanout_design.md` describes in its
-sections 1, 3.4 and 4; `deploy/widget_sync/README.md` has the manifests, the
-flags and the operating procedures. In outline:
+`deploy/widget_sync/README.md` has the manifests, the flags, the RBAC and the
+operating procedures. Two parts of the deployment bear on what is proved.
 
-- One Deployment in the outer cluster, `replicas: 1`, `strategy: Recreate`,
-  given its kinds as `--kind` flags.
-- Outer RBAC: for each kind its plural (get, list, watch) and its status
-  subresource (patch); `secrets` (get, list, watch) for the binding Secrets;
-  `customresourcedefinitions` (get) for the shape check; `namespaces` (get) on
-  `kube-system` for the outer cluster id; a Role in `default` for the
-  crash-mode ConfigMap. Inner, per binding's credential: each kind's plural
-  (get, list, watch, create, patch, delete) and the claim ConfigMap in
-  `kube-system` (create; get by name).
-- Bindings: one client pair per `<clusterName>-kubeconfig` Secret of type
-  `cluster.x-k8s.io/secret`, validated before use, rebuilt when the Secret's
-  `value` changes, dropped when it goes away.
-- Watches: the outer objects of each kind (sync primary); per binding, the
-  mirrors of each kind (janitor primary, and a same-name trigger stream for
-  the sync controller).
-- Requeue: a fixed 60 seconds after a reconcile that did not fail, and a
-  per-object exponential backoff after one that did (10 seconds doubling to a
-  cap of 5 minutes, reset when that object next succeeds; `build.md`). The
-  remote clients have a short request timeout so a partition surfaces as a
-  failed reconcile.
-- The janitor pause gate: the ConfigMap `widget-sync-janitor` in the
-  controller's namespace, shipped empty and mounted read-only at
-  `/etc/widget-sync/janitor`; `JANITOR_PAUSE_FILE` points the binary at the
-  key `pause` there. While the key exists the shim withholds every Delete
-  (section 1.3); the README gives the pause and resume commands and the
-  sequence to follow around a restore of the outer cluster.
+**One replica.** The Deployment is `replicas: 1` with `strategy: Recreate`. At
+most one sync controller per kind is a hypothesis of every theorem here, and a
+Deployment does not enforce it: during a rollout two can overlap, and a second
+one violates the first's rely, so the theorems say nothing about that window.
 
-Of the operability and hardening work issues #9 and #10 listed, the branch
-has: a usage error instead of a silent exit, a field manager on every write,
-warn-level structured error logs that tell a failed patch `test` apart from
-other errors, credential rotation through the binding Secret, an access
-check per binding, a startup probe on the ready file, a non-root image, a
-security context and resources; and, decided later (#17), the error reasons
-in the `Synced` condition and the `Ready` and `Stalled` conditions of
-section 1.4, and the per-object retry backoff of the shim's `error_policy`.
-Declined for this branch, with the reasons on the issues:
-Events, KEP-1623 condition fields (no
-`lastTransitionTime`), a name selector on the janitor's List,
-leader election (one replica with `Recreate` is not at-most-one; the deploy
-README says so), a deletion rate limit and dry-run mode. A cluster identity
-on mirrors is not used: the claim object of the fan-out design (its section
-1.3) is what keeps two bindings off one inner cluster.
+**The janitor pause gate.** While the key `pause` exists in the ConfigMap
+`widget-sync-janitor`, the shim withholds every Delete the janitor sends
+(section 1.3). Withholding defers R3 and R3s; it cannot falsify them.
 
 ## 5. Framework additions
 
@@ -909,38 +862,24 @@ run in one process.
 
 ### 5.4 Footprint
 
-Against `origin/main` (5a94665), `src/kubernetes_cluster` differs in 22
-files, 6020 lines added and 13 removed. Of the added lines, 4549 are the
-multi-store model and its refinement (`spec/multi_cluster.rs` and the seven
-files of `proof/multi_cluster/`), 537 are `proof/synced_objects.rs` (the
-data-driven twins of the `CustomResourceView`-generic invariants, for a synced
-kind), 422 are `proof/api_server.rs` (the `keeps_identity` family: what each
-request leaves alone, and the uid facts: the store only grows by fresh uids),
-158 are `spec/install_helpers.rs` (installing a synced kind), 110 are
-`spec/api_server/state_machine.rs` (the generation rules and the JSON-patch
-handlers of 5.1 and 5.2), 96 are `spec/message.rs` (the Patch plumbing) and 29
-are `proof/temporal_rules.rs` (two rules of temporal logic that
-`verus_temporal_logic` lacks). The remaining proof files gain the
-`Patch` and `PatchStatus` arms of their case splits. One invariant is
-strengthened: `etcd_object_is_well_formed` now records that a custom resource
-carries a generation and a built-in kind does not, which the no-op rule for an
-update carrying the stored object needs. Three framework lemmas gained a
-budget with the new request arms: `lemma_xor_preserves_during_api_server_step`
-(rlimit 100, spun off), `lemma_always_every_in_flight_msg_has_no_replicas_and_has_unique_id`
-(rlimit 50) and `lemma_always_each_object_in_etcd_has_at_most_one_controller_owner`
-(rlimit 200, spun off, its inductive step restated per key). In the four
-existing controllers the same arms added eight budgets (`rlimit(100)` on two
-VReplicaSet and two VDeployment lemmas and on two VStatefulSet lemmas,
-`rlimit(400)` on two VStatefulSet store invariants) and raised one from 20 to
-60 (`lemma_from_after_send_list_vrs_req_to_receive_list_vrs_resp_with_nv`).
-The refinement's own files carry two budgets
-(`proof/multi_cluster/fairness.rs` at 50, `steps.rs` at 60). `step_compatible`
-and `inv` are opaque: the simulation carries both at every position of an
-execution, and the quantifiers inside them would otherwise be instantiated at
-every state the solver sees. A lemma that reads a conjunct of `inv` reveals it,
-or, where revealing costs too much, asks for the conjuncts at one state
-(`lemma_inv_parts_at`). The Widget pair's own proofs, the multi-cluster
-instantiation included, carry no budget.
+The framework changes under `src/kubernetes_cluster` are the multi-store model
+and its refinement (`spec/multi_cluster.rs`, `proof/multi_cluster/`); the
+data-driven twins of the generic invariants, for a synced kind
+(`proof/synced_objects.rs`); the `keeps_identity` family and the uid facts
+(`proof/api_server.rs`); installing a synced kind (`spec/install_helpers.rs`);
+the generation rules and the JSON-patch handlers of 5.1 and 5.2
+(`spec/api_server/state_machine.rs`); the Patch plumbing (`spec/message.rs`);
+and two rules of temporal logic that `verus_temporal_logic` lacks
+(`proof/temporal_rules.rs`). The remaining proof files gain the `Patch` and
+`PatchStatus` arms of their case splits. `etcd_object_is_well_formed` records
+that a custom resource carries a generation and a built-in kind does not, which
+the no-op rule for an update carrying the stored object needs.
+
+`step_compatible` and `inv` are opaque. The simulation carries both at every
+position of an execution, and the quantifiers inside them would otherwise be
+instantiated at every state the solver sees. A lemma that reads a conjunct of
+`inv` reveals it, or asks for the conjuncts at one position
+(`lemma_inv_parts_at`). The Widget pair's own proofs carry no solver budget.
 
 ## 6. Alternatives rejected
 
@@ -953,51 +892,18 @@ instantiation included, carry no budget.
 | Reading status from the PATCH response | already modeled (`PatchResponse` carries the object); the copy rule refuses that status anyway, since it is for the previous generation; adds a state for no change in R1 to R3 |
 | A token minted on the outer copy instead of its uid | requires writing outer metadata and does not survive recreation |
 
-## 7. Inventory
-
-| Piece | Where |
-|---|---|
-| Trusted spec: types, mirror relation, rely and guarantee, R1 to R3s, D3 | `widget_sync_controller/trusted/` |
-| Model reconcilers | `widget_sync_controller/model/` |
-| Exec reconcilers (proved to conform to the model) | `widget_sync_controller/exec/` |
-| Guarantees, store and message invariants | `widget_sync_controller/proof/{guarantee,helper_invariants,janitor_invariants,sync_invariants}.rs` |
-| Step closures shared by both reconcilers' proofs | `widget_sync_controller/proof/predicate.rs` |
-| Assumptions, invariant bundles, stable specs, phase I, the sync reconciler's layers | `widget_sync_controller/proof/liveness/spec.rs` |
-| One step of the cluster at the mirror key and the outer copy | `widget_sync_controller/proof/liveness/api_actions.rs` |
-| Termination of both reconcilers | `widget_sync_controller/proof/liveness/terminate.rs` |
-| R1, R2, R3, R3s | `widget_sync_controller/proof/liveness/{sync_spec_proof,sync_status_proof,janitor_proof,cleanup_proof}.rs` |
-| Store facts (uids, what each request leaves alone) and temporal rules the pair uses | `kubernetes_cluster/proof/{api_server,temporal_rules}.rs` |
-| The disturber: model, guarantee, composition with the pair | `widget_sync_controller/model/disturber_reconciler.rs`, `proof/disturber.rs`, `composition/widget_disturber_reconciler.rs` |
-| The inner implementation: model, guarantee, composition with the pair | `widget_sync_controller/model/inner_impl_reconciler.rs`, `proof/inner_impl.rs`, `composition/widget_inner_impl_reconciler.rs` |
-| Welder specs and composition | `composition/widget_{janitor,sync,disturber}_reconciler.rs`, `composition/compose_all.rs` |
-| Configured kinds composed with each other | `composition/widget_two_kinds.rs` |
-| Multi-store model | `kubernetes_cluster/spec/multi_cluster.rs` |
-| Refinement into the one-store model | `kubernetes_cluster/proof/multi_cluster/` |
-| R1 to R3s on many clusters, for the pair beside admitted other controllers; the instances of the pair and of the pair with the disturber | `widget_sync_controller/proof/multi_cluster.rs` |
-| R1 to R3s for every kind and binding of a whole deployment | `widget_sync_controller/proof/multi_cluster_kinds.rs` |
-| Binaries, manifests, testbed, e2e | `src/bin/`, `deploy/widget_sync/`, `tools/two-cluster-test.sh`, `e2e/src/widget_sync_e2e.rs` |
-
-Full-repository verification (`cargo verus verify --lib`) is the
-`full-verification` job of `.github/workflows/ci.yml`, run on every push
-after a plain `cargo build --lib`.
-
 ## 8. Future work
 
-Tracked as issues on the fork: repository hygiene, now the e2e checks that
-need the kind testbed (#14). Operability (#9), hardening (#10) and the proof
-layout and solver-budget pass (#11) are done in the scope their issues record. Out-of-band edits and deletes of mirrors (#13) are modeled (sections
-2.3 and 2.4); what remains excluded is an edit that strips a mirror's
-identity, which the design refuses to recover from.
+#49 is the register of what the formal work does not cover, and which of those
+gaps need a decision before code. Two other issues are open: the e2e checks that need the kind testbed (#30), and
+the pass that makes the branch reviewable upstream (#16).
 
-Decided against, for this branch: a verified inner controller (the sync
-controller stays agnostic to the inner side; D3 is an assumption, #3), and
-with it the owner-less transactional update (`GetThenUpdate` without the
-hard-coded owner-reference check) that composing against one would need; a
-spec projection for inner-owned fields (no spec field is owned by the inner
-side); and parent-cluster identity on mirrors for the single pair.
+The following stay out of scope by decision: a verified inner controller, so the sync controller
+stays agnostic to the inner side and D3 remains an assumption; with it, the
+owner-less transactional update that composing against one would need; a spec
+projection for inner-owned fields, since no spec field is owned by the inner
+side; external compute of any kind; and operability beyond what section 4
+lists.
 
-The fan-out to many outer namespaces, each with its own inner cluster, in the
-Cluster API shape of a management cluster and its workload clusters (#15), and
-the controller generic over kinds given at boot (#20) are implemented; they are
-designed together in `doc/widget_sync_fanout_design.md`. One follow-up remains:
-the pass that makes the branch reviewable for an upstream contribution (#16).
+An out-of-band edit that strips a mirror's identity stays excluded: the design
+refuses to recover from it.

@@ -5,8 +5,8 @@ object of a configured kind created there, a mirror with the same namespace,
 name and spec in an *inner* cluster, where a real implementation of that kind
 acts on it. It copies the inner status back onto the outer copy. The kinds are
 given at boot, not compiled in ("Kinds and their shape" below); the demo runs
-`Widget` and `Gadget`. Design and proofs: `doc/widget_sync_design.md` and, for
-the kinds and the bindings, `doc/widget_sync_fanout_design.md`.
+`Widget` and `Gadget`. `doc/widget_sync_design.md` states the design and the
+proofs; `doc/widget_sync_fanout_design.md` covers the kinds and the bindings.
 
 ## Clusters
 
@@ -23,7 +23,7 @@ cluster name), and the controller reaches that cluster through the Secret
 
 ## Run
 
-Prerequisites: docker, kind, kubectl, and the toolchain `tools/deploy.sh` uses.
+You need docker, kind, kubectl, and the toolchain `tools/deploy.sh` uses.
 
 ```sh
 ./tools/two-cluster-test.sh --build          # build images, create the three clusters, deploy
@@ -58,7 +58,7 @@ On the outer copy:
   has one, else the inner condition's. `Ready` and `Stalled` are never both
   `True`.
 
-The reasons of a `False` `Synced` condition:
+A `False` `Synced` condition carries one of these reasons:
 
 | Reason | Meaning | Stalled | Clears when |
 |---|---|---|---|
@@ -203,14 +203,14 @@ from an inner condition that has none.
 
 A CRD generated from `metav1.Condition` declares all five condition fields with
 the types the table demands and marks `lastTransitionTime`, `message` and
-`reason` required, so it passes every row above. The API server then rejects
-the status write with 422, and nothing reports that: the object carries no
-status at all and the only sign is one WARN per attempt. The boot check refuses
-such a schema. A required field that declares a `default` is accepted, because
-defaulting runs before validation.
+`reason` required, so it passes every other row and the boot check refuses it on
+this one. Without that check the API server would reject every status write with
+422 and nothing would report it: the object would carry no status at all, the
+only sign one WARN per attempt. A required field that declares a `default` is
+accepted, because defaulting runs before validation.
 
-Inner clusters are not checked for schema parity beyond serving the kind;
-parity stays an operational assumption. So does this, for now: **fields are
+An inner cluster is not checked at all: not for serving the kind, not for
+schema parity. Parity is an operational assumption. So is this, for now: **fields are
 not removed from a CRD while the controller runs**, so the boot check, once it
 passes, stays true. Adding optional fields is fine; adding a required one the
 controller does not write breaks status writes, and the check does not re-run.
@@ -348,8 +348,8 @@ timer, only a change of the Secret does:
 - no `proxy-url` and no `insecure-skip-tls-verify: true` (an explicit `false`
   is the default and is accepted).
 
-This bounds what a Secret can do to: naming an API server this controller then
-talks to with the credential in the same document. It does not bound *which*
+This bounds what a Secret can do to naming an API server that this controller
+then talks to with the credential in the same document. It does not bound *which*
 server that is, so a Secret can still point a binding at a cluster of the
 Secret author's choosing — which is what the claim below is about.
 
@@ -579,5 +579,5 @@ inner cluster its credential needs `<plural>` get, list, watch, create, patch
 and delete per kind, and `configmaps` create in `kube-system` with get on
 `anvil-sync-claim` (`rbac_inner.yaml`). `rbac.yaml` also binds, in namespace `default`, `get` and
 `update` on the single ConfigMap `fault-injection-config`, which only the
-crash-testing mode (`controller crash`) touches; `run` mode never uses it. No
-`events` verbs: the controller emits none.
+crash-testing mode (`controller crash`) touches; `run` mode never uses it. The controller needs no
+`events` verbs: it emits none.

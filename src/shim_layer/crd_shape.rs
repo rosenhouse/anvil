@@ -1,30 +1,16 @@
-// The shape a kind must have before the sync controller takes it on
-// (doc/widget_sync_fanout_design.md, section 2.2). `check_shape` is the pure
-// check over a CustomResourceDefinition; `check_crd` fetches the CRD by name
-// and runs it. Every error names the row of the design's table that failed,
-// so a refused kind produces a usage error a person can act on.
+// The shape a kind must have before the sync controller takes it on. The rows
+// are the checks below; `deploy/widget_sync/README.md` states them for someone
+// authoring a CRD. `check_shape` is the pure check over a
+// CustomResourceDefinition; `check_crd` fetches the CRD by name and runs it.
+// Every error names the row that failed, so a refused kind produces a usage
+// error a person can act on.
 //
-// The rows, as checked here, against the schema served for the configured
-// version:
-//   metadata               scope is Namespaced
-//   status subresource     enabled for the version
-//   status.observedGeneration   integer
-//   status.conditions      array of objects: type (string, required), status
-//                          (string, required), reason, message (strings),
-//                          observedGeneration (integer)
-//   spec                   for a `field` selector: the path is a required
-//                          string, every step of it required in its parent,
-//                          with the rule `self == oldSelf` on the field or
-//                          `self.<path> == oldSelf.<path>` on the object that
-//                          holds it or on spec (has_immutability_rule), in
-//                          every served version of the CRD and not only in the
-//                          configured one
-// x-kubernetes-preserve-unknown-fields does not excuse a status (or a
-// conditions item) from declaring these fields: it makes the API server keep
-// what it does not know, not check it, and what makes "every stored status
-// unmarshals" -- the model's installed type -- true of what other writers store
-// is the CRD's schema. The rest of a status is opaque and needs no declaration;
-// preserve-unknown-fields is how a CRD keeps it.
+// x-kubernetes-preserve-unknown-fields does not excuse a status, or a
+// conditions item, from declaring the fields checked here: it makes the API
+// server keep what it does not know, not check it. What makes "every stored
+// status unmarshals" -- the model's installed type -- true of what other
+// writers store is the CRD's own schema. The rest of a status is opaque and
+// needs no declaration; preserve-unknown-fields is how a CRD keeps it.
 use crate::shim_layer::kind_config::{ClusterSelector, KindConfig};
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
     CustomResourceDefinition, JSONSchemaProps, JSONSchemaPropsOrArray,

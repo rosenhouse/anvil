@@ -73,6 +73,10 @@ jobs:
         run: |
           . "$HOME/.cargo/env"
           cargo test --lib
+      - name: Run the boot-check tests
+        run: |
+          . "$HOME/.cargo/env"
+          cargo test --features dyn-runtime --bin widget_sync_controller
       - name: Verify the library
         run: |
           . "$HOME/.cargo/env"

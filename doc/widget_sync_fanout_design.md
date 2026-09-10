@@ -56,7 +56,7 @@ A configured kind carries a **cluster selector**, one of:
   shape of Cluster API's `Cluster` object itself, and it is immutable by
   construction.
 
-No templating, no other metadata field. `cluster_of(obj)` is the selected
+The selector supports no templating and no other metadata field. `cluster_of(obj)` is the selected
 cluster name, `None` when the field is missing, which the boot check makes
 impossible for stored objects but the model does not assume.
 
@@ -160,8 +160,8 @@ cannot violate anything the proofs say. The claim only ever withholds
 requests; a refused binding is a binding whose every request fails, which
 the model covers.
 
-What the claim does not cover: two outer clusters with the same
-`kube-system` uid (a cloned management cluster). The override flag exists
+The claim does not cover two outer clusters with the same `kube-system` uid (a
+cloned management cluster). The override flag exists
 for that case.
 
 ### 1.4 Access check and readiness
@@ -184,25 +184,22 @@ The binary takes the kinds at boot:
 widget_sync_controller run --kind anvil.dev/v1/Widget:field:spec.clusterName --kind anvil.dev/v1/Gadget:name
 ```
 
-`<group>/<version>/<Kind>:<selector>`, repeated. Discovery in the outer
+The flag takes `<group>/<version>/<Kind>:<selector>` and may be repeated. Discovery in the outer
 cluster resolves the plural and confirms the kind is served and
 namespaced. `export` prints the demo CRDs.
 
 ### 2.2 The shape a kind must have
 
-The controller reads and writes exactly these fields of an object:
+The controller reads and writes a fixed set of an object's fields: `metadata`,
+the spec (copied verbatim, and the selector field read when the selector is
+`field`), `status.observedGeneration`, and the `Synced`, `Ready` and `Stalled`
+conditions. Everything else in the status is opaque and is mirrored verbatim
+while `Synced`.
 
-| Field | Read or written | Requirement on the CRD |
-|---|---|---|
-| `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
-| `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
-| `status.observedGeneration` | read on the inner copy; written on the outer copy | integer |
-| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else |
-| every other status field | mirrored verbatim inner to outer while `Synced` | none, and `status` requires none of them |
-| the status subresource | | enabled, so `metadata.generation` follows the spec |
-
-At boot the controller fetches each kind's CRD in the outer cluster and
-checks the table. The status rows are required as declarations of those
+At boot the controller fetches each kind's CRD in the outer cluster and refuses
+a kind that does not carry that shape. `deploy/widget_sync/README.md` states the
+requirement row by row, for someone authoring a CRD; `check_shape` in
+`shim_layer/crd_shape.rs` is what actually runs. The status rows are required as declarations of those
 types even on a status that carries `x-kubernetes-preserve-unknown-fields`:
 that setting keeps a field the API server does not know, it does not check
 it, and the installed type of the kind (section 2.3) says that every stored
@@ -218,18 +215,11 @@ inner copy reports, and `Ready` and `Stalled` carry neither `reason` nor
 implementation does not make the problem go away. A CRD generated from
 `metav1.Condition` declares all five condition fields with the types the rows
 demand and marks `lastTransitionTime`, `message` and `reason` required, so it
-passes every other row while making the API server reject the status write with
-422. Nothing reports that rejection: the reconcile discards it, ends in `Error`
-and requeues on the backoff, so the only signal is one WARN per attempt —
-indistinguishable from a controller that was never deployed.
-
-The two levels differ in how long the damage lasts. Conditions are replaced
-whole on every write, so a required condition field rejects every one of them. A
-required field of the mirrored remainder rejects writes only until a `Synced`
-write stores it, because a failure report carries the remainder the outer copy
-already has. That window is exactly when an operator is trying to find out why
-nothing is happening, and in it the object has no status at all: no `Synced`, no
-reason.
+passes every other row, and the boot check refuses it on this one. Without that
+check the API server would reject every status write with 422 and nothing would
+report it: the reconcile discards the error, ends in `Error` and requeues on the
+backoff, so the only signal would be one WARN per attempt — indistinguishable
+from a controller that was never deployed.
 
 `observedGeneration` may be required at either level. The API server sets
 `metadata.generation` on every custom resource and never clears it, so the
@@ -239,18 +229,15 @@ value, read once per reconcile. A required field that declares a `default` is
 also accepted: structural-schema defaulting runs in the decoder, before
 validation.
 
-Only the top level of `status` and the conditions item are inspected. A
-`required` nested inside the mirrored remainder is satisfied by whatever the
-inner implementation wrote, so enforcing it would refuse working deployments.
+Only the top level of `status` and the conditions item are inspected.
 
 Still unchecked: a structural schema prunes an undeclared field on write, so a
 mirrored remainder the outer CRD does not declare is silently dropped unless
 `status` carries `x-kubernetes-preserve-unknown-fields`. Which of the two a
 deployment should be held to is a decision, not an oversight — requiring the
 setting would refuse a CRD that declares its mirrored fields by hand, as both
-demo CRDs do. Inner clusters are not checked for schema parity beyond serving
-the kind with the status subresource (discovery at bind time); parity stays an
-operational assumption, as today.
+demo CRDs do. An inner cluster is not checked at all: not for serving the kind, not for
+schema parity. Parity is an operational assumption.
 
 Assumed for this pass: fields are not removed from a CRD while the
 controller runs, so the check, once true, stays true. Adding optional fields is
@@ -282,7 +269,7 @@ functions with round-trip axioms, in the style of the framework's
 ```
 unmarshal_status(v: Value) -> Result<Option<SyncedStatusView>, _>      // the shape check on a status value
 marshal_status(s: Option<SyncedStatusView>) -> Value
-   axiom: unmarshal_status(marshal_status(s)) == Ok(s)
+   axiom: status_ok(s) ==> unmarshal_status(marshal_status(s)) == Ok(s)   // s representable
 spec_field(v: Value, path: Seq<StringView>) -> Option<StringView>      // the selector field
 unmarshal(kind: Kind, obj: DynamicObjectView) -> Result<SyncedObjectView, _>
    := if obj.kind != kind then Err else match unmarshal_status(obj.status) { Ok(s) => Ok(SyncedObjectView { kind, metadata: obj.metadata, spec: obj.spec, status: s }), Err => Err }
@@ -309,8 +296,10 @@ controller, and the exec hygiene script pins it where it is, file by
 file (`doc/widget_sync_design.md`, section 3, lists the items):
 
 - `kubernetes_api_objects/spec/synced_object.rs`: the uninterpreted
-  `unmarshal_status`, `marshal_status`, `spec_field` and
-  `status_rest_ok`, and the axiom `marshal_status_preserves_integrity`.
+  `unmarshal_status`, `marshal_status`, `spec_field`, `status_rest_ok`
+  and `empty_status_rest`, and the three axioms over them
+  (`marshal_status_preserves_integrity`, `unmarshal_status_is_representable`,
+  `empty_status_rest_ok`).
 - `kubernetes_api_objects/spec/model_kind.rs`: nothing — `model_kind`
   and its injectivity are proved, and the hypotheses injectivity rests
   on are checked on the exec side (boot check and Secret watch).
@@ -321,8 +310,7 @@ file (`doc/widget_sync_design.md`, section 3, lists the items):
 - `kubernetes_api_objects/exec/registry.rs`: `crd_name` and
   `api_resource`, the routing the model trusts.
 - `widget_sync_controller`: `outer_status_for` in `trusted/exec_types.rs`,
-  the uninterpreted `default_status_rest()` in `trusted/spec_types.rs`, and
-  the three `Marshallable` instances of the reconcile states in
+  and the four `Marshallable` instances of the reconcile states in
   `model/install.rs`.
 
 The installed type of a kind of the shape is a function of the schema, not
@@ -344,7 +332,7 @@ which is schema parity stated as a hypothesis.
 
 ### 2.4 The registry
 
-Exec side, trusted. Built at boot from the configured kinds and the
+The registry lives on the exec side and is trusted. It is built at boot from the configured kinds and the
 discovered `ApiResource`s. It is the one place that ties a runtime kind and
 cluster to a model kind:
 
@@ -415,7 +403,7 @@ two entry points rather than one overloaded `reconcile_with`:
 
 ### 3.2 The sync reconciler
 
-One controller per kind, triggered by outer objects of that kind. Its
+The sync reconciler is one controller per kind, triggered by outer objects of that kind. Its
 reconcile is the one of the main design, section 1.2, with two changes:
 
 - At `Init`, `cluster_of(outer)` is read. `None` (the selector field is
@@ -456,7 +444,7 @@ mirrored in place of the named fields.
 
 ### 3.3 The janitor
 
-One controller per (kind, binding), triggered by mirrors of the binding's
+The janitor is one controller per (kind, binding), triggered by mirrors of the binding's
 inner kind. Its reconcile is the one of the main design, section 1.3, with
 one change: the parent is listed when some listed outer object has the
 mirror's parent uid **and** `cluster_of` equal to the binding's cluster
@@ -612,7 +600,7 @@ The statements of the main design, section 3.3, with parameters:
   is one of the four framework kinds; `core_holds_for` is its one-kind form
   and `core_holds` the demo's instance.
 
-Hypotheses added to the theorems, in place of the lemmas that today prove
+The theorems carry these hypotheses in place of the lemmas that today prove
 them from the literal strings. `sync_kind_ok(k)` and `binding_ok(b)` are real
 hypotheses of every statement that needs distinctness -- of the general theorems
 and of the closed ones alike, since the closed ones are now stated for any
@@ -714,7 +702,7 @@ composition is needed for it, and no fairness of the other controllers is
 assumed. `widget_fanout_demo_multi_cluster_theorem` is the one-kind,
 two-binding instance: three controllers, three stores.
 
-Three things the theorem does not give. It is read per (kind, binding), so
+Three things stay outside the theorem. It is read per (kind, binding), so
 nothing compares two inner clusters -- though nothing the controllers do
 compares them either: the sync controller compares an outer uid with the
 annotation on the mirror of one binding, and the janitor of a binding compares
@@ -732,11 +720,9 @@ that refuses a transition, since `spec_ok` is only the `valid_object` half of
 `synced_installed_type` and the demo kind's `valid_transition` is the selector's
 immutability rule.
 
-That the outer kind and every mirror kind are installed with one predicate is a
-hypothesis of every statement, not a property of the model -- `InstalledTypes`
-maps each name separately, so a cluster whose sides validate differently is a
-legal value of it. Section 5.4 says what that hypothesis costs, and that
-equality is more than the proofs need.
+One `spec_ok` for the outer kind and every mirror kind is a hypothesis of every
+statement, not a property of the model: `InstalledTypes` maps each name
+separately.
 
 ### 5.4 Assumptions
 
@@ -767,10 +753,9 @@ The assumptions of the main design, section 3.5, plus:
   and leaves its mirrors in a cluster nothing of ours can reach, which is the
   case section 3.3 already says nothing about.
 - Each binding is its own inner cluster: no two bindings reach the same
-  API server. Enforced operationally by the claim (section 1.3).
-- Schema parity per kind between the outer cluster and every inner
-  cluster, and the shape of section 2.2 not shrinking while the
-  controller runs. The immutability rule on the selector field (section 1.1) is
+  API server. The claim enforces this operationally (section 1.3).
+- Every inner cluster keeps schema parity with the outer cluster per kind, and
+  the shape of section 2.2 does not shrink while the controller runs. The immutability rule on the selector field (section 1.1) is
   part of that parity, not a property of the outer CRD alone: the theorems
   install the outer kind and every inner kind with the same
   `synced_installed_type(spec_ok, selector)`, whose `valid_transition` *is* the
