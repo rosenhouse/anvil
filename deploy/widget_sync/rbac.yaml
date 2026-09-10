@@ -9,7 +9,8 @@
 # must be allowed to do).
 # Beyond the configured kinds it reads:
 #   - secrets, in every namespace: the binding manager watches the ones named
-#     `*-kubeconfig` and builds a binding's clients from them
+#     the label `cluster.x-k8s.io/cluster-name` and builds a binding's
+#     clients from them
 #     (doc/widget_sync_fanout_design.md, sections 1.2 and 4). This is a wide
 #     grant, and it is the point: bindings live in any namespace.
 #   - customresourcedefinitions, get: the boot shape check of each configured
@@ -60,7 +61,8 @@ rules:
       - gadgets/status
     verbs:
       - patch
-  # The bindings: the manager watches every namespace for `*-kubeconfig`.
+  # The bindings: the manager watches every namespace, selecting on the label
+  # `cluster.x-k8s.io/cluster-name`, so no other Secret reaches this process.
   - apiGroups:
       - ""
     resources:

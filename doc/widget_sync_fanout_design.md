@@ -190,19 +190,16 @@ namespaced. `export` prints the demo CRDs.
 
 ### 2.2 The shape a kind must have
 
-The controller reads and writes exactly these fields of an object:
+The controller reads and writes a fixed set of an object's fields: `metadata`,
+the spec (copied verbatim, and the selector field read when the selector is
+`field`), `status.observedGeneration`, and the `Synced`, `Ready` and `Stalled`
+conditions. Everything else in the status is opaque and is mirrored verbatim
+while `Synced`.
 
-| Field | Read or written | Requirement on the CRD |
-|---|---|---|
-| `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
-| `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
-| `status.observedGeneration` | read on the inner copy; written on the outer copy | integer |
-| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else |
-| every other status field | mirrored verbatim inner to outer while `Synced` | none, and `status` requires none of them |
-| the status subresource | | enabled, so `metadata.generation` follows the spec |
-
-At boot the controller fetches each kind's CRD in the outer cluster and
-checks the table. The status rows are required as declarations of those
+At boot the controller fetches each kind's CRD in the outer cluster and refuses
+a kind that does not carry that shape. `deploy/widget_sync/README.md` states the
+requirement row by row, for someone authoring a CRD; `check_shape` in
+`shim_layer/crd_shape.rs` is what actually runs. The status rows are required as declarations of those
 types even on a status that carries `x-kubernetes-preserve-unknown-fields`:
 that setting keeps a field the API server does not know, it does not check
 it, and the installed type of the kind (section 2.3) says that every stored
