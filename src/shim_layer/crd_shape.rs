@@ -47,8 +47,8 @@ pub enum ShapeError {
     StatusObservedGeneration(String),
     /// `status.conditions` row.
     StatusConditions(String),
-    /// The status schema requires a field the controller does not always write,
-    /// so the API server would reject every status write with 422.
+    /// `status`, or a conditions item, requires a field the controller does not
+    /// always write, so the API server would reject the status write with 422.
     StatusRequires(String),
     /// `spec` row, for a `field` selector: `path` is the dotted path.
     SelectorField { path: String, reason: String },
@@ -68,7 +68,7 @@ impl fmt::Display for ShapeError {
                 write!(f, "metadata: scope is {}, must be Namespaced", scope)
             }
             ShapeError::NoStatusSubresource => write!(f, "status subresource: not enabled"),
-            ShapeError::StatusRequires(reason) => write!(f, "status: {}", reason),
+            ShapeError::StatusRequires(reason) => write!(f, "{}", reason),
             ShapeError::NoSchema => write!(f, "schema: the served version has no openAPIV3Schema"),
             ShapeError::StatusObservedGeneration(reason) => {
                 write!(f, "status.observedGeneration: {}", reason)
@@ -196,26 +196,57 @@ fn check_status(schema: &JSONSchemaProps, errors: &mut Vec<ShapeError>) {
     if let Err(reason) = check_no_unwritten_required(status, &STATUS_ALWAYS_WRITTEN, "status") {
         errors.push(ShapeError::StatusRequires(reason));
     }
+    // Separately from check_conditions, which stops at its first failing field: a
+    // metav1.Condition schema trips both rows, and both are worth naming at once.
+    if let Some(item) = conditions_item(status) {
+        if let Err(reason) = check_no_unwritten_required(item, &CONDITION_ALWAYS_WRITTEN, "status.conditions items") {
+            errors.push(ShapeError::StatusRequires(reason));
+        }
+    }
+}
+
+// The item schema of `status.conditions`, when it is declared as one. None when
+// it is missing or malformed, which check_conditions reports.
+fn conditions_item(status: &JSONSchemaProps) -> Option<&JSONSchemaProps> {
+    match &property(status, "conditions")?.items {
+        Some(JSONSchemaPropsOrArray::Schema(item)) => Some(item.as_ref()),
+        _ => None,
+    }
 }
 
 // Every field the sync controller always writes, at the two levels of the status
 // it writes. A schema may require these and nothing else: the API server rejects
-// a write missing a required field, and a rejected status write is discarded
-// rather than reported (the reconcile ends in Error and requeues on the backoff),
-// so the object would carry no status at all and the only signal would be a WARN
-// per attempt.
+// a write missing a required field, and nothing reports that rejection -- the
+// reconcile discards it, ends in Error and requeues on the backoff, so the only
+// signal is one WARN per attempt.
 //
-// The controller writes no lastTransitionTime -- it reads no clocks -- and omits
-// reason and message when the condition it is mirroring has none. A CRD generated
-// from metav1.Condition marks all of lastTransitionTime, message and reason
-// required, and would otherwise pass every other row here.
+// The controller writes no lastTransitionTime, because it reads no clocks. The
+// Synced condition never carries a message, whatever the inner copy reports, and
+// Ready and Stalled carry neither reason nor message from an inner condition that
+// has none. A CRD generated from metav1.Condition marks lastTransitionTime,
+// message and reason required and declares all five fields with the types the
+// rows above demand, so it passes every other row.
+//
+// The two levels differ in how long the damage lasts. Conditions are replaced
+// whole on every write, so a required condition field rejects every one of them.
+// A required field of the mirrored remainder rejects writes only until a Synced
+// write stores it, because a failure report carries the remainder the outer copy
+// already has (reported_status) -- but that window is exactly when an operator is
+// trying to find out why nothing is happening, and in it the object has no status
+// at all: no Synced, no reason.
 const STATUS_ALWAYS_WRITTEN: [&str; 2] = ["observedGeneration", "conditions"];
 const CONDITION_ALWAYS_WRITTEN: [&str; 3] = ["type", "status", "observedGeneration"];
 
-// `observedGeneration` is in both lists because the API server sets
-// metadata.generation on every CRD with the status subresource, and the
-// controller stamps whatever it read; it is omitted only for an object that has
-// no generation, which such a CRD does not produce.
+// observedGeneration is in both lists. The API server sets metadata.generation on
+// every custom resource and never clears it, so the controller always has one to
+// stamp; the status subresource governs when it increments, not whether it
+// exists. Both levels are stamped with the same value, read once per reconcile
+// (exec_types::outer_status_for), so a status cannot carry one and a condition
+// not.
+//
+// A required field that declares a default is not a problem: structural-schema
+// defaulting runs in the decoder, before validation, so the API server fills it
+// in and accepts the write.
 fn check_no_unwritten_required(schema: &JSONSchemaProps, written: &[&str], what: &str) -> Result<(), String> {
     let required = match &schema.required {
         Some(required) => required,
@@ -225,13 +256,14 @@ fn check_no_unwritten_required(schema: &JSONSchemaProps, written: &[&str], what:
         .iter()
         .map(|name| name.as_str())
         .filter(|name| !written.contains(name))
+        .filter(|name| property(schema, name).is_none_or(|field| field.default.is_none()))
         .collect();
     if unwritten.is_empty() {
         return Ok(());
     }
     unwritten.sort_unstable();
     Err(format!(
-        "{} requires {}, which the controller does not always write, so the API server would reject every status write",
+        "{} requires {}, which the controller does not always write and which declare no default, so the API server would reject the status write",
         what,
         unwritten.join(", ")
     ))
@@ -269,7 +301,6 @@ fn check_conditions(status: &JSONSchemaProps) -> Result<(), String> {
             return Err(format!("conditions items: {} must be required", name));
         }
     }
-    check_no_unwritten_required(item, &CONDITION_ALWAYS_WRITTEN, "conditions items")?;
     Ok(())
 }
 
@@ -599,9 +630,20 @@ mod tests {
         let errors =
             check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap_err();
         assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(matches!(errors[0], ShapeError::StatusRequires(_)), "{:?}", errors[0]);
         let text = errors[0].to_string();
         assert!(text.contains("lastTransitionTime, message, reason"), "{}", text);
-        assert!(text.contains("reject every status write"), "{}", text);
+    }
+
+    // Defaulting runs in the decoder, before validation, so the API server fills
+    // a defaulted field in and accepts the write.
+    #[test]
+    fn a_required_condition_field_with_a_default_is_accepted() {
+        let mut status = widget_status();
+        status["properties"]["conditions"]["items"]["properties"]["message"] =
+            json!({ "type": "string", "default": "" });
+        status["properties"]["conditions"]["items"]["required"] = json!(["message", "status", "type"]);
+        check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap();
     }
 
     // observedGeneration is written whenever the object has a generation, which
@@ -624,6 +666,7 @@ mod tests {
         let errors =
             check_shape(&good_crd(with_cluster_name(old_widget_spec(), true), status), &by_field()).unwrap_err();
         assert_eq!(errors.len(), 1, "{:?}", errors);
+        assert!(matches!(errors[0], ShapeError::StatusRequires(_)), "{:?}", errors[0]);
         assert!(errors[0].to_string().contains("observedCount"), "{}", errors[0]);
     }
 
@@ -861,9 +904,11 @@ mod tests {
 
     #[test]
     fn every_failing_row_is_reported() {
-        let crd = crd("Cluster", false, old_widget_spec(), json!({ "type": "object", "properties": {} }));
+        let status = json!({ "type": "object", "properties": {}, "required": ["phase"] });
+        let crd = crd("Cluster", false, old_widget_spec(), status);
         let errors = check_shape(&crd, &by_field()).unwrap_err();
-        assert_eq!(errors.len(), 5, "{:?}", errors);
+        assert_eq!(errors.len(), 6, "{:?}", errors);
+        assert!(errors.iter().any(|e| matches!(e, ShapeError::StatusRequires(_))), "{:?}", errors);
         assert_eq!(crd_name(&by_field(), "widgets"), "widgets.anvil.dev");
     }
 }
