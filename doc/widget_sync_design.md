@@ -952,7 +952,7 @@ after a plain `cargo build --lib`.
 
 #49 is the register of what the formal work does not cover, and which of those
 gaps need a decision before code. Open besides it: the e2e checks that need the
-kind testbed (#14), and the pass that makes the branch reviewable upstream
+kind testbed (#30), and the pass that makes the branch reviewable upstream
 (#16).
 
 Out of scope by decision: a verified inner controller, so the sync controller

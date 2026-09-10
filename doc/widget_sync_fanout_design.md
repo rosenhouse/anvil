@@ -218,10 +218,11 @@ inner copy reports, and `Ready` and `Stalled` carry neither `reason` nor
 implementation does not make the problem go away. A CRD generated from
 `metav1.Condition` declares all five condition fields with the types the rows
 demand and marks `lastTransitionTime`, `message` and `reason` required, so it
-passes every other row while making the API server reject the status write with
-422. Nothing reports that rejection: the reconcile discards it, ends in `Error`
-and requeues on the backoff, so the only signal is one WARN per attempt —
-indistinguishable from a controller that was never deployed.
+passes every other row, and the boot check refuses it on this one. Without that
+check the API server would reject every status write with 422 and nothing would
+report it: the reconcile discards the error, ends in `Error` and requeues on the
+backoff, so the only signal would be one WARN per attempt — indistinguishable
+from a controller that was never deployed.
 
 `observedGeneration` may be required at either level. The API server sets
 `metadata.generation` on every custom resource and never clears it, so the
