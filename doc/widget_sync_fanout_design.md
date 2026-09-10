@@ -197,8 +197,8 @@ The controller reads and writes exactly these fields of an object:
 | `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
 | `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
 | `status.observedGeneration` | read on the inner copy; written on the outer copy | integer |
-| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer) |
-| every other status field | mirrored verbatim inner to outer while `Synced` | none |
+| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else |
+| every other status field | mirrored verbatim inner to outer while `Synced` | none, and `status` requires none of them |
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
 At boot the controller fetches each kind's CRD in the outer cluster and
@@ -208,13 +208,54 @@ that setting keeps a field the API server does not know, it does not check
 it, and the installed type of the kind (section 2.3) says that every stored
 status unmarshals — which, for what other writers store, only the CRD's
 schema makes true. A kind that fails any row is refused with a usage
-error naming the row. Inner clusters are not checked for schema parity
-beyond serving the kind with the status subresource (discovery at bind
-time); parity stays an operational assumption, as today.
+error naming the row.
+
+The two "requires" clauses keep a schema from being satisfiable in form and
+unusable in fact. The controller writes no `lastTransitionTime`, because it
+reads no clocks. The `Synced` condition never carries a `message`, whatever the
+inner copy reports, and `Ready` and `Stalled` carry neither `reason` nor
+`message` from an inner condition that has none — so a well-behaved inner
+implementation does not make the problem go away. A CRD generated from
+`metav1.Condition` declares all five condition fields with the types the rows
+demand and marks `lastTransitionTime`, `message` and `reason` required, so it
+passes every other row while making the API server reject the status write with
+422. Nothing reports that rejection: the reconcile discards it, ends in `Error`
+and requeues on the backoff, so the only signal is one WARN per attempt —
+indistinguishable from a controller that was never deployed.
+
+The two levels differ in how long the damage lasts. Conditions are replaced
+whole on every write, so a required condition field rejects every one of them. A
+required field of the mirrored remainder rejects writes only until a `Synced`
+write stores it, because a failure report carries the remainder the outer copy
+already has. That window is exactly when an operator is trying to find out why
+nothing is happening, and in it the object has no status at all: no `Synced`, no
+reason.
+
+`observedGeneration` may be required at either level. The API server sets
+`metadata.generation` on every custom resource and never clears it, so the
+controller always has one to stamp — the status subresource governs when it
+increments, not whether it exists — and both levels are stamped with the same
+value, read once per reconcile. A required field that declares a `default` is
+also accepted: structural-schema defaulting runs in the decoder, before
+validation.
+
+Only the top level of `status` and the conditions item are inspected. A
+`required` nested inside the mirrored remainder is satisfied by whatever the
+inner implementation wrote, so enforcing it would refuse working deployments.
+
+Still unchecked: a structural schema prunes an undeclared field on write, so a
+mirrored remainder the outer CRD does not declare is silently dropped unless
+`status` carries `x-kubernetes-preserve-unknown-fields`. Which of the two a
+deployment should be held to is a decision, not an oversight — requiring the
+setting would refuse a CRD that declares its mirrored fields by hand, as both
+demo CRDs do. Inner clusters are not checked for schema parity beyond serving
+the kind with the status subresource (discovery at bind time); parity stays an
+operational assumption, as today.
 
 Assumed for this pass: fields are not removed from a CRD while the
-controller runs, so the check, once true, stays true. Adding fields is
-fine. A later pass can watch the CRDs and stop a kind whose shape breaks.
+controller runs, so the check, once true, stays true. Adding optional fields
+is fine; adding a required one breaks every status write, and the check does
+not re-run. A later pass can watch the CRDs and stop a kind whose shape breaks.
 
 This is the structural subtype: the controller and its proofs are about
 objects of this shape, and any CRD that has the shape can be reconciled.
