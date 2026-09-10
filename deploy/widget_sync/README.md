@@ -203,14 +203,14 @@ from an inner condition that has none.
 
 A CRD generated from `metav1.Condition` declares all five condition fields with
 the types the table demands and marks `lastTransitionTime`, `message` and
-`reason` required, so it passes every row above. The API server then rejects
-the status write with 422, and nothing reports that: the object carries no
-status at all and the only sign is one WARN per attempt. The boot check refuses
-such a schema. A required field that declares a `default` is accepted, because
-defaulting runs before validation.
+`reason` required, so it passes every other row and the boot check refuses it on
+this one. Without that check the API server would reject every status write with
+422 and nothing would report it: the object would carry no status at all, the
+only sign one WARN per attempt. A required field that declares a `default` is
+accepted, because defaulting runs before validation.
 
-Inner clusters are not checked for schema parity beyond serving the kind;
-parity stays an operational assumption. So does this, for now: **fields are
+An inner cluster is not checked at all: not for serving the kind, not for
+schema parity. Parity is an operational assumption. So does this, for now: **fields are
 not removed from a CRD while the controller runs**, so the boot check, once it
 passes, stays true. Adding optional fields is fine; adding a required one the
 controller does not write breaks status writes, and the check does not re-run.

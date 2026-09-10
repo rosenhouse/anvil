@@ -223,14 +223,6 @@ passes every other row while making the API server reject the status write with
 and requeues on the backoff, so the only signal is one WARN per attempt —
 indistinguishable from a controller that was never deployed.
 
-The two levels differ in how long the damage lasts. Conditions are replaced
-whole on every write, so a required condition field rejects every one of them. A
-required field of the mirrored remainder rejects writes only until a `Synced`
-write stores it, because a failure report carries the remainder the outer copy
-already has. That window is exactly when an operator is trying to find out why
-nothing is happening, and in it the object has no status at all: no `Synced`, no
-reason.
-
 `observedGeneration` may be required at either level. The API server sets
 `metadata.generation` on every custom resource and never clears it, so the
 controller always has one to stamp — the status subresource governs when it
@@ -239,18 +231,15 @@ value, read once per reconcile. A required field that declares a `default` is
 also accepted: structural-schema defaulting runs in the decoder, before
 validation.
 
-Only the top level of `status` and the conditions item are inspected. A
-`required` nested inside the mirrored remainder is satisfied by whatever the
-inner implementation wrote, so enforcing it would refuse working deployments.
+Only the top level of `status` and the conditions item are inspected.
 
 Still unchecked: a structural schema prunes an undeclared field on write, so a
 mirrored remainder the outer CRD does not declare is silently dropped unless
 `status` carries `x-kubernetes-preserve-unknown-fields`. Which of the two a
 deployment should be held to is a decision, not an oversight — requiring the
 setting would refuse a CRD that declares its mirrored fields by hand, as both
-demo CRDs do. Inner clusters are not checked for schema parity beyond serving
-the kind with the status subresource (discovery at bind time); parity stays an
-operational assumption, as today.
+demo CRDs do. An inner cluster is not checked at all: not for serving the kind, not for
+schema parity. Parity is an operational assumption.
 
 Assumed for this pass: fields are not removed from a CRD while the
 controller runs, so the check, once true, stays true. Adding optional fields is
@@ -282,7 +271,7 @@ functions with round-trip axioms, in the style of the framework's
 ```
 unmarshal_status(v: Value) -> Result<Option<SyncedStatusView>, _>      // the shape check on a status value
 marshal_status(s: Option<SyncedStatusView>) -> Value
-   axiom: unmarshal_status(marshal_status(s)) == Ok(s)
+   axiom: status_ok(s) ==> unmarshal_status(marshal_status(s)) == Ok(s)   // s representable
 spec_field(v: Value, path: Seq<StringView>) -> Option<StringView>      // the selector field
 unmarshal(kind: Kind, obj: DynamicObjectView) -> Result<SyncedObjectView, _>
    := if obj.kind != kind then Err else match unmarshal_status(obj.status) { Ok(s) => Ok(SyncedObjectView { kind, metadata: obj.metadata, spec: obj.spec, status: s }), Err => Err }
@@ -309,8 +298,10 @@ controller, and the exec hygiene script pins it where it is, file by
 file (`doc/widget_sync_design.md`, section 3, lists the items):
 
 - `kubernetes_api_objects/spec/synced_object.rs`: the uninterpreted
-  `unmarshal_status`, `marshal_status`, `spec_field` and
-  `status_rest_ok`, and the axiom `marshal_status_preserves_integrity`.
+  `unmarshal_status`, `marshal_status`, `spec_field`, `status_rest_ok`
+  and `empty_status_rest`, and the three axioms over them
+  (`marshal_status_preserves_integrity`, `unmarshal_status_is_representable`,
+  `empty_status_rest_ok`).
 - `kubernetes_api_objects/spec/model_kind.rs`: nothing — `model_kind`
   and its injectivity are proved, and the hypotheses injectivity rests
   on are checked on the exec side (boot check and Secret watch).
@@ -321,8 +312,7 @@ file (`doc/widget_sync_design.md`, section 3, lists the items):
 - `kubernetes_api_objects/exec/registry.rs`: `crd_name` and
   `api_resource`, the routing the model trusts.
 - `widget_sync_controller`: `outer_status_for` in `trusted/exec_types.rs`,
-  the uninterpreted `default_status_rest()` in `trusted/spec_types.rs`, and
-  the three `Marshallable` instances of the reconcile states in
+  and the four `Marshallable` instances of the reconcile states in
   `model/install.rs`.
 
 The installed type of a kind of the shape is a function of the schema, not
@@ -732,11 +722,9 @@ that refuses a transition, since `spec_ok` is only the `valid_object` half of
 `synced_installed_type` and the demo kind's `valid_transition` is the selector's
 immutability rule.
 
-That the outer kind and every mirror kind are installed with one predicate is a
-hypothesis of every statement, not a property of the model -- `InstalledTypes`
-maps each name separately, so a cluster whose sides validate differently is a
-legal value of it. Section 5.4 says what that hypothesis costs, and that
-equality is more than the proofs need.
+One `spec_ok` for the outer kind and every mirror kind is a hypothesis of every
+statement, not a property of the model: `InstalledTypes` maps each name
+separately.
 
 ### 5.4 Assumptions
 
