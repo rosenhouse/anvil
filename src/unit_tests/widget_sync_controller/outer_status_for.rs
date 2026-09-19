@@ -36,19 +36,64 @@ fn cond(type_: &str, status: &str, generation: i64, reason: Option<&str>, messag
 }
 
 // Every not-synced outcome, with what the README table says of it: Synced's
-// reason, whether Stalled is True, and Ready's status.
-fn not_synced_outcomes() -> Vec<(SyncOutcome, &'static str, bool, &'static str)> {
+// reason, Stalled's status and Ready's status. One row per not-synced variant;
+// the match in the_readme_table_has_a_row_per_not_synced_outcome stops
+// compiling when a variant is added, so the row set is pinned too.
+fn not_synced_outcomes() -> Vec<(SyncOutcome, &'static str, &'static str, &'static str)> {
     vec![
-        (SyncOutcome::InnerConverging, "InnerConverging", false, "Unknown"),
-        (SyncOutcome::InnerTerminating, "InnerTerminating", false, "Unknown"),
-        (SyncOutcome::StaleMirror, "StaleMirror", false, "False"),
-        (SyncOutcome::ForeignObject, "ForeignObject", true, "False"),
-        (SyncOutcome::Failed(FailureReason::Forbidden), "Forbidden", true, "Unknown"),
-        (SyncOutcome::Failed(FailureReason::InnerUnreachable), "InnerUnreachable", false, "Unknown"),
-        (SyncOutcome::Failed(FailureReason::CreateFailed), "CreateFailed", false, "False"),
-        (SyncOutcome::Failed(FailureReason::Rejected), "Rejected", true, "False"),
-        (SyncOutcome::Failed(FailureReason::RequestFailed), "RequestFailed", false, "Unknown"),
+        (SyncOutcome::InnerConverging, "InnerConverging", "False", "Unknown"),
+        (SyncOutcome::InnerTerminating, "InnerTerminating", "False", "Unknown"),
+        (SyncOutcome::StaleMirror, "StaleMirror", "False", "False"),
+        (SyncOutcome::ForeignObject, "ForeignObject", "True", "False"),
+        (SyncOutcome::Failed(FailureReason::Forbidden), "Forbidden", "True", "Unknown"),
+        (SyncOutcome::Failed(FailureReason::InnerUnreachable), "InnerUnreachable", "False", "Unknown"),
+        (SyncOutcome::Failed(FailureReason::CreateFailed), "CreateFailed", "False", "False"),
+        (SyncOutcome::Failed(FailureReason::Rejected), "Rejected", "True", "False"),
+        (SyncOutcome::Failed(FailureReason::RequestFailed), "RequestFailed", "False", "Unknown"),
     ]
+}
+
+// The README table itself: its rows' reason, Stalled and Ready cells, in
+// order, read out of deploy/widget_sync/README.md so the two cannot drift.
+fn readme_table_rows() -> Vec<(String, String, String)> {
+    let readme = include_str!("../../../deploy/widget_sync/README.md");
+    readme
+        .lines()
+        .filter(|line| line.starts_with("| `"))
+        .map(|line| line.split('|').map(str::trim).map(str::to_string).collect::<Vec<String>>())
+        // The reasons table has five columns; the other tables of the README fewer.
+        .filter(|cells| cells.len() == 7 && (cells[3] == "`True`" || cells[3] == "`False`"))
+        .map(|cells| (cells[1].clone(), cells[3].clone(), cells[4].clone()))
+        .collect()
+}
+
+#[test]
+fn the_readme_table_is_the_not_synced_outcomes() {
+    let expected: Vec<(String, String, String)> = not_synced_outcomes()
+        .into_iter()
+        .map(|(_, reason, stalled, ready)| (format!("`{}`", reason), format!("`{}`", stalled), format!("`{}`", ready)))
+        .collect();
+    assert_eq!(readme_table_rows(), expected);
+}
+
+#[test]
+fn the_readme_table_has_a_row_per_not_synced_outcome() {
+    let rows = not_synced_outcomes();
+    assert_eq!(rows.len(), 9);
+    for (outcome, _, _, _) in rows {
+        match outcome {
+            SyncOutcome::Synced => panic!("Synced is not a row of the table"),
+            SyncOutcome::InnerConverging
+            | SyncOutcome::InnerTerminating
+            | SyncOutcome::StaleMirror
+            | SyncOutcome::ForeignObject
+            | SyncOutcome::Failed(FailureReason::Forbidden)
+            | SyncOutcome::Failed(FailureReason::InnerUnreachable)
+            | SyncOutcome::Failed(FailureReason::CreateFailed)
+            | SyncOutcome::Failed(FailureReason::Rejected)
+            | SyncOutcome::Failed(FailureReason::RequestFailed) => {}
+        }
+    }
 }
 
 #[test]
@@ -113,6 +158,36 @@ fn an_inner_stalled_true_forces_ready_false_with_its_text() {
 }
 
 #[test]
+fn an_inner_stalled_that_is_not_true_does_not_veto_ready_true() {
+    for stalled in ["Unknown", "False"] {
+        let inner = json!({
+            "conditions": [
+                { "type": "Ready", "status": "True", "reason": "Running" },
+                { "type": "Stalled", "status": stalled, "reason": "Fine" },
+            ],
+        });
+        let outer = written(Some(3), Some(inner), SyncOutcome::Synced);
+        assert_eq!(condition(&outer, "Ready"), &cond("Ready", "True", 3, Some("Running"), None));
+        assert_eq!(condition(&outer, "Stalled"), &cond("Stalled", stalled, 3, Some("Fine"), None));
+    }
+}
+
+#[test]
+fn a_null_reason_or_message_is_absent_on_the_copy() {
+    let inner = json!({
+        "conditions": [
+            { "type": "Ready", "status": "True", "reason": null, "message": null },
+            { "type": "Stalled", "status": "True", "reason": null },
+            { "type": "Stalled", "status": "False", "reason": "Second" },
+        ],
+    });
+    let outer = written(Some(1), Some(inner), SyncOutcome::Synced);
+    // The first Stalled is the one read, and its null reason is no reason.
+    assert_eq!(condition(&outer, "Ready"), &cond("Ready", "False", 1, None, None));
+    assert_eq!(condition(&outer, "Stalled"), &cond("Stalled", "True", 1, None, None));
+}
+
+#[test]
 fn an_inner_status_that_is_none_of_the_three_reads_unknown() {
     let inner = json!({
         "conditions": [
@@ -157,7 +232,7 @@ fn not_synced_reports_the_readme_table() {
                 "conditions": [
                     cond("Synced", "False", 2, Some(reason), None),
                     cond("Ready", ready, 2, Some("NotSynced"), None),
-                    cond("Stalled", if stalled { "True" } else { "False" }, 2, Some(reason), None),
+                    cond("Stalled", stalled, 2, Some(reason), None),
                 ],
                 // The mirrored remainder is kept as last reported.
                 "observedCount": 3,

@@ -42,7 +42,7 @@ spec:
             nullable: true
             properties:
               conditions:
-                description: On an outer copy, exactly Synced, Ready and Stalled, all with observedGeneration equal to the generation the sync controller reconciled. Synced is True when the spec is in the inner cluster and the inner status observes it; otherwise False with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or, after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or RequestFailed. While Synced is True, Ready is the inner copy's own Ready condition (status, reason and message), except that an inner Stalled=True forces Ready=False with that condition's reason and message, and a mirror with no Ready condition reads Unknown with reason NoInnerReadyCondition. While Synced is False, Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating, Forbidden, InnerUnreachable and RequestFailed, False for StaleMirror, ForeignObject, CreateFailed and Rejected. Stalled is True with the sync controller's reason for ForeignObject, Forbidden and Rejected; otherwise, while Synced is True, it is the inner copy's own Stalled condition, and False with Synced's reason when there is none or Synced is False. Ready and Stalled are never both True.
+                description: On an outer copy, exactly Synced, Ready and Stalled, all with observedGeneration equal to the generation the sync controller reconciled. Synced is True when the spec is in the inner cluster and the inner status observes it; otherwise False with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or, after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or RequestFailed. While Synced is True, Ready is the inner copy's own Ready condition (status, reason and message; an inner status that is none of True, False and Unknown reads Unknown), except that an inner Stalled=True forces Ready=False with that condition's reason and message, and a mirror with no Ready condition reads Unknown with reason NoInnerReadyCondition. While Synced is False, Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating, Forbidden, InnerUnreachable and RequestFailed, False for StaleMirror, ForeignObject, CreateFailed and Rejected. Stalled is True with the sync controller's reason for ForeignObject, Forbidden and Rejected; otherwise, while Synced is True, it is the inner copy's own Stalled condition, and False with Synced's reason when the inner copy has no Stalled condition or Synced is False. Ready and Stalled are never both True.
                 items:
                   description: A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted because the verified controller does not read clocks.
                   properties:
@@ -56,11 +56,11 @@ spec:
                       nullable: true
                       type: integer
                     reason:
-                      description: A CamelCase word saying why the condition has its status.
+                      description: A CamelCase word saying why the condition has its status; absent on an outer copy when the inner condition it repeats carries none.
                       nullable: true
                       type: string
                     status:
-                      description: True, False or Unknown. Synced is never Unknown.
+                      description: On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner copy, whatever the inner implementation writes.
                       type: string
                     type:
                       description: Synced, Ready or Stalled on an outer copy; whatever the inner implementation reports on an inner copy (the sync controller reads Ready and Stalled).
@@ -82,7 +82,7 @@ spec:
                 nullable: true
                 type: integer
               ready:
-                description: Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
+                description: 'Mirrored from the inner copy while Synced is True; otherwise kept as last reported. A data field, not the Ready condition: while Synced is False the two can disagree.'
                 nullable: true
                 type: boolean
             type: object

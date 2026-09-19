@@ -50,11 +50,11 @@ spec:
                       nullable: true
                       type: integer
                     reason:
-                      description: A CamelCase word saying why the condition has its status.
+                      description: A CamelCase word saying why the condition has its status; absent on an outer copy when the inner condition it repeats carries none.
                       nullable: true
                       type: string
                     status:
-                      description: True, False or Unknown. Synced is never Unknown.
+                      description: On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner copy, whatever the inner implementation writes.
                       type: string
                     type:
                       description: Synced, Ready or Stalled on an outer copy; whatever the inner implementation reports on an inner copy (the sync controller reads Ready and Stalled).

@@ -211,6 +211,7 @@ pub struct WidgetStatus {
     #[serde(rename = "observedGeneration")]
     pub observed_generation: Option<i64>,
     /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
+    /// A data field, not the Ready condition: while Synced is False the two can disagree.
     pub ready: Option<bool>,
     /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
     #[serde(rename = "observedCount")]
@@ -221,7 +222,8 @@ pub struct WidgetStatus {
     /// with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or,
     /// after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or
     /// RequestFailed. While Synced is True, Ready is the inner copy's own Ready
-    /// condition (status, reason and message), except that an inner Stalled=True forces
+    /// condition (status, reason and message; an inner status that is none of True,
+    /// False and Unknown reads Unknown), except that an inner Stalled=True forces
     /// Ready=False with that condition's reason and message, and a mirror with no Ready
     /// condition reads Unknown with reason NoInnerReadyCondition. While Synced is False,
     /// Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating,
@@ -229,8 +231,8 @@ pub struct WidgetStatus {
     /// ForeignObject, CreateFailed and Rejected. Stalled is True with the sync
     /// controller's reason for ForeignObject, Forbidden and Rejected; otherwise, while
     /// Synced is True, it is the inner copy's own Stalled condition, and False with
-    /// Synced's reason when there is none or Synced is False. Ready and Stalled are
-    /// never both True.
+    /// Synced's reason when the inner copy has no Stalled condition or Synced is
+    /// False. Ready and Stalled are never both True.
     pub conditions: Option<Vec<WidgetCondition>>,
 }
 
@@ -244,12 +246,14 @@ pub struct WidgetCondition {
     /// reports on an inner copy (the sync controller reads Ready and Stalled).
     #[serde(rename = "type")]
     pub type_: String,
-    /// True, False or Unknown. Synced is never Unknown.
+    /// On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner
+    /// copy, whatever the inner implementation writes.
     pub status: String,
     /// The generation of the object the condition was computed for.
     #[serde(rename = "observedGeneration")]
     pub observed_generation: Option<i64>,
-    /// A CamelCase word saying why the condition has its status.
+    /// A CamelCase word saying why the condition has its status; absent on an outer
+    /// copy when the inner condition it repeats carries none.
     pub reason: Option<String>,
     /// Free text; on an outer copy, copied from the inner condition when the reason is.
     pub message: Option<String>,

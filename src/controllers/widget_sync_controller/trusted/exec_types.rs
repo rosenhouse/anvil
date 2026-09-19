@@ -194,8 +194,8 @@ impl SyncOutcome {
         }
     }
 
-    pub fn inner_status_unread(&self) -> (b: bool)
-        ensures b == self@.inner_status_unread(),
+    pub fn ready_unknown(&self) -> (b: bool)
+        ensures b == self@.ready_unknown(),
     {
         match self {
             SyncOutcome::InnerConverging => true,
@@ -233,13 +233,13 @@ pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedSta
     let inner_ready = find("Ready");
     let inner_stalled = find("Stalled");
     let condition_status = |b: bool| if b { "True".to_string() } else { "False".to_string() };
-    // spec_types::three_valued.
+    // The exec twin of spec_types::three_valued.
     let three_valued = |status: String| if status == "True" || status == "False" || status == "Unknown" { status } else { "Unknown".to_string() };
     let make = |type_: &str, status: String, reason: Option<String>, message: Option<String>|
         SyncedCondition::new(type_.to_string(), status, outer_generation, reason, message);
     let synced_condition = make("Synced", condition_status(synced), Some(reason.clone()), None);
     let ready_condition = if !synced {
-        let status = if outcome.inner_status_unread() { "Unknown" } else { "False" };
+        let status = if outcome.ready_unknown() { "Unknown" } else { "False" };
         make("Ready", status.to_string(), Some("NotSynced".to_string()), None)
     } else if inner_stalled.as_ref().map_or(false, |c| c.status() == "True") {
         let c = inner_stalled.as_ref().unwrap();

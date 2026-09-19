@@ -321,7 +321,8 @@ pub proof fn lemma_condition_statuses_distinct()
     assert("False"@.len() != "Unknown"@.len());
 }
 
-// three_valued is one of the three, and is True only of True.
+// three_valued(status) is one of the three literals, and is True exactly when
+// status is.
 pub proof fn lemma_three_valued(status: StringView)
     ensures
         three_valued(status) == condition_true() || three_valued(status) == condition_false() || three_valued(status) == condition_unknown(),
@@ -367,9 +368,9 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
             &&& synced.reason is Some
             &&& synced.message is None
             &&& (synced.status == condition_false() ==> {
-                    &&& ready.status != condition_true()
                     &&& ready.reason == Some(reason_not_synced())
                     &&& ready.message is None
+                    &&& (ready.status == condition_unknown() <==> reason_reads_ready_unknown(synced.reason->0))
                     &&& stalled.reason == synced.reason
                     &&& stalled.message is None
                 })
@@ -386,6 +387,38 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
     // Synced is the only reason of that name, so the reason identifies the outcome
     // as Synced and the condition's status follows.
     lemma_synced_is_the_only_synced_reason(outcome);
+    // The reason also decides between Unknown and False.
+    lemma_ready_unknown_by_reason(outcome);
+}
+
+// The outcomes under which Ready reads Unknown are exactly those whose reason
+// reason_reads_ready_unknown names. Each reason is a distinct literal; all but
+// one pair differ in length, and ForeignObject and RequestFailed differ in their
+// first character.
+pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
+    ensures outcome.ready_unknown() <==> reason_reads_ready_unknown(outcome.reason()),
+{
+    reveal_strlit("Synced");
+    reveal_strlit("InnerConverging");
+    reveal_strlit("InnerTerminating");
+    reveal_strlit("ForeignObject");
+    reveal_strlit("StaleMirror");
+    reveal_strlit("Forbidden");
+    reveal_strlit("InnerUnreachable");
+    reveal_strlit("CreateFailed");
+    reveal_strlit("Rejected");
+    reveal_strlit("RequestFailed");
+    assert("Synced"@.len() == 6);
+    assert("InnerConverging"@.len() == 15);
+    assert("InnerTerminating"@.len() == 16);
+    assert("ForeignObject"@.len() == 13);
+    assert("StaleMirror"@.len() == 11);
+    assert("Forbidden"@.len() == 9);
+    assert("InnerUnreachable"@.len() == 16);
+    assert("CreateFailed"@.len() == 12);
+    assert("Rejected"@.len() == 8);
+    assert("RequestFailed"@.len() == 13);
+    assert("ForeignObject"@[0] != "RequestFailed"@[0]);
 }
 
 // No outcome but Synced reports the reason Synced. Each reason is a distinct

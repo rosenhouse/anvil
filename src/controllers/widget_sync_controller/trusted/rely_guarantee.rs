@@ -196,7 +196,7 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     // (G-shape) Synced, Ready and Stalled are the status's only conditions, in that
     // order, and they agree with each other. Synced is True or False; Ready and
     // Stalled are each True, False or Unknown. Ready is True only when Synced is,
-    // and never beside a True Stalled.
+    // and never while Stalled is True.
     //
     // The clause relates the reported conditions to each other, never to the inner
     // cluster. The mirrored remainder is unconstrained, and so are the Ready and
@@ -219,16 +219,18 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& (conds[0].status == condition_true() <==> conds[0].reason == Some(reason_synced()))
     &&& conds[0].reason is Some
     &&& conds[0].message is None
-    // A False Synced means no inner status was consulted, and the other two say so
-    // rather than reporting one: Ready is Unknown or False with reason NotSynced,
-    // Stalled repeats Synced's reason, and neither carries a message. Which of
-    // Unknown and False is the outcome's (spec_types::ready_condition_for), which
-    // the request does not carry. (Ready and Stalled quote the inner conditions
-    // only when Synced is True, where this says nothing of them.)
+    // A False Synced means no caught-up inner status was read, and the other two
+    // say so rather than reporting one: Ready is Unknown or False with reason
+    // NotSynced, Stalled repeats Synced's reason, and neither carries a message.
+    // Synced's reason names the outcome, and the outcome decides which of Unknown
+    // and False Ready is (spec_types::ready_unknown), so the clause pins it:
+    // Unknown exactly under the reasons of reason_reads_ready_unknown. (Ready and
+    // Stalled quote the inner conditions only when Synced is True, where this
+    // says nothing of them.)
     &&& (conds[0].status == condition_false() ==> {
-            &&& conds[1].status != condition_true()
             &&& conds[1].reason == Some(reason_not_synced())
             &&& conds[1].message is None
+            &&& (conds[1].status == condition_unknown() <==> reason_reads_ready_unknown(conds[0].reason->0))
             &&& conds[2].reason == conds[0].reason
             &&& conds[2].message is None
         })
