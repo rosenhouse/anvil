@@ -66,6 +66,14 @@ On the outer copy:
   (same normalization as `Ready`). Otherwise `False` with `Synced`'s reason,
   so a synced mirror with no `Stalled` condition reads `Stalled=False/Synced`.
   `Ready` and `Stalled` are never both `True`.
+- The conditions after those three: every condition the inner copy carries
+  of another type, in the inner order, the first of each type, with
+  `observedGeneration` set to the outer generation at which it was read.
+  While `Synced` is `False` they are kept as last reported, so their
+  `observedGeneration` is older than the first three's: that is how you tell
+  a kept copy from a current one. An inner `Synced` condition is dropped. No
+  condition carries `lastTransitionTime`. In the demo the echo controller
+  writes `Echoed`, which the outer copy carries.
 
 Wait on `Synced`, which the sync controller writes for every kind it serves.
 `kubectl wait --for=condition=` reads the condition's status only, not its

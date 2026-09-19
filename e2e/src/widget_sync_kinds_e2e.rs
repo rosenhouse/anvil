@@ -14,7 +14,8 @@
 //      references;
 //   2. the echo controller's status comes back on the outer copy: observedSize,
 //      the mirrored payload the sync controller knows nothing about, a Ready
-//      condition, and Synced=True at the outer generation;
+//      condition, the Echoed condition copied with the outer generation, and
+//      Synced=True at the outer generation;
 //   3. a Gadget whose name is not a binding of this process ("elsewhere") is
 //      answered as an unreachable inner cluster: the outer copy reports
 //      Synced=False/InnerUnreachable with Ready=Unknown/NotSynced, not
@@ -144,8 +145,10 @@ fn inner_caught_up(inner: &Gadget) -> bool {
 }
 
 // The outer Gadget reports `size` at its current generation with Synced=True and
-// Ready=True. `observedSize` is the echo controller's own payload: the sync
-// controller mirrors it without a line of code about it.
+// Ready=True, and carries the echo controller's Echoed condition stamped with
+// the outer generation. `observedSize` is the echo controller's own payload: the
+// sync controller mirrors it without a line of code about it, and Echoed is a
+// condition type it copies without knowing.
 fn outer_reports(outer: &Gadget, size: i32) -> bool {
     let status = match &outer.status {
         Some(s) => s,
@@ -154,11 +157,13 @@ fn outer_reports(outer: &Gadget, size: i32) -> bool {
     let generation = outer.metadata.generation;
     let synced = condition(&status.conditions, "Synced");
     let ready = condition(&status.conditions, "Ready");
+    let echoed = condition(&status.conditions, "Echoed");
     generation.is_some()
         && status.observed_generation == generation
         && status.observed_size == Some(size)
         && synced.map(|c| c.status == "True" && c.observed_generation == generation).unwrap_or(false)
         && ready.map(|c| c.status == "True").unwrap_or(false)
+        && echoed.map(|c| c.status == "True" && c.observed_generation == generation).unwrap_or(false)
 }
 
 // The outer copy of an object whose cluster no binding serves: the reason the
@@ -347,17 +352,19 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
         .await
         .map_err(failed("create outer widget"))?;
     let w = widgets.clone();
-    wait_until("outer widget reports count 4 at generation 1 with Synced=True", TIMEOUT, move || {
+    wait_until("outer widget reports count 4 at generation 1 with Synced=True and Echoed", TIMEOUT, move || {
         let w = w.clone();
         async move {
             let outer_obj = w.get(WIDGET_NAME).await.map_err(failed("get outer widget"))?;
             let status = match &outer_obj.status { Some(s) => s, None => return Ok(false) };
-            let synced = status.conditions.as_ref().and_then(|c| c.iter().find(|c| c.type_ == "Synced"));
+            let synced = condition(&status.conditions, "Synced");
+            let echoed = condition(&status.conditions, "Echoed");
             Ok(outer_obj.metadata.generation == Some(1)
                 && status.observed_generation == Some(1)
                 && status.ready == Some(true)
                 && status.observed_count == Some(4)
-                && synced.map(|c| c.status == "True").unwrap_or(false))
+                && synced.map(|c| c.status == "True").unwrap_or(false)
+                && echoed.map(|c| c.status == "True" && c.observed_generation == Some(1)).unwrap_or(false))
         }
     })
     .await?;

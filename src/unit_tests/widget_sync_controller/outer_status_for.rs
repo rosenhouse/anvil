@@ -266,3 +266,100 @@ fn an_absent_generation_is_stamped_absent() {
         assert_eq!(c["observedGeneration"], Value::Null);
     }
 }
+
+// Copied conditions: spec_types::copied_conditions_for.
+
+#[test]
+fn synced_copies_the_other_inner_conditions_restamped_after_the_three() {
+    let inner = json!({
+        "observedGeneration": 9,
+        "conditions": [
+            { "type": "Echoed", "status": "True", "reason": "Echoed", "observedGeneration": 9, "lastTransitionTime": "2026-09-19T00:00:00Z" },
+            { "type": "Ready", "status": "True", "reason": "Echoed", "observedGeneration": 9 },
+            { "type": "Progressing", "status": "Unknown", "message": "no deadline", "observedGeneration": 8 },
+        ],
+    });
+    let outer = written(Some(4), Some(inner), SyncOutcome::Synced);
+    assert_eq!(
+        outer["conditions"],
+        json!([
+            cond("Synced", "True", 4, Some("Synced"), None),
+            cond("Ready", "True", 4, Some("Echoed"), None),
+            cond("Stalled", "False", 4, Some("Synced"), None),
+            // In the inner order, stamped with the outer generation, and
+            // without the lastTransitionTime the inner copy carried.
+            cond("Echoed", "True", 4, Some("Echoed"), None),
+            cond("Progressing", "Unknown", 4, None, Some("no deadline")),
+        ])
+    );
+}
+
+#[test]
+fn copied_conditions_are_the_first_of_each_type_and_never_an_own_type() {
+    let inner = json!({
+        "conditions": [
+            { "type": "Synced", "status": "True", "reason": "Forged" },
+            { "type": "Echoed", "status": "True", "reason": "First" },
+            { "type": "Echoed", "status": "False", "reason": "Second" },
+            { "type": "Stalled", "status": "False" },
+        ],
+    });
+    let outer = written(Some(1), Some(inner), SyncOutcome::Synced);
+    let types: Vec<&str> = outer["conditions"].as_array().unwrap().iter().map(|c| c["type"].as_str().unwrap()).collect();
+    assert_eq!(types, vec!["Synced", "Ready", "Stalled", "Echoed"]);
+    assert_eq!(condition(&outer, "Echoed"), &cond("Echoed", "True", 1, Some("First"), None));
+    // The inner Synced is dropped, not copied: the outer Synced is the controller's.
+    assert_eq!(condition(&outer, "Synced"), &cond("Synced", "True", 1, Some("Synced"), None));
+}
+
+#[test]
+fn not_synced_keeps_the_copied_conditions_with_their_stamps() {
+    let previous = json!({
+        "observedGeneration": 1,
+        "conditions": [
+            cond("Synced", "True", 1, Some("Synced"), None),
+            cond("Ready", "True", 1, Some("Echoed"), None),
+            cond("Stalled", "False", 1, Some("Synced"), None),
+            cond("Echoed", "True", 1, Some("Echoed"), None),
+        ],
+    });
+    let outer = written(Some(2), Some(previous), SyncOutcome::InnerConverging);
+    assert_eq!(
+        outer["conditions"],
+        json!([
+            cond("Synced", "False", 2, Some("InnerConverging"), None),
+            cond("Ready", "Unknown", 2, Some("NotSynced"), None),
+            cond("Stalled", "False", 2, Some("InnerConverging"), None),
+            // Kept as last reported: the stamp is the generation it was read at,
+            // older than the three own conditions'.
+            cond("Echoed", "True", 1, Some("Echoed"), None),
+        ])
+    );
+}
+
+#[test]
+fn not_synced_filters_a_previous_status_written_by_anyone() {
+    // The previous outer status is whatever is stored: own types out of order,
+    // twice, or missing, and a type twice. The tail the controller writes has
+    // no own type and each type once, in the stored order.
+    let previous = json!({
+        "conditions": [
+            { "type": "Echoed", "status": "True", "observedGeneration": 3 },
+            { "type": "Ready", "status": "True" },
+            { "type": "Synced", "status": "True" },
+            { "type": "Echoed", "status": "False", "observedGeneration": 4 },
+            { "type": "Other", "status": "Unknown" },
+        ],
+    });
+    let outer = written(Some(5), Some(previous), SyncOutcome::Failed(FailureReason::InnerUnreachable));
+    assert_eq!(
+        outer["conditions"],
+        json!([
+            cond("Synced", "False", 5, Some("InnerUnreachable"), None),
+            cond("Ready", "Unknown", 5, Some("NotSynced"), None),
+            cond("Stalled", "False", 5, Some("InnerUnreachable"), None),
+            cond("Echoed", "True", 3, None, None),
+            { "type": "Other", "status": "Unknown" },
+        ])
+    );
+}

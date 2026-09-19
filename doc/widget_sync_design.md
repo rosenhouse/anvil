@@ -255,6 +255,20 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
 The inner condition the merge reads is the first of its type, which is what
 the exec scan finds (`SyncedStatusView::condition`).
 
+The conditions after the three are copied from the inner copy: every inner
+condition whose type is not `Synced`, `Ready` or `Stalled`, in the inner
+order, the first of each type (`copied_conditions`), each stamped with the
+outer generation at which the caught-up inner status was read
+(`copied_conditions_for`). An inner `Synced` condition is dropped; the three
+own types are reserved. While not synced the copied conditions are kept as
+last reported, with the stamp they were read at, as the mirrored fields are.
+Their `observedGeneration` is then older than the three own conditions',
+which is how a reader tells a kept copy from a current one. A copied
+condition carries no `lastTransitionTime`, because the controller reads no
+clock (issue #49, finding 15). No two conditions on the outer copy have one
+type, which the map list type on the CRD's `status.conditions`
+(`x-kubernetes-list-map-keys: [type]`) requires of every write.
+
 The rest of this section describes `reconcile_core`, not a theorem. What the
 guarantee proves of a status write is (G-shape) and (G-gen) (section 3.1), which
 relate the reported conditions to each other and to the tested generation, never
@@ -610,8 +624,10 @@ namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
-`observedGeneration` (G-gen), and whose condition list is those three and
-nothing else, in that order (G-shape). It sends nothing else.
+`observedGeneration` (G-gen), and whose condition list begins with those
+three, in that order, followed by conditions of other types, no two of one
+type (G-shape). It sends nothing else. (G-gen) covers the three own conditions
+only: a copied condition carries the generation it was read at.
 
 (G-shape) also relates the three to each other. `Synced` is `True` or `False`;
 `Ready` and `Stalled` are each `True`, `False` or `Unknown`. `Ready` is `True`
@@ -626,9 +642,10 @@ of `Unknown` and `False` (section 1.4), so (G-shape) pins it: `Ready` is
 (`lemma_ready_unknown_by_reason`).
 
 What (G-shape) never does is relate a reported condition to the inner cluster.
-The mirrored remainder is unconstrained, and so are the `Ready` and `Stalled`
-text where `Synced` is `True` -- the path that carries the inner status, and so
-the path that matters. Tying either to the status the mirror held needs the
+The mirrored remainder is unconstrained, and so are the copied conditions and
+the `Ready` and `Stalled` text where `Synced` is `True` -- the path that
+carries the inner status, and so the path that matters. Tying any of them to
+the status the mirror held needs the
 `Get` response that produced it, which no state keeps, so a reconciler reporting
 `Synced` and `Ready` over invented mirrored fields still satisfies the
 guarantee. Issue #49 finding 2 is open.
@@ -682,9 +699,11 @@ inner_settled(outer, settled)(s)  := spec_synced(outer)(s) && inner_caught_up(in
 status_synced(outer, settled)(s)  := the outer copy's status == outer_status_for(its generation, settled, Synced)
 
 outer_status_for(g, src, c) := { observedGeneration: g, π: π(src),
-                                 conditions: [Synced(g, c), Ready(g, src, c), Stalled(g, src, c)] }
+                                 conditions: [Synced(g, c), Ready(g, src, c), Stalled(g, src, c)] ++ copied(g, src, c) }
     // src is the inner status when c is Synced (its conditions are read), else the previous outer status;
-    // the three conditions are defined in section 1.4; every one carries observedGeneration g
+    // the three own conditions are defined in section 1.4; every one carries observedGeneration g;
+    // copied(g, src, Synced) is src's conditions of other types, the first of each type, stamped g;
+    // copied(g, src, c) for c ≠ Synced is the same of the previous outer status, stamps kept
 
 mirror_object_is(k, a, u)(s) := an object with uid u at k is a mirror pointing at a
 object_is_gone(k, u)(s)      := no object with uid u is at k

@@ -193,8 +193,9 @@ namespaced. `export` prints the demo CRDs.
 The controller reads and writes a fixed set of an object's fields: `metadata`,
 the spec (copied verbatim, and the selector field read when the selector is
 `field`), `status.observedGeneration`, and the `Synced`, `Ready` and `Stalled`
-conditions. Everything else in the status is opaque and is mirrored verbatim
-while `Synced`.
+conditions. Everything else in the status is opaque and is mirrored while
+`Synced`: the other fields verbatim, the conditions of other types restamped
+with the outer generation (doc/widget_sync_design.md, section 1.4).
 
 At boot the controller fetches each kind's CRD in the outer cluster and refuses
 a kind that does not carry that shape. `deploy/widget_sync/README.md` states the

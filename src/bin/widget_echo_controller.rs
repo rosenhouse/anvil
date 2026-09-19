@@ -7,7 +7,12 @@
 //   observedGeneration: metadata.generation
 //   conditions: [ { type: Ready, status: "True", reason: Echoed,
 //                   message: spec.message (when present),
+//                   observedGeneration: metadata.generation },
+//                 { type: Echoed, status: "True", reason: Echoed,
 //                   observedGeneration: metadata.generation } ]
+//
+// Echoed is a condition type the sync controller does not know, so the outer
+// copy shows what it copies from the inner status; Ready is one it merges.
 //
 // plus, per kind, what a real implementation of that kind would report: for
 // Widget `ready: true` and `observedCount: spec.count`, for Gadget
@@ -77,9 +82,14 @@ fn echoed_status(kind: &str, obj: &DynamicObject) -> Value {
         condition.insert("message".to_string(), json!(message));
     }
     condition.insert("observedGeneration".to_string(), json!(generation));
+    let mut echoed = Map::new();
+    echoed.insert("type".to_string(), json!("Echoed"));
+    echoed.insert("status".to_string(), json!("True"));
+    echoed.insert("reason".to_string(), json!("Echoed"));
+    echoed.insert("observedGeneration".to_string(), json!(generation));
     let mut status = Map::new();
     status.insert("observedGeneration".to_string(), json!(generation));
-    status.insert("conditions".to_string(), Value::Array(vec![Value::Object(condition)]));
+    status.insert("conditions".to_string(), Value::Array(vec![Value::Object(condition), Value::Object(echoed)]));
     if let Some(echo) = echo_for(kind) {
         echo(spec, &mut status);
     }
@@ -244,10 +254,10 @@ mod tests {
                 "observedGeneration": 3,
                 "ready": true,
                 "observedCount": 7,
-                "conditions": [{
-                    "type": "Ready", "status": "True", "reason": "Echoed",
-                    "message": "hi", "observedGeneration": 3
-                }]
+                "conditions": [
+                    { "type": "Ready", "status": "True", "reason": "Echoed", "message": "hi", "observedGeneration": 3 },
+                    { "type": "Echoed", "status": "True", "reason": "Echoed", "observedGeneration": 3 },
+                ]
             })
         );
     }
@@ -260,9 +270,10 @@ mod tests {
             json!({
                 "observedGeneration": 1,
                 "observedSize": 2,
-                "conditions": [{
-                    "type": "Ready", "status": "True", "reason": "Echoed", "observedGeneration": 1
-                }]
+                "conditions": [
+                    { "type": "Ready", "status": "True", "reason": "Echoed", "observedGeneration": 1 },
+                    { "type": "Echoed", "status": "True", "reason": "Echoed", "observedGeneration": 1 },
+                ]
             })
         );
     }
@@ -274,9 +285,10 @@ mod tests {
             echoed_status("Thing", &obj),
             json!({
                 "observedGeneration": 5,
-                "conditions": [{
-                    "type": "Ready", "status": "True", "reason": "Echoed", "observedGeneration": 5
-                }]
+                "conditions": [
+                    { "type": "Ready", "status": "True", "reason": "Echoed", "observedGeneration": 5 },
+                    { "type": "Echoed", "status": "True", "reason": "Echoed", "observedGeneration": 5 },
+                ]
             })
         );
     }

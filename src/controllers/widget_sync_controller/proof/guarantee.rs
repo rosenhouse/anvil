@@ -278,16 +278,94 @@ pub proof fn lemma_always_sync_reconciles_at_the_mirror_select_a_cluster(spec: T
 }
 
 // ---------------------------------------------------------------------------
-// The status the sync reconciler writes has exactly three conditions: Synced,
-// Ready and Stalled, in that order.
+// The status the sync reconciler writes has Synced, Ready and Stalled as its
+// first three conditions, in that order, followed by conditions of other types,
+// no two of one type.
 // ---------------------------------------------------------------------------
 
 pub open spec fn written_conditions_shape(status: SyncedStatusView) -> bool {
+    let conds = status.conditions->0;
     &&& status.conditions is Some
-    &&& status.conditions->0.len() == 3
-    &&& status.conditions->0[0].type_ == synced_condition_type()
-    &&& status.conditions->0[1].type_ == ready_condition_type()
-    &&& status.conditions->0[2].type_ == stalled_condition_type()
+    &&& conds.len() >= 3
+    &&& conds[0].type_ == synced_condition_type()
+    &&& conds[1].type_ == ready_condition_type()
+    &&& conds[2].type_ == stalled_condition_type()
+    &&& forall |i: int| 3 <= i < conds.len() ==> !is_own_condition_type(#[trigger] conds[i].type_)
+    &&& forall |i: int, j: int| #![trigger conds[i].type_, conds[j].type_]
+            3 <= i < j < conds.len() ==> conds[i].type_ != conds[j].type_
+}
+
+// The copied conditions of a list: none of an own type, no two of one type.
+pub proof fn lemma_copied_conditions_types(conds: Seq<SyncedConditionView>)
+    ensures
+        forall |i: int| 0 <= i < copied_conditions(conds).len()
+            ==> !is_own_condition_type(#[trigger] copied_conditions(conds)[i].type_),
+        forall |i: int, j: int| #![trigger copied_conditions(conds)[i].type_, copied_conditions(conds)[j].type_]
+            0 <= i < j < copied_conditions(conds).len() ==> copied_conditions(conds)[i].type_ != copied_conditions(conds)[j].type_,
+    decreases conds.len(),
+{
+    if conds.len() > 0 {
+        lemma_copied_conditions_types(conds.drop_last());
+        let kept = copied_conditions(conds.drop_last());
+        let last = conds.last();
+        if !(is_own_condition_type(last.type_) || has_condition_of_type(kept, last.type_)) {
+            let res = kept.push(last);
+            assert(copied_conditions(conds) == res);
+            assert forall |i: int| 0 <= i < res.len() implies !is_own_condition_type(#[trigger] res[i].type_) by {
+                if i < kept.len() {
+                    assert(res[i] == kept[i]);
+                } else {
+                    assert(res[i] == last);
+                }
+            }
+            assert forall |i: int, j: int| #![trigger res[i].type_, res[j].type_]
+                0 <= i < j < res.len() implies res[i].type_ != res[j].type_ by {
+                assert(res[i] == kept[i]);
+                if j < kept.len() {
+                    assert(res[j] == kept[j]);
+                } else {
+                    assert(res[j] == last);
+                    // No kept condition has last's type.
+                    assert(!has_condition_of_type(kept, last.type_));
+                }
+            }
+        }
+    }
+}
+
+// Stamping keeps the length and every type.
+pub proof fn lemma_stamped(conds: Seq<SyncedConditionView>, generation: Option<int>)
+    ensures
+        stamped(conds, generation).len() == conds.len(),
+        forall |i: int| 0 <= i < conds.len()
+            ==> #[trigger] stamped(conds, generation)[i] == (SyncedConditionView { observed_generation: generation, ..conds[i] }),
+{
+}
+
+// The tail outer_status_for writes: none of an own type, no two of one type.
+pub proof fn lemma_copied_conditions_for_types(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
+    ensures
+        ({
+            let tail = copied_conditions_for(generation, source, outcome);
+            &&& forall |i: int| 0 <= i < tail.len() ==> !is_own_condition_type(#[trigger] tail[i].type_)
+            &&& forall |i: int, j: int| #![trigger tail[i].type_, tail[j].type_]
+                    0 <= i < j < tail.len() ==> tail[i].type_ != tail[j].type_
+        }),
+{
+    let copied = copied_conditions(conditions_of(source));
+    lemma_copied_conditions_types(conditions_of(source));
+    if outcome.synced() {
+        let tail = stamped(copied, generation);
+        lemma_stamped(copied, generation);
+        assert forall |i: int| 0 <= i < tail.len() implies !is_own_condition_type(#[trigger] tail[i].type_) by {
+            assert(tail[i].type_ == copied[i].type_);
+        }
+        assert forall |i: int, j: int| #![trigger tail[i].type_, tail[j].type_]
+            0 <= i < j < tail.len() implies tail[i].type_ != tail[j].type_ by {
+            assert(tail[i].type_ == copied[i].type_);
+            assert(tail[j].type_ == copied[j].type_);
+        }
+    }
 }
 
 pub proof fn lemma_conditions_of_written_status(status: SyncedStatusView)
@@ -715,7 +793,8 @@ proof fn lemma_outer_status_patch_is_guaranteed(k: SyncKind, outer: SyncedObject
 }
 
 // The shape of every status the sync reconciler writes for a snapshot at
-// `generation`: the three conditions, each stamped with the generation.
+// `generation`: the three own conditions first, each stamped with the
+// generation, then copied conditions of other types.
 pub open spec fn written_status_shape(status: SyncedStatusView, generation: Option<int>) -> bool {
     // The remainder is one a value can represent, so the status reads back
     // (kubernetes_api_objects::spec::synced_object::status_ok). It is mirrored
@@ -733,6 +812,23 @@ pub proof fn lemma_outer_status_for_has_written_shape(generation: Option<int>, s
     requires status_rest_ok(source.rest),
     ensures written_status_shape(outer_status_for(generation, source, outcome), generation),
 {
+    let own = seq![
+        synced_condition_for(generation, outcome),
+        ready_condition_for(generation, source, outcome),
+        stalled_condition_for(generation, source, outcome),
+    ];
+    let tail = copied_conditions_for(generation, source, outcome);
+    let conds = outer_status_for(generation, source, outcome).conditions->0;
+    assert(conds == own + tail);
+    lemma_copied_conditions_for_types(generation, source, outcome);
+    assert forall |i: int| 3 <= i < conds.len() implies !is_own_condition_type(#[trigger] conds[i].type_) by {
+        assert(conds[i] == tail[i - 3]);
+    }
+    assert forall |i: int, j: int| #![trigger conds[i].type_, conds[j].type_]
+        3 <= i < j < conds.len() implies conds[i].type_ != conds[j].type_ by {
+        assert(conds[i] == tail[i - 3]);
+        assert(conds[j] == tail[j - 3]);
+    }
 }
 
 // ---------------------------------------------------------------------------
