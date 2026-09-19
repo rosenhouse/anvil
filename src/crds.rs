@@ -220,14 +220,17 @@ pub struct WidgetStatus {
     /// spec is in the inner cluster and the inner status observes it; otherwise False
     /// with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or,
     /// after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or
-    /// RequestFailed. Ready is True exactly when Synced is True and the inner copy's own
-    /// Ready condition, if present, is True and its own Stalled condition, if present,
-    /// is not True; otherwise False, with reason NotSynced when not synced, else with
-    /// the inner condition's reason and message. Stalled is True when the sync
-    /// controller is in a permanent case (ForeignObject, Forbidden, Rejected) or the
-    /// inner copy's own Stalled condition is True, with the sync controller's reason
-    /// when it has one, else the inner condition's. Ready and Stalled are never both
-    /// True.
+    /// RequestFailed. While Synced is True, Ready is the inner copy's own Ready
+    /// condition (status, reason and message), except that an inner Stalled=True forces
+    /// Ready=False with that condition's reason and message, and a mirror with no Ready
+    /// condition reads Unknown with reason NoInnerReadyCondition. While Synced is False,
+    /// Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating,
+    /// Forbidden, InnerUnreachable and RequestFailed, False for StaleMirror,
+    /// ForeignObject, CreateFailed and Rejected. Stalled is True with the sync
+    /// controller's reason for ForeignObject, Forbidden and Rejected; otherwise, while
+    /// Synced is True, it is the inner copy's own Stalled condition, and False with
+    /// Synced's reason when there is none or Synced is False. Ready and Stalled are
+    /// never both True.
     pub conditions: Option<Vec<WidgetCondition>>,
 }
 
@@ -241,7 +244,7 @@ pub struct WidgetCondition {
     /// reports on an inner copy (the sync controller reads Ready and Stalled).
     #[serde(rename = "type")]
     pub type_: String,
-    /// True or False.
+    /// True, False or Unknown. Synced is never Unknown.
     pub status: String,
     /// The generation of the object the condition was computed for.
     #[serde(rename = "observedGeneration")]

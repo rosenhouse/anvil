@@ -2,3 +2,4 @@
 // SPDX-License-Identifier: MIT
 pub mod kubernetes_api_objects;
 pub mod vstd_ext;
+pub mod widget_sync_controller;

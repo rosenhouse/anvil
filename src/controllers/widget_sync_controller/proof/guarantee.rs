@@ -306,21 +306,52 @@ pub proof fn lemma_conditions_of_written_status(status: SyncedStatusView)
     assert("Ready"@.len() != "Stalled"@.len());
 }
 
-// Ready and Stalled are never both True in a status the sync reconciler writes.
+// The three condition statuses are distinct literals.
+pub proof fn lemma_condition_statuses_distinct()
+    ensures
+        condition_true() != condition_false(),
+        condition_true() != condition_unknown(),
+        condition_false() != condition_unknown(),
+{
+    reveal_strlit("True");
+    reveal_strlit("False");
+    reveal_strlit("Unknown");
+    assert("True"@.len() != "False"@.len());
+    assert("True"@.len() != "Unknown"@.len());
+    assert("False"@.len() != "Unknown"@.len());
+}
+
+// three_valued is one of the three, and is True only of True.
+pub proof fn lemma_three_valued(status: StringView)
+    ensures
+        three_valued(status) == condition_true() || three_valued(status) == condition_false() || three_valued(status) == condition_unknown(),
+        three_valued(status) == condition_true() <==> status == condition_true(),
+{
+    lemma_condition_statuses_distinct();
+}
+
+// Ready and Stalled are never both True in a status the sync reconciler writes:
+// Ready is True only when synced, with an inner Ready that is True and no inner
+// Stalled that is True; Stalled is True only when the outcome is permanent, and so
+// not synced, or when the inner Stalled is True.
 pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures
         !(ready_condition_for(generation, source, outcome).status == condition_true()
             && stalled_condition_for(generation, source, outcome).status == condition_true()),
 {
-    reveal_strlit("True");
-    reveal_strlit("False");
-    assert("True"@.len() != "False"@.len());
+    lemma_condition_statuses_distinct();
+    if source.ready_condition() is Some {
+        lemma_three_valued(source.ready_condition()->0.status);
+    }
+    if source.stalled_condition() is Some {
+        lemma_three_valued(source.stalled_condition()->0.status);
+    }
 }
 
-// (G-shape) of outer_status_for: the three conditions are two-valued, Ready is
-// True only when Synced is, and Ready and Stalled are never both True. Every
-// status the sync reconciler writes is an outer_status_for, so the guarantee
-// carries these to any reader of the patch.
+// (G-shape) of outer_status_for: Synced is two-valued, Ready and Stalled are
+// three-valued, Ready is True only when Synced is, and Ready and Stalled are never
+// both True. Every status the sync reconciler writes is an outer_status_for, so
+// the guarantee carries these to any reader of the patch.
 pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures
         ({
@@ -328,14 +359,15 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
             let ready = ready_condition_for(generation, source, outcome);
             let stalled = stalled_condition_for(generation, source, outcome);
             &&& (synced.status == condition_true() || synced.status == condition_false())
-            &&& (ready.status == condition_true() || ready.status == condition_false())
-            &&& (stalled.status == condition_true() || stalled.status == condition_false())
+            &&& (ready.status == condition_true() || ready.status == condition_false() || ready.status == condition_unknown())
+            &&& (stalled.status == condition_true() || stalled.status == condition_false() || stalled.status == condition_unknown())
             &&& (ready.status == condition_true() ==> synced.status == condition_true())
             &&& !(ready.status == condition_true() && stalled.status == condition_true())
             &&& (synced.status == condition_true() <==> synced.reason == Some(reason_synced()))
             &&& synced.reason is Some
             &&& synced.message is None
             &&& (synced.status == condition_false() ==> {
+                    &&& ready.status != condition_true()
                     &&& ready.reason == Some(reason_not_synced())
                     &&& ready.message is None
                     &&& stalled.reason == synced.reason
@@ -343,9 +375,13 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
                 })
         }),
 {
-    reveal_strlit("True");
-    reveal_strlit("False");
-    assert("True"@.len() != "False"@.len());
+    lemma_condition_statuses_distinct();
+    if source.ready_condition() is Some {
+        lemma_three_valued(source.ready_condition()->0.status);
+    }
+    if source.stalled_condition() is Some {
+        lemma_three_valued(source.stalled_condition()->0.status);
+    }
     lemma_ready_and_stalled_exclusive(generation, source, outcome);
     // Synced is the only reason of that name, so the reason identifies the outcome
     // as Synced and the condition's status follows.

@@ -193,6 +193,19 @@ impl SyncOutcome {
             _ => false,
         }
     }
+
+    pub fn inner_status_unread(&self) -> (b: bool)
+        ensures b == self@.inner_status_unread(),
+    {
+        match self {
+            SyncOutcome::InnerConverging => true,
+            SyncOutcome::InnerTerminating => true,
+            SyncOutcome::Failed(FailureReason::InnerUnreachable) => true,
+            SyncOutcome::Failed(FailureReason::RequestFailed) => true,
+            SyncOutcome::Failed(FailureReason::Forbidden) => true,
+            _ => false,
+        }
+    }
 }
 
 // The status the sync controller writes on the outer copy, built by hand to
@@ -200,6 +213,8 @@ impl SyncOutcome {
 // three conditions, whose inner Ready and Stalled are the first of each type,
 // which is the one the spec's condition() names. `source` absent is the status
 // the outer copy has never carried, whose remainder is default_status_rest().
+// The body is unverified; unit_tests::widget_sync_controller::outer_status_for
+// pins it to the spec case by case.
 #[verifier(external_body)]
 pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedStatus>, outcome: &SyncOutcome) -> (status: SyncedStatus)
     ensures status@ == spec_types::outer_status_for(
@@ -218,24 +233,27 @@ pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedSta
     let inner_ready = find("Ready");
     let inner_stalled = find("Stalled");
     let condition_status = |b: bool| if b { "True".to_string() } else { "False".to_string() };
+    // spec_types::three_valued.
+    let three_valued = |status: String| if status == "True" || status == "False" || status == "Unknown" { status } else { "Unknown".to_string() };
     let make = |type_: &str, status: String, reason: Option<String>, message: Option<String>|
         SyncedCondition::new(type_.to_string(), status, outer_generation, reason, message);
     let synced_condition = make("Synced", condition_status(synced), Some(reason.clone()), None);
     let ready_condition = if !synced {
-        make("Ready", "False".to_string(), Some("NotSynced".to_string()), None)
+        let status = if outcome.inner_status_unread() { "Unknown" } else { "False" };
+        make("Ready", status.to_string(), Some("NotSynced".to_string()), None)
     } else if inner_stalled.as_ref().map_or(false, |c| c.status() == "True") {
         let c = inner_stalled.as_ref().unwrap();
         make("Ready", "False".to_string(), c.reason(), c.message())
     } else if let Some(c) = inner_ready.as_ref() {
-        make("Ready", condition_status(c.status() == "True"), c.reason(), c.message())
+        make("Ready", three_valued(c.status()), c.reason(), c.message())
     } else {
-        make("Ready", "True".to_string(), Some("Synced".to_string()), None)
+        make("Ready", "Unknown".to_string(), Some("NoInnerReadyCondition".to_string()), None)
     };
     let stalled_condition = if permanent {
         make("Stalled", "True".to_string(), Some(reason.clone()), None)
     } else if synced && inner_stalled.is_some() {
         let c = inner_stalled.as_ref().unwrap();
-        make("Stalled", condition_status(c.status() == "True"), c.reason(), c.message())
+        make("Stalled", three_valued(c.status()), c.reason(), c.message())
     } else {
         make("Stalled", "False".to_string(), Some(reason.clone()), None)
     };
