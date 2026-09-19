@@ -193,8 +193,8 @@ namespaced. `export` prints the demo CRDs.
 The controller reads and writes a fixed set of an object's fields: `metadata`,
 the spec (copied verbatim, and the selector field read when the selector is
 `field`), `status.observedGeneration`, and the `Synced`, `Ready` and `Stalled`
-conditions. Everything else in the status is opaque and is mirrored while
-`Synced`: the other fields verbatim, the conditions of other types restamped
+conditions. The other status fields are opaque and are mirrored verbatim
+while `Synced`. Conditions of other types are copied, one per type, restamped
 with the outer generation (doc/widget_sync_design.md, section 1.4).
 
 At boot the controller fetches each kind's CRD in the outer cluster and refuses
@@ -225,10 +225,12 @@ from a controller that was never deployed.
 `observedGeneration` may be required at either level. The API server sets
 `metadata.generation` on every custom resource and never clears it, so the
 controller always has one to stamp — the status subresource governs when it
-increments, not whether it exists — and both levels are stamped with the same
-value, read once per reconcile. A required field that declares a `default` is
-also accepted: structural-schema defaulting runs in the decoder, before
-validation.
+increments, not whether it exists — and the status and the three own
+conditions are stamped with the same value, read once per reconcile. A copied
+condition is stamped with it when synced, and otherwise rewritten with the
+fields it was stored with, which the same schema admitted. A required field
+that declares a `default` is also accepted: structural-schema defaulting runs
+in the decoder, before validation.
 
 Only the top level of `status` and the conditions item are inspected.
 

@@ -11,8 +11,8 @@
 //                 { type: Echoed, status: "True", reason: Echoed,
 //                   observedGeneration: metadata.generation } ]
 //
-// Echoed is a condition type the sync controller does not know, so the outer
-// copy shows what it copies from the inner status; Ready is one it merges.
+// The sync controller merges Ready and copies Echoed, a type it does not know.
+// The outer copy shows both.
 //
 // plus, per kind, what a real implementation of that kind would report: for
 // Widget `ready: true` and `observedCount: spec.count`, for Gadget

@@ -6,7 +6,7 @@
 // unmarshal, marshal, has_kind and api_resource are the trusted boundary of the
 // shape; the registry (exec::registry) is what ties a runtime kind and a cluster
 // to a model kind. What is left here is outer_status_for, which builds the outer
-// status, its three conditions included, by hand to match the spec's definition.
+// status, conditions included, by hand to match the spec's definition.
 use crate::kubernetes_api_objects::exec::{api_resource::*, registry::*, synced_object::*};
 use crate::kubernetes_api_objects::spec::api_resource::ClusterIdView;
 use crate::kubernetes_api_objects::spec::model_kind::*;
@@ -209,12 +209,13 @@ impl SyncOutcome {
 }
 
 // The status the sync controller writes on the outer copy, built by hand to
-// match spec_types::outer_status_for: the mirrored remainder of `source`, the
-// three own conditions, whose inner Ready and Stalled are the first of each type,
-// which is the one the spec's condition() names, and then the source's other
-// conditions, the first of each type (spec_types::copied_conditions), restamped
-// with the outer generation when synced. `source` absent is the status the outer
-// copy has never carried, whose remainder is default_status_rest(). The body is
+// match spec_types::outer_status_for. It carries the mirrored remainder of
+// `source`, the three own conditions, and then the source's other conditions,
+// the first of each type (spec_types::copied_conditions). The inner Ready and
+// Stalled it merges are the first of each type, the one the spec's condition()
+// names. A copied condition is restamped with the outer generation when synced
+// and keeps its stamp otherwise. `source` absent is the status the outer copy
+// has never carried, whose remainder is default_status_rest(). The body is
 // unverified; unit_tests::widget_sync_controller::outer_status_for pins it to
 // the spec case by case.
 #[verifier(external_body)]

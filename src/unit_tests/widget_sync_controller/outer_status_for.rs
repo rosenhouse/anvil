@@ -260,11 +260,24 @@ fn a_status_never_written_has_the_empty_remainder() {
 
 #[test]
 fn an_absent_generation_is_stamped_absent() {
-    let outer = written(None, None, SyncOutcome::Synced);
-    assert_eq!(outer["observedGeneration"], Value::Null);
-    for c in outer["conditions"].as_array().unwrap() {
-        assert_eq!(c["observedGeneration"], Value::Null);
+    // The key is left out, not written as null; the copied condition is
+    // restamped absent like the three own ones.
+    let inner = json!({ "conditions": [{ "type": "Echoed", "status": "True", "observedGeneration": 7 }] });
+    let outer = written(None, Some(inner), SyncOutcome::Synced);
+    assert!(outer.get("observedGeneration").is_none());
+    let conditions = outer["conditions"].as_array().unwrap();
+    assert_eq!(conditions.len(), 4);
+    for c in conditions {
+        assert!(c.get("observedGeneration").is_none(), "{}", c);
     }
+}
+
+#[test]
+fn a_source_with_no_conditions_gives_exactly_the_three() {
+    let outer = written(Some(1), Some(json!({ "observedCount": 1 })), SyncOutcome::Synced);
+    assert_eq!(outer["conditions"].as_array().unwrap().len(), 3);
+    let outer = written(Some(1), None, SyncOutcome::Synced);
+    assert_eq!(outer["conditions"].as_array().unwrap().len(), 3);
 }
 
 // Copied conditions: spec_types::copied_conditions_for.
@@ -330,18 +343,53 @@ fn not_synced_keeps_the_copied_conditions_with_their_stamps() {
             cond("Synced", "False", 2, Some("InnerConverging"), None),
             cond("Ready", "Unknown", 2, Some("NotSynced"), None),
             cond("Stalled", "False", 2, Some("InnerConverging"), None),
-            // Kept as last reported: the stamp is the generation it was read at,
-            // older than the three own conditions'.
+            // Kept as last reported, with the stamp it was read at.
             cond("Echoed", "True", 1, Some("Echoed"), None),
         ])
     );
 }
 
 #[test]
+fn a_kept_copy_can_carry_the_current_generation() {
+    // A partition at an unchanged generation: the own conditions and the kept
+    // copy carry the same stamp. Synced=False is what says the copy is kept.
+    let previous = json!({
+        "observedGeneration": 5,
+        "conditions": [
+            cond("Synced", "True", 5, Some("Synced"), None),
+            cond("Ready", "True", 5, Some("Echoed"), None),
+            cond("Stalled", "False", 5, Some("Synced"), None),
+            cond("Echoed", "True", 5, Some("Echoed"), None),
+        ],
+    });
+    let outer = written(Some(5), Some(previous), SyncOutcome::Failed(FailureReason::InnerUnreachable));
+    assert_eq!(condition(&outer, "Synced"), &cond("Synced", "False", 5, Some("InnerUnreachable"), None));
+    assert_eq!(condition(&outer, "Echoed"), &cond("Echoed", "True", 5, Some("Echoed"), None));
+}
+
+#[test]
+fn a_copied_status_is_not_normalized_and_types_match_exactly() {
+    let inner = json!({
+        "conditions": [
+            { "type": "Echoed", "status": "Maybe", "reason": "Odd" },
+            { "type": "ready", "status": "true" },
+        ],
+    });
+    let outer = written(Some(2), Some(inner), SyncOutcome::Synced);
+    let types: Vec<&str> = outer["conditions"].as_array().unwrap().iter().map(|c| c["type"].as_str().unwrap()).collect();
+    assert_eq!(types, vec!["Synced", "Ready", "Stalled", "Echoed", "ready"]);
+    assert_eq!(condition(&outer, "Echoed"), &cond("Echoed", "Maybe", 2, Some("Odd"), None));
+    assert_eq!(condition(&outer, "ready"), &cond("ready", "true", 2, None, None));
+    // The own Ready is merged from the inner "Ready", of which there is none.
+    assert_eq!(condition(&outer, "Ready"), &cond("Ready", "Unknown", 2, Some("NoInnerReadyCondition"), None));
+}
+
+#[test]
 fn not_synced_filters_a_previous_status_written_by_anyone() {
-    // The previous outer status is whatever is stored: own types out of order,
-    // twice, or missing, and a type twice. The tail the controller writes has
-    // no own type and each type once, in the stored order.
+    // The previous outer status is whatever is stored: own types out of order
+    // or missing, and a type repeated. The tail the controller writes has no
+    // own type and each type once, in the stored order, with the stamps as
+    // stored -- absent, or newer than the tested generation, included.
     let previous = json!({
         "conditions": [
             { "type": "Echoed", "status": "True", "observedGeneration": 3 },
@@ -349,6 +397,7 @@ fn not_synced_filters_a_previous_status_written_by_anyone() {
             { "type": "Synced", "status": "True" },
             { "type": "Echoed", "status": "False", "observedGeneration": 4 },
             { "type": "Other", "status": "Unknown" },
+            { "type": "Newer", "status": "True", "observedGeneration": 9 },
         ],
     });
     let outer = written(Some(5), Some(previous), SyncOutcome::Failed(FailureReason::InnerUnreachable));
@@ -360,6 +409,7 @@ fn not_synced_filters_a_previous_status_written_by_anyone() {
             cond("Stalled", "False", 5, Some("InnerUnreachable"), None),
             cond("Echoed", "True", 3, None, None),
             { "type": "Other", "status": "Unknown" },
+            cond("Newer", "True", 9, None, None),
         ])
     );
 }

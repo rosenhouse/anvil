@@ -226,9 +226,10 @@ const CONDITION_ALWAYS_WRITTEN: [&str; 3] = ["type", "status", "observedGenerati
 // observedGeneration is in both lists. The API server sets metadata.generation on
 // every custom resource and never clears it, so the controller always has one to
 // stamp; the status subresource governs when it increments, not whether it
-// exists. Both levels are stamped with the same value, read once per reconcile
-// (exec_types::outer_status_for), so a status cannot carry one and a condition
-// not.
+// exists. The status and the three own conditions are stamped with the same
+// value, read once per reconcile (exec_types::outer_status_for). A copied
+// condition is stamped with it when synced, and otherwise rewritten with the
+// fields it was stored with, which the same schema admitted.
 //
 // A required field that declares a default is not a problem: structural-schema
 // defaulting runs in the decoder, before validation, so the API server fills it

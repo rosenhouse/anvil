@@ -470,9 +470,9 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
 }
 
 // The outcomes under which Ready reads Unknown are exactly those whose reason
-// reason_reads_ready_unknown names. Each reason is a distinct literal; all but
-// one pair differ in length, and ForeignObject and RequestFailed differ in their
-// first character.
+// reason_reads_ready_unknown names. Every reason that reads Unknown differs in
+// length from every reason that does not, except ForeignObject and
+// RequestFailed, which differ in their first character.
 pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     ensures outcome.ready_unknown() <==> reason_reads_ready_unknown(outcome.reason()),
 {

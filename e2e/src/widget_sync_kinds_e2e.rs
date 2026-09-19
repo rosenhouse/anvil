@@ -148,7 +148,7 @@ fn inner_caught_up(inner: &Gadget) -> bool {
 // Ready=True, and carries the echo controller's Echoed condition stamped with
 // the outer generation. `observedSize` is the echo controller's own payload: the
 // sync controller mirrors it without a line of code about it, and Echoed is a
-// condition type it copies without knowing.
+// condition type it has no code about.
 fn outer_reports(outer: &Gadget, size: i32) -> bool {
     let status = match &outer.status {
         Some(s) => s,

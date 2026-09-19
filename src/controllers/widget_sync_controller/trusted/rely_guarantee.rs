@@ -187,8 +187,8 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& status is Ok
     &&& status->Ok_0 is Some
     // (G-gen) covers the status and the three own conditions only. A copied
-    // condition carries the generation at which it was read off the inner copy,
-    // which is older than the tested one while the copy is not synced.
+    // condition keeps the generation at which it was read off the inner copy;
+    // the guarantee says nothing about it.
     &&& status->Ok_0->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.synced_condition() is Some
     &&& status->Ok_0->0.synced_condition()->0.observed_generation == req.tests.generation
@@ -204,12 +204,13 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     // True.
     //
     // The clause relates the reported conditions to each other, never to the inner
-    // cluster. The mirrored remainder is unconstrained, and so are the Ready and
-    // Stalled text when Synced is True -- which is the path that matters -- and
-    // the copied conditions. Tying any of them to the status the mirror held
-    // needs the Get response that produced it, which no state keeps, so #49
-    // finding 2's reconciler, reporting Synced and Ready over invented mirrored
-    // fields, still satisfies this guarantee (3.1).
+    // cluster. The mirrored remainder, the copied conditions, and the Ready and
+    // Stalled text when Synced is True are all unconstrained; that last is the
+    // path that carries the inner status, and so the path that matters. Tying any
+    // of them to the status the mirror held needs the Get response that produced
+    // it, which no state keeps, so #49 finding 2's reconciler, reporting Synced
+    // and Ready over invented mirrored fields, still satisfies this guarantee
+    // (3.1).
     &&& status->Ok_0->0.conditions is Some
     &&& conds.len() >= 3
     &&& conds[0].type_ == synced_condition_type()
