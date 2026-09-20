@@ -100,7 +100,7 @@ A `False` `Synced` condition carries one of these reasons. The `Stalled` and
 | Reason | Meaning | Stalled | Ready | Clears when |
 |---|---|---|---|---|
 | `InnerConverging` | the mirror carries the spec; the inner status is for an older generation of it | `False` | `Unknown` | the inner implementation catches up |
-| `InnerTerminating` | the mirror has a deletion timestamp | `False` | `Unknown` | the inner side releases it and a new mirror is created |
+| `InnerTerminating` | the mirror has a deletion timestamp while the outer copy is alive (someone deleted it in the inner cluster and the inner side holds it under a finalizer) | `False` | `Unknown` | the inner side releases it and a new mirror is created |
 | `StaleMirror` | the object at the mirror's name is a mirror of a previous incarnation of this copy (label present, other `parent-uid`) | `False` | `False` | the janitor removes it |
 | `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | `True` | `False` | the object is removed in the inner cluster |
 | `Forbidden` | the inner cluster refused a request for lack of authorization | `True` | `Unknown` | the credential's RBAC is fixed |
@@ -117,7 +117,12 @@ two can disagree, and the condition is the controller's assessment.
 
 The mirror carries `anvil.dev/managed-by: widget-sync` and
 `anvil.dev/parent-uid: <outer uid>`, no owner references and no finalizers of
-ours.
+ours. The outer copy carries the sync finalizer, `anvil.dev/widget-sync`,
+from its first reconcile on: deleting it makes the controller delete the
+mirror, confirm it gone and release the finalizer, and only then does the copy
+disappear ("Scenarios" below; `doc/widget_sync_design.md`, section 1.5). Once
+the teardown has started, the copy gets no status writes; the controller's log
+shows each request the teardown sends and which one failed.
 
 ## Scenarios
 
@@ -130,9 +135,35 @@ ours.
 - Create `Widget{default, other}` in the inner cluster without the label, then
   in the outer cluster. The inner object is never modified; the outer copy
   reports `ForeignObject` with `Stalled=True`.
-- Delete the outer copy. The janitor removes the mirror. Delete and recreate
-  with the same name: the new copy may briefly report `StaleMirror` until the
-  janitor removes the old mirror, then a new one is created.
+- Delete the outer copy. It stays, terminating, while the controller deletes
+  the mirror, confirms with a List that nothing is left at its name and
+  removes the sync finalizer; then it disappears. Recreate it under the same
+  name once it is gone: a fresh mirror, and no `StaleMirror` in between. To
+  watch the release on its own, put a finalizer of your own on the copy once
+  it carries the sync finalizer and before deleting it
+  (`kubectl --context kind-widget-sync-outer patch widget demo --type json -p '[{"op":"add","path":"/metadata/finalizers/-","value":"example.com/hold"}]'`):
+  the controller releases the sync finalizer, the mirror is gone and never
+  recreated, and the copy stays under yours until you remove it.
+- Delete the outer copy while its inner cluster is disconnected (below), or
+  while the mirror carries a finalizer someone put on it in the inner cluster.
+  The copy stays terminating under the sync finalizer and gets no status
+  writes. The log shows which request failed; for a mirror the inner side
+  holds, the mirror's own `deletionTimestamp` in the inner cluster is what to
+  look at. Reconnect, or remove the inner finalizer, and the copy disappears
+  at the controller's next attempt. The escape hatch, if the inner cluster is
+  not coming back, is the conventional one: remove the sync finalizer by hand,
+  with a `test` that guards against removing someone else's,
+  `kubectl --context kind-widget-sync-outer patch widget demo --type json -p '[{"op":"test","path":"/metadata/finalizers/0","value":"anvil.dev/widget-sync"},{"op":"remove","path":"/metadata/finalizers/0"}]'`
+  (if the test fails, the sync finalizer is not first: see the list with
+  `kubectl --context kind-widget-sync-outer get widget demo -o jsonpath='{.metadata.finalizers}'`
+  and use its index). The copy disappears at once; the mirror is then the
+  janitor's to collect once the inner cluster answers, at its next pass.
+- Plant a stale mirror by hand: create a `Widget` in the inner cluster with
+  the label `anvil.dev/managed-by: widget-sync` and the annotation
+  `anvil.dev/parent-uid: <any uid no outer copy of that name has>`. The
+  janitor deletes it at its next pass -- within the interval of "Operating the
+  controller" below, a minute in this demo -- while the mirrors of live copies
+  are untouched.
 - Disconnect `widget-sync-inner-a-control-plane` from the `kind` docker
   network, edit the outer spec, reconnect. While the inner cluster is
   unreachable the outer copy reports `Synced=False/InnerUnreachable` at the new
@@ -508,8 +539,8 @@ per kind, started at boot, and one janitor per kind and bound inner cluster,
 started and stopped with its binding.
 
 **Retries.** A reconcile that ends without a failure is requeued after **60
-seconds** — that is the sync reconciler's interval and the janitor's resync,
-and it is what liveness rests on. A reconcile that **fails** is retried per
+seconds** — that is the sync reconciler's interval, and it is what liveness
+rests on; the janitor's is the interval of the next paragraph. A reconcile that **fails** is retried per
 object on an exponential backoff instead: **10 seconds** after that object's
 first failure, twice the last delay after each further consecutive failure of
 the same object, up to a cap of **5 minutes** — 10, 20, 40, 80, 160, 300, 300,
@@ -536,6 +567,50 @@ load on the API server its objects are read from: at a fixed 10 seconds a
 namespace of a thousand such objects is a hundred reads a second that cannot
 succeed, for as long as the fault lasts; at the cap it is between three and
 four a second.
+
+**The janitor's interval and watch.** A janitor revisits each mirror every
+**10 minutes** unless `--janitor-interval` says otherwise (a number with the
+unit `s`, `m` or `h`; `deploy_local.yaml` sets `60s` so that the e2e tests
+see a collection within a minute). Its watch of the mirrors triggers a
+reconcile on a change of a mirror's `metadata.generation` only -- a spec
+change or a deletion stamp -- and not on the status writes of the inner
+implementation, which are the bulk of a workload cluster's events. The long
+interval is deliberate. The sync controller tears a mirror down before it
+lets its outer copy go; the janitor is the safety net behind that teardown
+(`doc/widget_sync_design.md`, section 1.3), and a stale mirror costs nothing
+but a name until the next pass. A read of the mirror that fails before its
+reconcile runs is retried after the 60-second requeue of "Retries", not the
+interval. The e2e tests wait for a collection within the interval plus a
+margin (`JANITOR_WINDOW` in `e2e/src/widget_sync_e2e.rs`), and the binary's
+unit tests hold the default and the manifest's value to what this paragraph
+says.
+
+**Removing objects, bindings, kinds and the controller.** The sync finalizer
+makes order matter. A copy is released only once its mirror is confirmed
+gone, which needs the copy's inner cluster: delete the copies that name a
+cluster and wait for them to go before the cluster's binding Secret, the
+Cluster API `Cluster` that owns it, or a namespace that holds both. A copy
+whose binding is gone reports `Synced=False/InnerUnreachable` and keeps the
+sync finalizer, because nothing in this process can confirm anything for a
+cluster it has no client for; a namespace deleted around such copies stays
+`Terminating` on them. The same holds for the controller itself and for a
+kind: stop the controller, or drop a `--kind`, only after the copies of every
+kind it serves are gone, and remove a CRD only after that, since only a
+running controller releases the finalizer. A build without the finalizer
+cannot release it either, so before rolling back to one, strip the finalizer
+from every served copy. The escape hatch applies to any of these, one object
+at a time as in "Scenarios" or a namespace at a time:
+
+```sh
+kubectl --context kind-widget-sync-outer -n default get widgets -o name \
+  | xargs -n1 kubectl --context kind-widget-sync-outer -n default patch --type json \
+      -p '[{"op":"test","path":"/metadata/finalizers/0","value":"anvil.dev/widget-sync"},{"op":"remove","path":"/metadata/finalizers/0"}]'
+```
+
+The `test` refuses an object whose first finalizer is someone else's; look at
+that one by hand. A copy stripped this way is deleted by the API server at
+once if it was terminating, and its mirror is the janitor's to collect once
+its cluster answers.
 
 **Probes.** A startup probe, `test -f /run/widget-sync/ready`, waits for a
 file the binary creates (path from `READY_FILE`, on a small emptyDir) once
@@ -582,7 +657,10 @@ kubectl --context kind-widget-sync-outer -n widget-sync patch configmap widget-s
 ```
 
 The recommended sequence is: pause, restore the outer cluster, look at what
-the restore produced, decide, resume. While paused, the janitor answers each
+the restore produced, decide, resume. The gate withholds every Delete the
+process sends, the one the teardown of a deleted outer copy sends for its own
+mirror included: an outer copy deleted while paused stays terminating until
+the key is removed. While paused, the janitor answers each
 stale mirror with a withheld delete (a warn log with `cause="janitor
 paused"`) and retries it — and that retry is the backed-off one of "Retries"
 above. The gate answers a withheld Delete with a `Timeout`, which the janitor's
@@ -598,7 +676,7 @@ this section says — but do not read the log going quiet in the first minute
 after clearing the key as the deletes having resumed. Nothing else changes
 while paused, and the sync reconciler never adopts: a restored outer `Widget`
 whose uid differs from the mirror's annotation reports
-`Synced=False/ForeignObject` and gets a new mirror only after the old one is
+`Synced=False/StaleMirror` and gets a new mirror only after the old one is
 gone. Resuming therefore lets the janitor delete every
 mirror whose annotation no longer matches, and the sync reconciler then
 recreates them; what the pause buys is the time to confirm that the restore
@@ -625,7 +703,8 @@ filesystem (the ready file's emptyDir is the only writable mount; the pause
 gate's ConfigMap is mounted read-only), and has CPU and memory requests and
 limits sized for the demo.
 
-**RBAC.** In the outer cluster the controller reads `<plural>` and patches
+**RBAC.** In the outer cluster the controller reads `<plural>`, updates it
+(the finalizer it owns on each object; it never writes a spec) and patches
 `<plural>/status` for each configured kind, gets the CRD of each at boot for
 the shape check, gets, lists and watches `secrets` in every namespace (the
 bindings) and gets the `kube-system` namespace (the outer cluster id). In an

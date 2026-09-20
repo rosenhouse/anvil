@@ -26,6 +26,10 @@ use vstd::{multiset::*, prelude::*, string::*};
 verus !{
 
 
+// The budget covers the API server's transition, which this unfolds whole for
+// the steps that are not the controller's; the List handler's name selector
+// (kubernetes_cluster/spec/api_server/state_machine.rs) put it past the default.
+#[verifier(rlimit(50))]
 #[verifier(spinoff_prover)]
 pub proof fn guarantee_condition_holds(spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int)
     requires

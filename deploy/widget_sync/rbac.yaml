@@ -1,12 +1,13 @@
 # RBAC for the widget sync controller in the outer (primary) cluster.
 # One pair of rules per configured kind (deploy_local.yaml's --kind flags):
-# `<plural>` get, list, watch and `<plural>/status` patch, as
+# `<plural>` get, list, watch and update, and `<plural>/status` patch, as
 # doc/widget_sync_fanout_design.md, section 4, prescribes. The demo configures
 # Widget and Gadget.
-# The controller reads them and writes only their status subresource here; its
-# access to an inner cluster comes from the kubeconfig in that binding's Secret
-# `<clusterName>-kubeconfig` (see rbac_inner.yaml for what the credential in it
-# must be allowed to do).
+# The controller reads them, writes their status subresource, and updates the
+# objects themselves only to add or remove its finalizer
+# (doc/widget_sync_design.md, section 1.5); its access to an inner cluster comes
+# from the kubeconfig in that binding's Secret `<clusterName>-kubeconfig` (see
+# rbac_inner.yaml for what the credential in it must be allowed to do).
 # Beyond the configured kinds it reads:
 #   - secrets, in every namespace: the binding manager watches the ones named
 #     the label `cluster.x-k8s.io/cluster-name` and builds a binding's
@@ -44,7 +45,8 @@ metadata:
     app.kubernetes.io/name: widget-sync-controller
   name: widget-sync-controller-role
 rules:
-  # One pair of rules per configured kind.
+  # One pair of rules per configured kind. `update` is for the finalizer the
+  # controller owns on each object; it never writes a spec.
   - apiGroups:
       - anvil.dev
     resources:
@@ -54,6 +56,7 @@ rules:
       - get
       - list
       - watch
+      - update
   - apiGroups:
       - anvil.dev
     resources:

@@ -267,9 +267,10 @@ pub proof fn lemma_always_janitor_crs_are_sound(spec: TempPred<ClusterState>, cl
 // The janitor's decisions are sound.
 // ---------------------------------------------------------------------------
 
-// The List request the janitor sends for the mirror at `key`.
+// The List request the janitor sends for the mirror at `key`: the outer copy of
+// the mirror's name, selected by name.
 pub open spec fn janitor_list_request(k: SyncKind, key: ObjectRef) -> ListRequest {
-    ListRequest { kind: k.outer_kind, namespace: key.namespace }
+    ListRequest { kind: k.outer_kind, namespace: key.namespace, name: Some(key.name) }
 }
 
 pub open spec fn janitor_reconcile_is_sound(k: SyncKind, b: Binding, controller_id: int, key: ObjectRef) -> StatePred<ClusterState> {
@@ -317,6 +318,7 @@ proof fn lemma_list_response_decides_parent(k: SyncKind, b: Binding, s: ClusterS
     let sel = |o: DynamicObjectView| {
         &&& o.object_ref().namespace == key.namespace
         &&& o.object_ref().kind == k.outer_kind
+        &&& o.object_ref().name == key.name
     };
     let selected = s.resources().values().filter(sel);
     let objs = selected.to_seq();

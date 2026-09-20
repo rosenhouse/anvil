@@ -53,6 +53,7 @@ pub open spec fn local_pods_are_bound_to_vrs_with_key(controller_id: int, cr_key
         &&& req_msg.content.get_list_request() == ListRequest {
             kind: Kind::PodKind,
             namespace: cr_key.namespace,
+            name: None,
         }
         &&& forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)

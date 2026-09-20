@@ -35,7 +35,7 @@ use verifiable_controllers::shim_layer::bindings::{
 };
 use verifiable_controllers::shim_layer::controller_runtime::{
     discover_kinds, run_dyn_controller, run_dyn_controller_with_triggers, ClusterClients,
-    ReconcilerFactory,
+    DynRunnerOptions, ReconcilerFactory,
 };
 use verifiable_controllers::shim_layer::crd_shape::{check_crd, check_kind_name, CrdCheckError};
 use verifiable_controllers::shim_layer::kind_config::{ClusterSelector, KindConfig};
@@ -58,7 +58,10 @@ const USAGE: &str = "usage: widget_sync_controller export
   --outer-cluster-id <id>
           the identity the claim of each inner cluster records as its owner
           (default: the uid of the outer kube-system namespace; env
-          OUTER_CLUSTER_ID)";
+          OUTER_CLUSTER_ID)
+  --janitor-interval <duration>
+          how often each janitor revisits a mirror whose events it has not
+          seen, as a number with the unit s, m or h (default: 10m)";
 
 // The fieldManager both reconcilers write with; the API server records it in
 // the managedFields of the mirrors and of the outer status.
@@ -94,6 +97,11 @@ const READY_FILE_ENV: &str = "READY_FILE";
 // (deploy/widget_sync/README.md, "Before restoring the outer cluster").
 const JANITOR_PAUSE_FILE_ENV: &str = "JANITOR_PAUSE_FILE";
 
+// How often a janitor revisits a mirror unless told otherwise: the janitor is
+// the safety net behind the sync reconciler's teardown of a mirror, so it needs
+// no short interval (doc/widget_sync_design.md, section 1.3).
+const JANITOR_INTERVAL_DEFAULT: Duration = Duration::from_secs(600);
+
 // The verbs the sync and janitor reconcilers issue on a configured kind in an
 // inner cluster (see deploy/widget_sync/rbac_inner.yaml). The binding manager
 // asks each binding's credential for them, in the binding's namespace, before it
@@ -110,13 +118,43 @@ const REMOTE_VERBS: [&str; 6] = ["get", "list", "watch", "create", "patch", "del
 struct Flags {
     kinds: Vec<String>,
     outer_cluster_id: Option<String>,
+    janitor_interval: Duration,
+}
+
+// A duration flag: a positive integer with the unit s, m or h.
+fn parse_duration(value: &str) -> Result<Duration, String> {
+    let value = value.trim();
+    let (number, unit) = match value.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+        Some((i, _)) => (&value[..i], &value[i..]),
+        None => (value, ""),
+    };
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        _ => return Err(format!("{:?} is not a duration; use a number followed by s, m or h", value)),
+    };
+    match number.parse::<u64>() {
+        Ok(n) if n > 0 => Ok(Duration::from_secs(n * multiplier)),
+        _ => Err(format!("{:?} is not a duration; use a number followed by s, m or h", value)),
+    }
 }
 
 fn parse_flags(args: &[String]) -> Result<Flags, String> {
-    let mut flags = Flags { kinds: Vec::new(), outer_cluster_id: None };
+    let mut flags = Flags { kinds: Vec::new(), outer_cluster_id: None, janitor_interval: JANITOR_INTERVAL_DEFAULT };
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--janitor-interval" => {
+                i += 1;
+                match args.get(i) {
+                    Some(value) => flags.janitor_interval = parse_duration(value)?,
+                    None => return Err("--janitor-interval needs a value".to_string()),
+                }
+            }
+            arg if arg.starts_with("--janitor-interval=") => {
+                flags.janitor_interval = parse_duration(&arg["--janitor-interval=".len()..])?
+            }
             "--kind" => {
                 i += 1;
                 match args.get(i) {
@@ -258,7 +296,7 @@ async fn main() -> Result<()> {
             }
             // The kinds and the cluster id come from the command line; a bad or
             // missing flag is a usage error, reported before any client is built.
-            let (kinds, cluster_id_override) = match (configured_kinds(&args[2..]), parse_flags(&args[2..])) {
+            let (kinds, cluster_id_override, janitor_interval) = match (configured_kinds(&args[2..]), parse_flags(&args[2..])) {
                 (Ok(kinds), Ok(flags)) => {
                     let given = flags.outer_cluster_id.or_else(|| env::var(OUTER_CLUSTER_ID_ENV).ok());
                     // As for the flag: an empty override is not an override, and
@@ -271,13 +309,14 @@ async fn main() -> Result<()> {
                         );
                         process::exit(2);
                     }
-                    (kinds, given)
+                    (kinds, given, flags.janitor_interval)
                 }
                 (Err(message), _) | (_, Err(message)) => {
                     eprintln!("{}\n{}", message, USAGE);
                     process::exit(2);
                 }
             };
+            info!("each janitor revisits a mirror every {:?}", janitor_interval);
             let ready_file = env::var(READY_FILE_ENV).ok();
             let janitor_pause_file = env::var(JANITOR_PAUSE_FILE_ENV).ok();
             match &janitor_pause_file {
@@ -403,10 +442,10 @@ async fn main() -> Result<()> {
 
             // The janitors of a binding, one per configured kind, started by the
             // binding manager once the binding's credential and claim are good
-            // and stopped when its Secret changes or goes away. The sync
-            // reconciler never deletes (its guarantee), so the pause file only
-            // ever acts on the janitors; it is given to every runner so that the
-            // gate holds for every Delete this process could send.
+            // and stopped when its Secret changes or goes away. The pause file
+            // is given to every runner, so the gate holds for every Delete this
+            // process sends: the janitors' and the sync reconciler's teardown
+            // of a deleted outer copy's mirror.
             let janitor_clusters = clusters.clone();
             let janitor_kinds: Vec<(KindConfig, RegistryEntry)> =
                 configured.iter().map(|(kind, entry, _)| (kind.clone(), entry.clone())).collect();
@@ -455,11 +494,16 @@ async fn main() -> Result<()> {
                         let stopped = async move {
                             let _ = stop.changed().await;
                         };
+                        // The janitor's watch triggers on a mirror's generation
+                        // only: a status write by the inner implementation is
+                        // not a reason to revisit its parent.
+                        let options = DynRunnerOptions { requeue: janitor_interval, generation_triggers_only: true };
                         let outcome = run_dyn_controller::<JanitorReconciler, VoidExternalShimLayer>(
                             clusters,
                             reconciler,
                             entry,
                             cluster,
+                            options,
                             Some(FIELD_MANAGER.to_string()),
                             pause_file,
                             fault_injection,
@@ -551,6 +595,7 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Deserialize;
     use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
     use verifiable_controllers::shim_layer::crd_shape::{check_shape, crd_name};
 
@@ -592,6 +637,46 @@ mod tests {
         for empty in [args(&["--outer-cluster-id", ""]), args(&["--outer-cluster-id=  "])] {
             assert!(parse_flags(&empty).unwrap_err().contains("must not be empty"), "{:?}", empty);
         }
+    }
+
+    // The interval is what deploy/widget_sync/README.md ("Operating the
+    // controller") states: 10 minutes unless the flag says otherwise.
+    #[test]
+    fn the_janitor_interval_defaults_to_ten_minutes_and_takes_units() {
+        assert_eq!(JANITOR_INTERVAL_DEFAULT, Duration::from_secs(600));
+        let without = args(&["--kind", "anvil.dev/v1/Widget:name"]);
+        assert_eq!(parse_flags(&without).unwrap().janitor_interval, Duration::from_secs(600));
+        let with_flag = args(&["--kind", "anvil.dev/v1/Widget:name", "--janitor-interval", "45s"]);
+        assert_eq!(parse_flags(&with_flag).unwrap().janitor_interval, Duration::from_secs(45));
+        assert_eq!(configured_kinds(&with_flag).unwrap().len(), 1);
+        let joined = args(&["--janitor-interval=2m", "--kind=anvil.dev/v1/Widget:name"]);
+        assert_eq!(parse_flags(&joined).unwrap().janitor_interval, Duration::from_secs(120));
+        assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
+        for bad in ["", "0s", "10", "10x", "s", "-5s", "1.5m"] {
+            assert!(parse_duration(bad).is_err(), "{:?} should not parse", bad);
+        }
+        assert!(parse_flags(&args(&["--janitor-interval"])).unwrap_err().contains("needs a value"));
+        assert!(parse_flags(&args(&["--janitor-interval", "soon"])).unwrap_err().contains("not a duration"));
+    }
+
+    // The demo manifest sets the interval deploy/widget_sync/README.md ("The
+    // janitor's interval and watch") states for it: 60s, which the e2e tests
+    // wait on (JANITOR_INTERVAL in e2e/src/widget_sync_e2e.rs). The container's
+    // args are the flags alone; the image's entrypoint supplies `run`.
+    #[test]
+    fn the_demo_manifest_sets_the_janitor_interval_to_a_minute() {
+        let manifest = include_str!("../../deploy/widget_sync/deploy_local.yaml");
+        let deployment = serde_yaml::Deserializer::from_str(manifest)
+            .map(|doc| serde_yaml::Value::deserialize(doc).unwrap())
+            .find(|doc| doc["kind"] == "Deployment")
+            .expect("deploy_local.yaml carries a Deployment");
+        let containers = deployment["spec"]["template"]["spec"]["containers"].as_sequence().unwrap();
+        let args: Vec<String> =
+            containers[0]["args"].as_sequence().unwrap().iter().map(|a| a.as_str().unwrap().to_string()).collect();
+        let at = args.iter().position(|a| a == "--janitor-interval").expect("the manifest passes --janitor-interval");
+        assert_eq!(args[at + 1], "60s");
+        assert_eq!(parse_flags(&args).unwrap().janitor_interval, Duration::from_secs(60));
+        assert_eq!(configured_kinds(&args).unwrap().len(), 2);
     }
 
     #[test]

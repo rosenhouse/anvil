@@ -4,16 +4,18 @@
 // For an outer copy `outer` (key `key`, mirror key `ikey`):
 //     always(outer_spec_stable(k, b, outer)) ~> always(spec_synced(k, outer))
 //
-// The proof has three parts.
+// The proof has four parts.
 // 1. Phases I and II (spec.rs): failures are disabled; the snapshots the sync
 //    reconciler works from carry the outer spec and uid; the only request of the
 //    sync reconciler for `key` in flight is the pending one; requests and
 //    responses are consistent.
-// 2. The mirror key eventually and stably holds nothing or our mirror: a stale
+// 2. The finalizer layer (finalizer_proof.rs): the outer copy carries the sync
+//    finalizer, and so does every snapshot, which is live.
+// 3. The mirror key eventually and stably holds nothing or our mirror: a stale
 //    mirror is collected by the janitor (R3, the liveness dependency), a
 //    terminating one is released by the inner side (D3), and our mirror is kept
 //    by everyone.
-// 3. One reconcile of the outer copy creates the mirror or patches its spec, after
+// 4. One reconcile of the outer copy creates the mirror or patches its spec, after
 //    which nothing changes it (the step lemmas are in api_actions.rs).
 //
 // R2 (sync_status_proof.rs) reuses the walk up to the Get response, so the states
@@ -35,7 +37,7 @@ use crate::widget_sync_controller::{
     model::{install::*, sync_reconciler, sync_reconciler::WidgetSyncReconcileState},
     proof::{
         guarantee::*, helper_invariants::*, janitor_invariants::*,
-        liveness::{api_actions::*, spec::*, terminate},
+        liveness::{api_actions::*, finalizer_proof, spec::*, terminate},
         predicate::*, sync_invariants::*,
     },
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
@@ -404,7 +406,7 @@ pub proof fn lemma_sync_idle_leads_to_scheduled(k: SyncKind, b: Binding, spec_ok
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
         spec.entails(lift_state(Cluster::reconcile_idle(controller_id, outer.object_ref()))
             .leads_to(lift_state(|s: ClusterState| {
@@ -413,7 +415,6 @@ pub proof fn lemma_sync_idle_leads_to_scheduled(k: SyncKind, b: Binding, spec_ok
             }))),
 {
     let key = outer.object_ref();
-    lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_unfold_sync_spec_with_phase_ii(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     
@@ -455,7 +456,7 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, spec_ok
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
         spec.entails(lift_state(|s: ClusterState| {
                 &&& !s.ongoing_reconciles(controller_id).contains_key(outer.object_ref())
@@ -463,7 +464,6 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, spec_ok
             }).leads_to(lift_state(st_sync_init(controller_id, outer.object_ref())))),
 {
     let key = outer.object_ref();
-    lemma_unfold_sync_spec_with_settled(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_unfold_sync_spec_with_phase_ii(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
     lemma_sync_stable_spec_facts(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     
@@ -501,7 +501,8 @@ pub proof fn lemma_sync_scheduled_leads_to_init(k: SyncKind, b: Binding, spec_ok
     cluster.lemma_pre_leads_to_post_by_controller(spec, controller_id, input, stronger_next, ControllerStep::RunScheduledReconcile, pre, post);
 }
 
-// Init ~> the Get of the mirror is in flight.
+// Init ~> the Get of the mirror is in flight: under the finalizer layer the
+// snapshot is live and carries the finalizer, so Init sends the Get of the mirror.
 pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool,
     spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView
 )
@@ -536,19 +537,25 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
         &&& Cluster::crash_disabled(controller_id)(s)
         &&& Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)(s)
         &&& cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)(s)
+        &&& sync_finalizer_held(controller_id, outer)(s)
     };
     combine_spec_entails_always_n!(
         spec, lift_action(stronger_next),
         lift_action(sync_step_next(k, b, cluster, controller_id, janitor_id, outer)),
         lift_state(Cluster::crash_disabled(controller_id)),
         lift_state(Cluster::each_object_in_reconcile_has_consistent_key_and_valid_metadata(controller_id)),
-        lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id))
+        lift_state(cluster.synced_objects_in_reconcile_are_valid(k.outer_kind, spec_ok, controller_id)),
+        lift_state(sync_finalizer_held(controller_id, outer))
     );
     assert forall |s, s_prime: ClusterState| pre(s) && #[trigger] stronger_next(s, s_prime)
         && cluster.controller_next().forward((controller_id, input.0, input.1))(s, s_prime) implies post(s_prime) by {
         lemma_current_reconcile_of_outer(k, b, spec_ok, cluster, controller_id, janitor_id, s, outer);
         let cr = s.ongoing_reconciles(controller_id)[key].triggering_cr;
         let cr_outer = unmarshal(k.outer_kind, cr)->Ok_0;
+        assert(snapshot_live_and_owned_if_marked(outer)(cr, s));
+        assert(snapshot_owned()(cr, s));
+        assert(cr_outer.metadata.deletion_timestamp is None);
+        assert(has_sync_finalizer(cr_outer.metadata));
         let req = APIRequest::GetRequest(GetRequest { key: inner_key(k, cr_outer) });
         let msg = controller_req_msg(controller_id, key, s.rpc_id_allocator.allocate().1, req);
         assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg));
@@ -1594,8 +1601,10 @@ pub proof fn lemma_outer_spec_stable_leads_to_always_spec_synced(k: SyncKind, b:
     let spec_d = sync_spec_with_desired(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let spec_i = sync_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let spec_ii = sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
+    let spec_f = sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let spec_iii = sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     let settled_temp = always(lift_state(mirror_settled(k, b, outer)));
+    let finalizer_temp = always(lift_state(sync_finalizer_held(controller_id, outer)));
     let phase_ii_temp = always(lift_state(sync_phase_ii(controller_id, outer)));
     let phase_i_temp = always(lift_state(phase_i(controller_id)));
     let premise_temp = always(lift_state(outer_spec_stable(k, b, outer)));
@@ -1604,12 +1613,20 @@ pub proof fn lemma_outer_spec_stable_leads_to_always_spec_synced(k: SyncKind, b:
     assert(spec_iii.entails(spec_iii));
     lemma_true_leads_to_always_spec_synced(k, b, spec_ok, spec_iii, cluster, controller_id, janitor_id, outer);
     // Remove the settled layer.
-    sync_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
-    unpack_conditions_from_spec(spec_ii, settled_temp, true_pred(), target);
+    sync_spec_with_finalizer_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
+    unpack_conditions_from_spec(spec_f, settled_temp, true_pred(), target);
     temp_pred_equality(true_pred().and(settled_temp), settled_temp);
+    assert(spec_f.entails(spec_f));
+    lemma_unfold_sync_spec_with_finalizer(k, b, spec_ok, spec_f, cluster, controller_id, janitor_id, outer);
+    lemma_true_leads_to_always_mirror_settled(k, b, spec_ok, spec_f, cluster, controller_id, janitor_id, outer);
+    leads_to_trans(spec_f, true_pred(), settled_temp, target);
+    // Remove the finalizer layer.
+    sync_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
+    unpack_conditions_from_spec(spec_ii, finalizer_temp, true_pred(), target);
+    temp_pred_equality(true_pred().and(finalizer_temp), finalizer_temp);
     assert(spec_ii.entails(spec_ii));
-    lemma_true_leads_to_always_mirror_settled(k, b, spec_ok, spec_ii, cluster, controller_id, janitor_id, outer);
-    leads_to_trans(spec_ii, true_pred(), settled_temp, target);
+    finalizer_proof::lemma_true_leads_to_always_sync_finalizer_held(k, b, spec_ok, spec_ii, cluster, controller_id, janitor_id, outer);
+    leads_to_trans(spec_ii, true_pred(), finalizer_temp, target);
     // Remove phase II.
     sync_spec_with_phase_i_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
     unpack_conditions_from_spec(spec_i, phase_ii_temp, true_pred(), target);

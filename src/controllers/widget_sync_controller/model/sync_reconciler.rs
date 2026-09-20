@@ -63,6 +63,53 @@ pub open spec fn outer_status_patch(k: SyncKind, outer: SyncedObjectView, status
     }
 }
 
+// The Update that adds (`add`) or removes the sync finalizer on the snapshot
+// `outer` the reconcile runs on. Everything else, the resource version included,
+// is the snapshot's, so the update lands only if nobody wrote the outer copy
+// since the snapshot was taken; otherwise a later reconcile starts from a newer
+// snapshot and tries again.
+pub open spec fn outer_finalizer_update(outer: SyncedObjectView, add: bool) -> UpdateRequest {
+    let metadata = if add { with_sync_finalizer(outer.metadata) } else { without_sync_finalizer(outer.metadata) };
+    UpdateRequest {
+        namespace: outer.metadata.namespace->0,
+        name: outer.metadata.name->0,
+        obj: marshal(outer.with_metadata(metadata)),
+    }
+}
+
+// The List that reads the mirror key: the mirror's kind, namespace and name. A
+// successful empty answer is what confirms the mirror gone; a Get answered
+// NotFound would not, because an uninstalled kind is answered the same way.
+pub open spec fn mirror_list(k: SyncKind, outer: SyncedObjectView) -> ListRequest {
+    ListRequest {
+        kind: inner_key(k, outer).kind,
+        namespace: outer.metadata.namespace->0,
+        name: Some(outer.metadata.name->0),
+    }
+}
+
+// The Delete of `inner`, the mirror of `outer` as read at the mirror key, pinned
+// to its uid.
+pub open spec fn mirror_delete(k: SyncKind, outer: SyncedObjectView, inner: SyncedObjectView) -> DeleteRequest {
+    DeleteRequest {
+        key: inner_key(k, outer),
+        preconditions: Some(PreconditionsView::default().with_uid_from_object_meta(inner.metadata)),
+    }
+}
+
+// `o` is stored at `key`: same kind, namespace and name.
+pub open spec fn is_at(o: DynamicObjectView, key: ObjectRef) -> bool {
+    &&& o.kind == key.kind
+    &&& o.metadata.namespace == Some(key.namespace)
+    &&& o.metadata.name == Some(key.name)
+}
+
+// Some object of `objs` is stored at `key`. A List answer is read as a set: which
+// object it is does not matter here, and the Get that follows names it.
+pub open spec fn listed_at(objs: Seq<DynamicObjectView>, key: ObjectRef) -> bool {
+    exists |i: int| 0 <= i < objs.len() && is_at(#[trigger] objs[i], key)
+}
+
 // Write `status` to the outer copy unless it already has it.
 pub open spec fn write_outer_status_or_done(k: SyncKind, outer: SyncedObjectView, status: SyncedStatusView) -> (WidgetSyncReconcileState, Option<RequestView<VoidEReqView>>) {
     if outer.status == Some(status) {
@@ -99,7 +146,26 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
     let done = (at_step(WidgetSyncStepView::Done), None::<RequestView<VoidEReqView>>);
     match state.reconcile_step {
         WidgetSyncStepView::Init => {
-            if cluster_of(k.selector, outer) is None {
+            if outer.metadata.deletion_timestamp is Some {
+                if !has_sync_finalizer(outer.metadata) {
+                    // Terminating without the sync finalizer: not this controller's
+                    // to tear down, and a status write would only prolong it.
+                    done
+                } else if cluster_of(k.selector, outer) is None {
+                    // The copy names no inner cluster, so there is no mirror key to
+                    // confirm: report the rejection and keep the finalizer until the
+                    // copy names one again or the finalizer is removed by hand.
+                    write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::Rejected)))
+                } else if !serves(k, outer) {
+                    // The inner cluster cannot be reached from this controller, so
+                    // the mirror cannot be confirmed gone: report and requeue.
+                    report_error(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::InnerUnreachable)))
+                } else {
+                    // Teardown: read the mirror key.
+                    let req = APIRequest::ListRequest(mirror_list(k, outer));
+                    (at_step(WidgetSyncStepView::AfterListMirror), Some(RequestView::KRequest(req)))
+                }
+            } else if cluster_of(k.selector, outer) is None {
                 // The object names no inner cluster: a permanent rejection, and the
                 // reconcile ends. The boot shape check rules this out for stored
                 // objects; the model does not assume it.
@@ -107,13 +173,38 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
             } else if !serves(k, outer) {
                 // The object names a binding this controller does not know: report
                 // the inner cluster as unreachable and requeue, without addressing
-                // it. Exec side `k.bindings` is the snapshot of the bound clusters
-                // this reconcile was built with, so a binding that appears later is
-                // served by a later reconcile.
+                // it and without taking ownership. Exec side `k.bindings` is the
+                // snapshot of the bound clusters this reconcile was built with, so a
+                // binding that appears later is served by a later reconcile.
                 report_error(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::InnerUnreachable)))
+            } else if !has_sync_finalizer(outer.metadata) {
+                // Take ownership before any mirror exists.
+                let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, true));
+                (at_step(WidgetSyncStepView::AfterAddFinalizer), Some(RequestView::KRequest(req)))
             } else {
                 let req = APIRequest::GetRequest(GetRequest { key: inner_key(k, outer) });
                 (at_step(WidgetSyncStepView::AfterGetInner), Some(RequestView::KRequest(req)))
+            }
+        },
+        // The Update of the finalizers either landed or did not. A Conflict means
+        // the copy was written since the snapshot was taken: nothing to report,
+        // the next reconcile starts from the copy as it is now. Any other failure
+        // ends in Error, which the shim logs and retries; a status write would
+        // itself be a write of a copy this reconciler does not own, or is
+        // releasing.
+        WidgetSyncStepView::AfterAddFinalizer => {
+            if is_some_k_update_resp_view(resp_o) && extract_some_k_update_resp_view(resp_o) is Ok {
+                // Owned: the next reconcile syncs the mirror.
+                done
+            } else {
+                error
+            }
+        },
+        WidgetSyncStepView::AfterRemoveFinalizer => {
+            if is_some_k_update_resp_view(resp_o) && extract_some_k_update_resp_view(resp_o) is Ok {
+                done
+            } else {
+                error
             }
         },
         WidgetSyncStepView::AfterGetInner => {
@@ -197,6 +288,78 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                 } else {
                     // The Patch failed: report why, then requeue.
                     report_error(k, outer, failure_status(outer, res->Err_0, false))
+                }
+            }
+        },
+        WidgetSyncStepView::AfterListMirror => {
+            if !is_some_k_list_resp_view(resp_o) {
+                error
+            } else {
+                let res = extract_some_k_list_resp_view(resp_o);
+                if res is Err {
+                    // Including a NotFound for the kind itself: nothing is confirmed.
+                    // A teardown writes no status: the copy is going away, and the
+                    // failure is logged and retried from Error.
+                    error
+                } else if !listed_at(res->Ok_0, inner_key(k, outer)) {
+                    // Confirmed gone: release.
+                    let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, false));
+                    (at_step(WidgetSyncStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
+                } else {
+                    // Something is at the mirror key: read it.
+                    let req = APIRequest::GetRequest(GetRequest { key: inner_key(k, outer) });
+                    (at_step(WidgetSyncStepView::AfterGetMirror), Some(RequestView::KRequest(req)))
+                }
+            }
+        },
+        WidgetSyncStepView::AfterGetMirror => {
+            if !is_some_k_get_resp_view(resp_o) {
+                error
+            } else {
+                let res = extract_some_k_get_resp_view(resp_o);
+                if res is Err {
+                    if res->Err_0 is ObjectNotFound {
+                        // Gone since the List: the next reconcile confirms that with a
+                        // List of its own.
+                        done
+                    } else {
+                        error
+                    }
+                } else {
+                    let unmarshalled = unmarshal(inner_key(k, outer).kind, res->Ok_0);
+                    if unmarshalled is Err {
+                        error
+                    } else {
+                        let inner = unmarshalled->Ok_0;
+                        if !is_mirror_of(inner, outer) {
+                            // Not ours, so nothing of ours is left at the key: a stale
+                            // mirror is the janitor's, anything else is foreign. Release.
+                            let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, false));
+                            (at_step(WidgetSyncStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
+                        } else if inner.metadata.deletion_timestamp is Some {
+                            // Being released by the inner side: wait for it.
+                            done
+                        } else if inner.metadata.uid is None {
+                            // A mirror is deleted by uid only; a stored object has one.
+                            error
+                        } else {
+                            let req = APIRequest::DeleteRequest(mirror_delete(k, outer, inner));
+                            (at_step(WidgetSyncStepView::AfterDeleteMirror), Some(RequestView::KRequest(req)))
+                        }
+                    }
+                }
+            }
+        },
+        WidgetSyncStepView::AfterDeleteMirror => {
+            if !is_some_k_delete_resp_view(resp_o) {
+                error
+            } else {
+                let res = extract_some_k_delete_resp_view(resp_o);
+                if res is Ok || res->Err_0 is ObjectNotFound {
+                    // Deleted, or gone already: the next reconcile confirms and releases.
+                    done
+                } else {
+                    error
                 }
             }
         },

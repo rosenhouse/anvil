@@ -73,6 +73,12 @@ pub proof fn sync_guarantee_implies_other_sync_rely(k1: SyncKind, k2: SyncKind, 
                     assert(req.obj.kind == inner_kind(k1, binding_of(k1, outer)));
                     assert(!is_inner_kind(k2, inner_kind(k1, binding_of(k1, outer))));
                 }
+                APIRequest::UpdateRequest(req) => {
+                    // An Update of `k1`'s outer copies, which is no mirror kind of `k2`.
+                    assert(sync_finalizer_update_req(k1, req, outer_key)(s));
+                    assert(req.obj.kind == k1.outer_kind);
+                    assert(!is_inner_kind(k2, k1.outer_kind));
+                }
                 _ => {}
             }
         }
@@ -80,7 +86,8 @@ pub proof fn sync_guarantee_implies_other_sync_rely(k1: SyncKind, k2: SyncKind, 
 }
 
 // The sync controller of `k1` meets the janitor rely of `k2`: the only Creates it
-// sends are of `k1`'s mirror kinds, which are none of `k2`'s.
+// sends are of `k1`'s mirror kinds, which are none of `k2`'s, and its Updates are
+// of `k1`'s outer copies.
 pub proof fn sync_guarantee_implies_other_janitor_rely(k1: SyncKind, k2: SyncKind, id: int)
     requires sync_kind_ok(k1), sync_kind_ok(k2), k1.outer_kind != k2.outer_kind,
     ensures lift_state(widget_sync_guarantee(k1, id)).entails(lift_state(widget_janitor_rely(k2, id))),
@@ -118,6 +125,11 @@ pub proof fn sync_guarantee_implies_other_janitor_rely(k1: SyncKind, k2: SyncKin
                     };
                     assert(req.obj.kind == inner_kind(k1, binding_of(k1, outer)));
                     assert(!is_inner_kind(k2, inner_kind(k1, binding_of(k1, outer))));
+                }
+                APIRequest::UpdateRequest(req) => {
+                    assert(sync_finalizer_update_req(k1, req, outer_key)(s));
+                    assert(req.obj.kind == k1.outer_kind);
+                    assert(!is_inner_kind(k2, k1.outer_kind));
                 }
                 _ => {}
             }

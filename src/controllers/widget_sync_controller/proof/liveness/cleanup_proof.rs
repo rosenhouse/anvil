@@ -469,14 +469,8 @@ pub proof fn lemma_mirror_collected_after_step(k: SyncKind, b: Binding, spec_ok:
                                 assert(outer_snapshot_is_bound(k, reconcile.triggering_cr, ok)(s));
                                 assert(snap.metadata == reconcile.triggering_cr.metadata);
                                 match state.reconcile_step {
-                                    WidgetSyncStepView::Init => { assert(false); },
-                                    WidgetSyncStepView::AfterGetInner => { assert(false); },
                                     WidgetSyncStepView::AfterCreateInner => {},
-                                    WidgetSyncStepView::AfterPatchInner => { assert(false); },
-                                    WidgetSyncStepView::AfterPatchOuterStatus => { assert(false); },
-                                    WidgetSyncStepView::AfterReportError => { assert(false); },
-                                    WidgetSyncStepView::Done => { assert(false); },
-                                    WidgetSyncStepView::Error => { assert(false); },
+                                    _ => { assert(false); },
                                 }
                                 assert(req.obj == make_inner(k, snap).marshal());
                                 assert(make_inner(k, outer) == make_inner(k, snap));

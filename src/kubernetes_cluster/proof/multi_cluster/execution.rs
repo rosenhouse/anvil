@@ -280,6 +280,7 @@ proof fn lemma_controller_step_keeps_inv<S>(tc: MultiCluster<S>, s: MultiCluster
                     } else { None };
                     let (ls, req_o) = (model.transition)(rs.triggering_cr, resp_o, rs.local_state);
                     assert(req_o is Some);
+                    assert(rs.triggering_cr.kind == model.kind && stored_object_ok(tc, rs.triggering_cr));
                     match req_o->0 {
                         RequestContent::KubernetesRequest(req) => {
                             assert(m == controller_req_msg(id, key, s.rpc_id_allocator.allocate().1, req));

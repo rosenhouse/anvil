@@ -646,6 +646,7 @@ pub open spec fn local_pods_and_pvcs_are_bound_to_vsts_with_key(controller_id: i
         &&& req_msg.content.get_list_request() == ListRequest {
             kind: Kind::PodKind,
             namespace: cr_key.namespace,
+            name: None,
         }
         &&& forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)
@@ -738,6 +739,7 @@ ensures
                         assert(req_msg.content.get_list_request() == ListRequest {
                             kind: Kind::PodKind,
                             namespace: cr_key.namespace,
+                            name: None,
                         });
                         assert(forall |msg| {
                             &&& #[trigger] s_prime.in_flight().contains(msg)

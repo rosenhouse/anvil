@@ -51,7 +51,7 @@ use crate::common::*;
 use crate::widget_sync_e2e::{
     client_for_context, failed, is_mirror_of, outer_reports, still_the_same_mirror, synced_condition, uid, wait_for,
     wait_until, Widgets, BACKED_OFF_RETRY, JANITOR_WINDOW, MARGIN, ONE_RECONCILE, OUTER_CONTEXT, REMOTE_TIMEOUT,
-    REQUEUE, RETRY_BASE, TIMEOUT,
+    remove_finalizer, REQUEUE, RETRY_BASE, SYNC_FINALIZER, TIMEOUT,
 };
 
 const INNER_A_CONTEXT: &str = "kind-widget-sync-inner-a";
@@ -469,10 +469,22 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
     .await?;
     info!("the released claim was taken again by the binding that holds the cluster");
 
-    // Leave the clusters as they were found: the outer copies go, their janitors
-    // collect the mirrors, and the copied credential of the refused binding is
+    // Leave the clusters as they were found: the outer copies go, each teardown
+    // removes its mirror, and the copied credential of the refused binding is
     // removed so that a later run starts from one binding per inner cluster.
+    // `gamma` is served by the refused binding, so its teardown cannot confirm
+    // its mirror gone (there is none, and the List that would say so is answered
+    // Forbidden): the copy would stay terminating under the sync finalizer. The
+    // escape hatch of the deploy README applies -- delete, then remove the
+    // finalizer by hand -- and the copy goes at once.
     tenant_outer.api.delete("gamma", &DeleteParams::default()).await.map_err(failed("delete the tenant widget"))?;
+    remove_finalizer(&tenant_outer, "gamma", SYNC_FINALIZER).await?;
+    let t = tenant_outer.clone();
+    wait_until("the tenant widget stripped of the sync finalizer is gone", TIMEOUT, move || {
+        let t = t.clone();
+        async move { Ok(t.get_opt("gamma").await?.is_none()) }
+    })
+    .await?;
     tenant_secrets.delete(A_SECRET, &DeleteParams::default()).await.map_err(failed("delete the copied Secret"))?;
     namespaces.delete(TENANT, &DeleteParams::default()).await.map_err(failed("delete the tenant namespace"))?;
     inner_a_namespaces
@@ -481,12 +493,19 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
         .map_err(failed("delete the tenant namespace in inner-a"))?;
     outer.api.delete("alpha", &DeleteParams::default()).await.map_err(failed("delete outer widget alpha"))?;
     outer.api.delete("beta", &DeleteParams::default()).await.map_err(failed("delete outer widget beta"))?;
-    // Both janitors have been succeeding on these mirrors, so their next run is
-    // a resync away: ONE_RECONCILE, not BACKED_OFF_RETRY.
+    // The sync reconciler has been succeeding on both copies, so the teardowns
+    // run at the head of its schedule: ONE_RECONCILE, not BACKED_OFF_RETRY. The
+    // copies go once their mirrors are confirmed gone.
     let (a, b) = (inner_a.clone(), inner_b.clone());
-    wait_until("both mirrors are collected by their janitors", ONE_RECONCILE, move || {
+    wait_until("both mirrors are torn down with their outer copies", ONE_RECONCILE, move || {
         let (a, b) = (a.clone(), b.clone());
         async move { Ok(a.get_opt("alpha").await?.is_none() && b.get_opt("beta").await?.is_none()) }
+    })
+    .await?;
+    let o = outer.clone();
+    wait_until("both outer copies are released and gone", ONE_RECONCILE, move || {
+        let o = o.clone();
+        async move { Ok(o.get_opt("alpha").await?.is_none() && o.get_opt("beta").await?.is_none()) }
     })
     .await?;
 

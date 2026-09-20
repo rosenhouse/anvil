@@ -4,6 +4,8 @@
 //                     stable specs, phase I, the sync reconciler's layers
 // api_actions.rs      what one step of the cluster does at the watched keys
 // terminate.rs        every reconcile of either reconciler terminates
+// finalizer_proof.rs  the sync finalizer is on the outer copy and its snapshots
+// release_proof.rs    R4, a terminating outer copy is released
 // sync_spec_proof.rs  R1, the mirror carries the outer spec
 // sync_status_proof.rs R2, the outer copy carries the mirrored status
 // janitor_proof.rs    R3, a mirror whose parent is gone is removed
@@ -11,6 +13,9 @@
 // round_trip.rs       R1 and R2 chained across D4
 pub mod api_actions;
 pub mod cleanup_proof;
+pub mod finalizer_proof;
+pub mod inner_impl_proof;
+pub mod release_proof;
 pub mod janitor_proof;
 pub mod round_trip;
 pub mod spec;

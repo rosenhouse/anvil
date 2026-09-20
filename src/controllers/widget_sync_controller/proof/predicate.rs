@@ -47,17 +47,47 @@ pub open spec fn sync_step_is_terminal() -> spec_fn(ReconcileLocalState) -> bool
 }
 
 // Every step the sync reconciler can be at right after its first transition: the
-// Get of the mirror; when the outer copy names no inner cluster, the status write
-// that reports the rejection (or Done, when that status is already there); and,
-// when it names a binding the reconciler does not serve, the status write that
-// reports the inner cluster as unreachable (or Error, when that status is already
-// there).
+// Get of the mirror; the Update that takes the finalizer; the List of the mirror
+// key that starts a teardown; when the outer copy names no inner cluster, the
+// status write that reports the rejection (or Done, when that status is already
+// there); when it names a binding the reconciler does not serve, the status
+// write that reports the inner cluster as unreachable (or Error, when that
+// status is already there); and Done, for a terminating copy without the
+// finalizer.
 pub open spec fn sync_step_after_init() -> spec_fn(ReconcileLocalState) -> bool {
     |s: ReconcileLocalState| {
         let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
         ||| step == WidgetSyncStepView::AfterGetInner
+        ||| step == WidgetSyncStepView::AfterAddFinalizer
+        ||| step == WidgetSyncStepView::AfterListMirror
         ||| step == WidgetSyncStepView::AfterPatchOuterStatus
         ||| step == WidgetSyncStepView::AfterReportError
+        ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
+    }
+}
+
+// Every step the sync reconciler can be at right after answering the List of the
+// mirror key: the Update that releases the outer copy, the Get of the mirror it
+// listed, or done (a teardown reports no failure).
+pub open spec fn sync_step_after_list_mirror() -> spec_fn(ReconcileLocalState) -> bool {
+    |s: ReconcileLocalState| {
+        let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::AfterRemoveFinalizer
+        ||| step == WidgetSyncStepView::AfterGetMirror
+        ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
+    }
+}
+
+// Every step the sync reconciler can be at right after answering the Get of the
+// mirror it listed: the Update that releases the outer copy, the Delete of the
+// mirror, or done.
+pub open spec fn sync_step_after_get_mirror() -> spec_fn(ReconcileLocalState) -> bool {
+    |s: ReconcileLocalState| {
+        let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::AfterRemoveFinalizer
+        ||| step == WidgetSyncStepView::AfterDeleteMirror
         ||| step == WidgetSyncStepView::Done
         ||| step == WidgetSyncStepView::Error
     }
@@ -76,8 +106,10 @@ pub open spec fn sync_step_after_get_inner() -> spec_fn(ReconcileLocalState) -> 
     }
 }
 
-// Every step the sync reconciler can be at right after answering the Create or the
-// Patch of the mirror: done, or reporting the failure before ending in Error.
+// Every step the sync reconciler can be at right after answering the Create or
+// the Patch of the mirror: done, or reporting the failure before ending in
+// Error. The Delete of the mirror and the Update of the outer copy's finalizers
+// end in Done or Error, which this set covers too.
 pub open spec fn sync_step_after_mirror_write() -> spec_fn(ReconcileLocalState) -> bool {
     |s: ReconcileLocalState| {
         let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;

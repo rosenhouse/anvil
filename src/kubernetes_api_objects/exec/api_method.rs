@@ -124,17 +124,22 @@ impl View for KubeGetRequest {
     }
 }
 
-// KubeListRequest has the namespace to instantiate an Api.
+// KubeListRequest has the namespace to instantiate an Api, and optionally the
+// name to select (sent as the field selector metadata.name=<name>).
 
 pub struct KubeListRequest {
     pub api_resource: ApiResource,
     pub namespace: String,
+    pub name: Option<String>,
 }
 
 impl KubeListRequest {
     #[verifier(external)]
     pub fn key(&self) -> std::string::String {
-        format!("{}/{}", self.api_resource.as_kube_ref().kind, self.namespace)
+        match &self.name {
+            Some(name) => format!("{}/{}/{}", self.api_resource.as_kube_ref().kind, self.namespace, name),
+            None => format!("{}/{}", self.api_resource.as_kube_ref().kind, self.namespace),
+        }
     }
 }
 
@@ -144,6 +149,7 @@ impl View for KubeListRequest {
         ListRequest {
             kind: self.api_resource@.kind,
             namespace: self.namespace@,
+            name: self.name.deep_view(),
         }
     }
 }

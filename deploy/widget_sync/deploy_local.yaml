@@ -72,6 +72,12 @@ spec:
             - anvil.dev/v1/Widget:field:spec.clusterName
             - --kind
             - anvil.dev/v1/Gadget:name
+            # The janitors revisit each mirror this often (the binary's default
+            # is 10m). The demo keeps it short so that a mirror whose parent is
+            # gone disappears within a minute; e2e/src/widget_sync_e2e.rs waits
+            # on this value.
+            - --janitor-interval
+            - 60s
           env:
             - name: READY_FILE
               value: /run/widget-sync/ready

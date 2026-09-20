@@ -114,6 +114,7 @@ pub fn reconcile_core(vd: &VDeployment, resp_o: Option<Response<VoidEResp>>, sta
             let req = KubeAPIRequest::ListRequest(KubeListRequest {
                 api_resource: VReplicaSet::api_resource(),
                 namespace: namespace,
+                name: None,
             });
             let old_vrs_list = Vec::<VReplicaSet>::new();
             assert(old_vrs_list.deep_view() == Seq::<VReplicaSetView>::empty());

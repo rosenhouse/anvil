@@ -98,13 +98,17 @@ The default feature set builds the library and every binary but one. The Widget
 sync controller also needs `dyn-runtime`, which turns on
 `kube/unstable-runtime`: its sync runners take work from outside their own
 watches through `Controller::reconcile_on` (the same-name trigger a binding's
-mirror watch emits), and that is a kube-runtime API behind an unstable feature.
+mirror watch emits), and its janitors take a filtered watch through
+`Controller::for_stream_with` (the generation predicate of
+`deploy/widget_sync/README.md`, "The janitor's interval and watch"). Both are
+kube-runtime APIs behind an unstable feature.
 It is deliberately not in `default`, so that the library and the other four
 controllers build on kube's stable surface: `cargo build --lib` and
-`cargo test --lib` must pass without it. The shim compiles the trigger path only
-under the feature and otherwise runs the same runner with no trigger stream,
-which costs at most one requeue interval of latency and no correctness --
-liveness rests on the periodic requeue, never on a trigger.
+`cargo test --lib` must pass without it. The shim compiles both paths only
+under the feature and otherwise runs the same runner with no trigger stream and
+an unfiltered janitor watch, which costs at most one requeue interval of latency
+and some reconciles, and no correctness -- liveness rests on the periodic
+requeue, never on a trigger.
 
 `required-features` on the binary's `[[bin]]` enforces it:
 

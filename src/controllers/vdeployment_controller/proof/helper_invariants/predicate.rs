@@ -342,6 +342,7 @@ pub open spec fn vrs_objects_in_local_reconcile_state_are_controllerly_owned_by_
         &&& req_msg.content.get_list_request() == ListRequest {
             kind: VReplicaSetView::kind(),
             namespace: triggering_cr.metadata.namespace.unwrap(),
+            name: None,
         }
         &&& forall |msg| {
             &&& #[trigger] s.in_flight().contains(msg)

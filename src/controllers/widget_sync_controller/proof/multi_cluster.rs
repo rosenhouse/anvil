@@ -289,6 +289,57 @@ pub proof fn lemma_make_inner_relabel(sk: SyncKind, bnd: Binding, tc: MultiClust
     assert(lhs =~= rhs);
 }
 
+// The Update of the outer copy's finalizers built from the relabeled snapshot is
+// the relabeled Update: the relabeling touches neither the finalizers nor what
+// the Update takes from the snapshot besides them.
+pub proof fn lemma_finalizer_update_relabel(sk: SyncKind, bnd: Binding, tc: MultiCluster<ClusterIdView>, r: Relabeling<ClusterIdView>, outer: SyncedObjectView, add: bool)
+    requires outer.kind == sk.outer_kind,
+    ensures relabel_req(tc, r, APIRequest::UpdateRequest(sync_reconciler::outer_finalizer_update(outer, add)))
+        == APIRequest::UpdateRequest(sync_reconciler::outer_finalizer_update(relabel_synced(tc, r, outer), add)),
+{
+    let outer1 = relabel_synced(tc, r, outer);
+    let m = if add { with_sync_finalizer(outer.metadata) } else { without_sync_finalizer(outer.metadata) };
+    let m1 = if add { with_sync_finalizer(outer1.metadata) } else { without_sync_finalizer(outer1.metadata) };
+    assert(outer1.metadata.finalizers == outer.metadata.finalizers);
+    assert(m1.finalizers == m.finalizers);
+    assert(relabel_meta(tc, r, outer.kind, m) == m1);
+    let obj = marshal(outer.with_metadata(m));
+    let obj1 = marshal(outer1.with_metadata(m1));
+    assert(relabel_obj(tc, r, obj) == obj1);
+}
+
+// Whether something is listed at a key does not depend on the relabeling, which
+// keeps every object's kind, namespace and name.
+pub proof fn lemma_listed_at_relabel(tc: MultiCluster<ClusterIdView>, r: Relabeling<ClusterIdView>, objs: Seq<DynamicObjectView>, key: ObjectRef)
+    ensures sync_reconciler::listed_at(relabel_list(tc, r, objs), key) == sync_reconciler::listed_at(objs, key),
+{
+    let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
+    let image = objs.to_set().map(f);
+    let objs1 = relabel_list(tc, r, objs);
+    image.lemma_to_seq_to_set_id();
+    assert(objs1.to_set() == image);
+    if sync_reconciler::listed_at(objs, key) {
+        let i = choose |i: int| 0 <= i < objs.len() && sync_reconciler::is_at(#[trigger] objs[i], key);
+        let o = objs[i];
+        let o1 = f(o);
+        assert(objs.to_set().contains(o));
+        objs.to_set().lemma_map_contains(f, o1);
+        assert(image.contains(o1));
+        assert(objs1.to_set().contains(o1));
+        let j = choose |j: int| 0 <= j < objs1.len() && objs1[j] == o1;
+        assert(sync_reconciler::is_at(objs1[j], key));
+    }
+    if sync_reconciler::listed_at(objs1, key) {
+        let j = choose |j: int| 0 <= j < objs1.len() && sync_reconciler::is_at(#[trigger] objs1[j], key);
+        let o1 = objs1[j];
+        assert(objs1.to_set().contains(o1));
+        objs.to_set().lemma_map_contains(f, o1);
+        let o = choose |o: DynamicObjectView| objs.to_set().contains(o) && o1 == f(o);
+        let i = choose |i: int| 0 <= i < objs.len() && objs[i] == o;
+        assert(sync_reconciler::is_at(objs[i], key));
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The reconcilers commute with the relabeling.
 // ---------------------------------------------------------------------------
@@ -321,7 +372,9 @@ pub proof fn lemma_sync_core_commutes(sk: SyncKind, bnd: Binding, tc: MultiClust
     let outer1 = relabel_synced(tc, r, outer);
     let resp1 = relabel_resp_view(tc, r, resp);
     match state.reconcile_step {
-        WidgetSyncStepView::Init => {},
+        WidgetSyncStepView::Init => {
+            lemma_finalizer_update_relabel(sk, bnd, tc, r, outer, true);
+        },
         WidgetSyncStepView::AfterGetInner => {
             if is_some_k_get_resp_view(resp) {
                 let res = extract_some_k_get_resp_view(resp);
@@ -349,6 +402,42 @@ pub proof fn lemma_sync_core_commutes(sk: SyncKind, bnd: Binding, tc: MultiClust
                                 let p1 = sync_reconciler::inner_spec_patch(sk, inner1, outer1);
                                 assert(inner.kind == ik);
                                 assert(p1 == PatchRequest { tests: relabel_tests(r, tc.side_of_kind(ik), p.tests), ..p });
+                            }
+                        }
+                    },
+                }
+            }
+        },
+        WidgetSyncStepView::AfterListMirror => {
+            if is_some_k_list_resp_view(resp) {
+                let res = extract_some_k_list_resp_view(resp);
+                if res is Ok {
+                    assert(inner_key(sk, outer1) == inner_key(sk, outer));
+                    lemma_listed_at_relabel(tc, r, res->Ok_0, inner_key(sk, outer));
+                    lemma_finalizer_update_relabel(sk, bnd, tc, r, outer, false);
+                }
+            }
+        },
+        WidgetSyncStepView::AfterGetMirror => {
+            if is_some_k_get_resp_view(resp) {
+                let res = extract_some_k_get_resp_view(resp);
+                match res {
+                    Err(_) => {},
+                    Ok(obj) => {
+                        let ik = inner_key(sk, outer).kind;
+                        assert(inner_key(sk, outer1) == inner_key(sk, outer));
+                        lemma_unmarshal_kind_relabel(sk, bnd, tc, r, ik, obj);
+                        if unmarshal(ik, obj) is Ok {
+                            let inner = unmarshal(ik, obj)->Ok_0;
+                            let inner1 = relabel_synced(tc, r, inner);
+                            assert(unmarshal(ik, relabel_obj(tc, r, obj))->Ok_0 == inner1);
+                            lemma_is_mirror_of_relabel(sk, bnd, tc, r, inner, outer);
+                            lemma_finalizer_update_relabel(sk, bnd, tc, r, outer, false);
+                            if is_mirror_of(inner, outer) && inner.metadata.deletion_timestamp is None && inner.metadata.uid is Some {
+                                let d = sync_reconciler::mirror_delete(sk, outer, inner);
+                                let d1 = sync_reconciler::mirror_delete(sk, outer1, inner1);
+                                assert(inner.kind == ik);
+                                assert(d1 == DeleteRequest { preconditions: relabel_preconditions(r, tc.side_of_kind(ik), d.preconditions), ..d });
                             }
                         }
                     },
@@ -583,7 +672,8 @@ pub open spec fn other_model_ok(tc: MultiCluster<ClusterIdView>, m: ControllerMo
     &&& m.external_model is None
     &&& forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
         let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
-        req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+        cr.kind == m.reconcile_model.kind && stored_object_ok(tc, cr) && req_o is Some && req_o->0 is KubernetesRequest
+            ==> tc.request_ok(req_o->0->KubernetesRequest_0)
     }
 }
 
@@ -742,20 +832,30 @@ pub proof fn lemma_pair_cluster_is_cluster_with_others(sk: SyncKind, bnd: Bindin
 
 // The sync reconciler's model sends only requests the refinement handles: its
 // one Create is of a named mirror without owner references, of the mirror kind
-// of a binding it serves, which the cluster installs.
-pub proof fn lemma_sync_model_ok(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, tc: MultiCluster<ClusterIdView>)
-    requires all_inner_kinds_installed(sk, spec_ok, tc.cluster),
+// of a binding it serves, which the cluster installs; its Update of the outer
+// copy's finalizers carries the triggering object's kind and owner references.
+pub proof fn lemma_sync_model_ok(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Value) -> bool, tc: MultiCluster<ClusterIdView>)
+    requires
+        widget_kinds_ok(sk, bnd),
+        all_inner_kinds_installed(sk, spec_ok, tc.cluster),
+        tc.cluster.synced_type_is_installed(sk.outer_kind, spec_ok, sk.selector),
     ensures other_model_ok(tc, widget_sync_controller_model(sk)),
 {
     let m = widget_sync_controller_model(sk);
     assert forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
         let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
-        req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+        cr.kind == m.reconcile_model.kind && stored_object_ok(tc, cr) && req_o is Some && req_o->0 is KubernetesRequest
+            ==> tc.request_ok(req_o->0->KubernetesRequest_0)
     } by {
         let req_o = (m.reconcile_model.transition)(cr, resp, ls).1;
-        if req_o is Some && req_o->0 is KubernetesRequest {
+        if cr.kind == m.reconcile_model.kind && stored_object_ok(tc, cr) && req_o is Some && req_o->0 is KubernetesRequest {
             let req = req_o->0->KubernetesRequest_0;
+            lemma_outer_unmarshals(sk, bnd, spec_ok, tc.cluster, cr);
+            marshal_preserves_metadata();
+            marshal_preserves_kind();
             let outer = unmarshal(sk.outer_kind, cr)->Ok_0;
+            assert(outer.metadata == cr.metadata);
+            assert(outer.kind == cr.kind);
             let state = sync_reconciler::WidgetSyncReconcileState::unmarshal(ls)->Ok_0;
             match state.reconcile_step {
                 WidgetSyncStepView::AfterGetInner => {
@@ -769,7 +869,17 @@ pub proof fn lemma_sync_model_ok(sk: SyncKind, spec_ok: spec_fn(Value) -> bool, 
                         assert(tc.kind_ok(obj.kind));
                     }
                 },
-                _ => {},
+                _ => {
+                    if req is UpdateRequest {
+                        let add = state.reconcile_step is Init;
+                        assert(req == APIRequest::UpdateRequest(sync_reconciler::outer_finalizer_update(outer, add)));
+                        let obj = req->UpdateRequest_0.obj;
+                        assert(obj.kind == cr.kind);
+                        assert(obj.metadata.owner_references == cr.metadata.owner_references);
+                        assert(tc.object_ok(cr));
+                        assert(tc.object_ok(obj));
+                    }
+                },
             }
         }
     }
@@ -790,12 +900,13 @@ pub proof fn lemma_widget_models_ok(sk: SyncKind, bnd: Binding, spec_ok: spec_fn
         &&& m.external_model is None
         &&& forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
             let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
-            req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+            cr.kind == m.reconcile_model.kind && stored_object_ok(tc, cr) && req_o is Some && req_o->0 is KubernetesRequest
+                ==> tc.request_ok(req_o->0->KubernetesRequest_0)
         }
     } by {
         let m = tc.cluster.controller_models[id];
         if id == sync_id {
-            lemma_sync_model_ok(sk, spec_ok, tc);
+            lemma_sync_model_ok(sk, bnd, spec_ok, tc);
         } else if id == janitor_id {
             lemma_janitor_model_ok(sk, bnd, tc);
         } else {
@@ -1106,8 +1217,83 @@ proof fn lemma_outer_spec_stable_pull_back(sk: SyncKind, bnd: Binding, tc: Multi
             }
         }
     }
+    // Writes of the outer copy's finalizers in flight: the relabeling keeps the
+    // finalizers and the key, and relabels an Update's version and the stored
+    // version alike, so an Update matches the store exactly when its preimage does.
+    let key = outer.object_ref();
+    assert(outer1.object_ref() == key);
+    lemma_abs_object(sk, bnd, tc, r, s, key, uid_next, rv_next);
+    assert(tc.side_of_kind(key.kind) == ClusterIdView::Primary);
+    assert(outer_finalizer_undisturbed(outer1)(a) == outer_finalizer_undisturbed(outer)(p)) by {
+        if outer_finalizer_undisturbed(outer)(p) {
+            assert forall |msg: Message| #[trigger] a.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
+                APIRequest::UpdateRequest(req) => (req.key() == key && a.resources().contains_key(key)
+                    && req.obj.metadata.resource_version == a.resources()[key].metadata.resource_version)
+                    ==> has_sync_finalizer(req.obj.metadata),
+                APIRequest::GetThenUpdateRequest(req) => req.key() == key ==> has_sync_finalizer(req.obj.metadata),
+                _ => true,
+            } by {
+                lemma_relabel_msgs_contains(tc, r, in_flight, msg);
+                let m2 = choose |m2: Message| in_flight.contains(m2) && relabel_msg(tc, r, m2) == msg;
+                assert(p.in_flight().contains(m2));
+                match m2.content->APIRequest_0 {
+                    APIRequest::UpdateRequest(req2) => {
+                        let req = msg.content->APIRequest_0->UpdateRequest_0;
+                        assert(req.key() == req2.key());
+                        assert(req.obj.metadata.finalizers == req2.obj.metadata.finalizers);
+                        if req.key() == key && a.resources().contains_key(key)
+                            && req.obj.metadata.resource_version == a.resources()[key].metadata.resource_version {
+                            lemma_rv_relabel_agrees(tc, r, req2.obj.metadata.resource_version, p.resources()[key].metadata.resource_version);
+                            assert(req2.obj.metadata.resource_version == p.resources()[key].metadata.resource_version);
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+        if outer_finalizer_undisturbed(outer1)(a) {
+            assert forall |msg: Message| #[trigger] p.in_flight().contains(msg) && msg.content is APIRequest implies match msg.content->APIRequest_0 {
+                APIRequest::UpdateRequest(req) => (req.key() == key && p.resources().contains_key(key)
+                    && req.obj.metadata.resource_version == p.resources()[key].metadata.resource_version)
+                    ==> has_sync_finalizer(req.obj.metadata),
+                APIRequest::GetThenUpdateRequest(req) => req.key() == key ==> has_sync_finalizer(req.obj.metadata),
+                _ => true,
+            } by {
+                lemma_relabel_msgs_contains(tc, r, in_flight, msg);
+                let msg1 = relabel_msg(tc, r, msg);
+                assert(a.in_flight().contains(msg1));
+                match msg.content->APIRequest_0 {
+                    APIRequest::UpdateRequest(req) => {
+                        let req1 = msg1.content->APIRequest_0->UpdateRequest_0;
+                        assert(req1.key() == req.key());
+                        assert(req1.obj.metadata.finalizers == req.obj.metadata.finalizers);
+                        if req.key() == key && p.resources().contains_key(key)
+                            && req.obj.metadata.resource_version == p.resources()[key].metadata.resource_version {
+                            assert(req1.obj.metadata.resource_version == a.resources()[key].metadata.resource_version);
+                        }
+                    },
+                    _ => {},
+                }
+            }
+        }
+    }
     // Deletes of the mirror key in flight, read on the binding's side.
     lemma_mirror_undeleted_pull_back(sk, bnd, tc, r, s, outer, uid_next, rv_next);
+}
+
+// Two resource versions of the primary side relabel alike only if they are alike.
+proof fn lemma_rv_relabel_agrees(tc: MultiCluster<ClusterIdView>, r: Relabeling<ClusterIdView>, x: Option<ResourceVersion>, y: Option<ResourceVersion>)
+    requires tc.wf(), tc.home == ClusterIdView::Primary, injective(tc, r),
+        relabel_opt_rv(r, ClusterIdView::Primary, x) == relabel_opt_rv(r, ClusterIdView::Primary, y),
+    ensures x == y,
+{
+    assert(tc.sides.contains(ClusterIdView::Primary));
+    match (x, y) {
+        (Some(a), Some(b)) => {
+            assert((r.rv)(ClusterIdView::Primary, a) == (r.rv)(ClusterIdView::Primary, b));
+        },
+        _ => {},
+    }
 }
 
 // The premise of R2, pulled back: R1's premise, and the generation of the outer

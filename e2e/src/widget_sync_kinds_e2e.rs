@@ -380,8 +380,10 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
     }
     info!("outer Widget status fields: {:?}", names);
 
-    // Clean up: the janitor collects the mirrors of the deleted outer copies,
-    // which also shows it runs for both kinds.
+    // Clean up: deleting the outer copies tears their mirrors down -- the sync
+    // controller deletes each mirror before it releases its finalizer -- which
+    // also shows the teardown runs for both kinds. The gadget of the unbound
+    // cluster was never owned (no finalizer), so its delete is final at once.
     outer.api.delete(BOUND_CLUSTER, &DeleteParams::default()).await.map_err(failed("delete outer gadget"))?;
     outer
         .api
@@ -389,19 +391,40 @@ pub async fn widget_sync_kinds_e2e_test() -> Result<(), Error> {
         .await
         .map_err(failed("delete outer gadget of the unbound cluster"))?;
     widgets.delete(WIDGET_NAME, &DeleteParams::default()).await.map_err(failed("delete outer widget"))?;
-    // The janitors have been reconciling both mirrors successfully all along, so
-    // their next run is a resync away and not a backed-off retry: ONE_RECONCILE.
+    // The sync reconciler has been succeeding on both outer copies, so the
+    // teardown their delete triggers runs at the head of its schedule:
+    // ONE_RECONCILE.
     let i = inner.clone();
-    wait_until("the gadget mirror is collected by the janitor", ONE_RECONCILE, move || {
+    wait_until("the gadget mirror is torn down with its outer copy", ONE_RECONCILE, move || {
         let i = i.clone();
         async move { Ok(i.get_opt(BOUND_CLUSTER).await?.is_none()) }
     })
     .await?;
     let inner_widgets: Api<Widget> = Api::namespaced(inner_client.clone(), NAMESPACE);
-    wait_until("the widget mirror is collected by the janitor", ONE_RECONCILE, move || {
+    wait_until("the widget mirror is torn down with its outer copy", ONE_RECONCILE, move || {
         let inner_widgets = inner_widgets.clone();
         async move {
             match inner_widgets.get(WIDGET_NAME).await {
+                Ok(_) => Ok(false),
+                Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(true),
+                Err(e) => Err(Error::WidgetLookupFailed(e)),
+            }
+        }
+    })
+    .await?;
+    // With the mirrors gone the finalizers come off and the outer copies go,
+    // which is what leaves the next run a clean namespace.
+    let o = outer.clone();
+    wait_until("the outer gadgets are released and gone", ONE_RECONCILE, move || {
+        let o = o.clone();
+        async move { Ok(o.get_opt(BOUND_CLUSTER).await?.is_none() && o.get_opt(UNBOUND_CLUSTER).await?.is_none()) }
+    })
+    .await?;
+    let widgets = widgets.clone();
+    wait_until("the outer widget is released and gone", ONE_RECONCILE, move || {
+        let widgets = widgets.clone();
+        async move {
+            match widgets.get(WIDGET_NAME).await {
                 Ok(_) => Ok(false),
                 Err(kube::Error::Api(ErrorResponse { code: 404, .. })) => Ok(true),
                 Err(e) => Err(Error::WidgetLookupFailed(e)),

@@ -186,6 +186,56 @@ pub open spec fn managed_by_key() -> StringView { "anvil.dev/managed-by"@ }
 pub open spec fn managed_by_value() -> StringView { "widget-sync"@ }
 pub open spec fn parent_uid_key() -> StringView { "anvil.dev/parent-uid"@ }
 
+// The finalizer the sync controller owns on an outer copy. It is added before
+// the mirror is created and removed once the mirror is confirmed gone, so a
+// delete of the outer copy waits for the mirror (doc/widget_sync_design.md,
+// section 1.5).
+pub open spec fn sync_finalizer() -> StringView { "anvil.dev/widget-sync"@ }
+
+// The finalizer helpers, for any finalizer name: the sync controller's own
+// (sync_finalizer) and the one the modelled inner implementation owns
+// (model/inner_impl_reconciler.rs) are handled the same way.
+pub open spec fn has_finalizer(meta: ObjectMetaView, f: StringView) -> bool {
+    &&& meta.finalizers is Some
+    &&& meta.finalizers->0.contains(f)
+}
+
+pub open spec fn has_sync_finalizer(meta: ObjectMetaView) -> bool {
+    has_finalizer(meta, sync_finalizer())
+}
+
+pub open spec fn finalizers_or_empty(meta: ObjectMetaView) -> Seq<StringView> {
+    if meta.finalizers is Some { meta.finalizers->0 } else { Seq::empty() }
+}
+
+// `meta` with `f` appended.
+pub open spec fn with_finalizer(meta: ObjectMetaView, f: StringView) -> ObjectMetaView {
+    meta.with_finalizers(finalizers_or_empty(meta).push(f))
+}
+
+pub open spec fn with_sync_finalizer(meta: ObjectMetaView) -> ObjectMetaView {
+    with_finalizer(meta, sync_finalizer())
+}
+
+pub open spec fn not_finalizer(f: StringView) -> spec_fn(StringView) -> bool {
+    |x: StringView| x != f
+}
+
+pub open spec fn not_sync_finalizer() -> spec_fn(StringView) -> bool {
+    not_finalizer(sync_finalizer())
+}
+
+// `meta` with every copy of `f` removed; the finalizer list is dropped when
+// nothing is left.
+pub open spec fn without_finalizer(meta: ObjectMetaView, f: StringView) -> ObjectMetaView {
+    let rest = finalizers_or_empty(meta).filter(not_finalizer(f));
+    if rest.len() == 0 { meta.without_finalizers() } else { meta.with_finalizers(rest) }
+}
+
+pub open spec fn without_sync_finalizer(meta: ObjectMetaView) -> ObjectMetaView {
+    without_finalizer(meta, sync_finalizer())
+}
+
 // The condition types the sync controller reports on the outer copy. Ready and
 // Stalled are also the types it reads off the inner copy's status.
 pub open spec fn synced_condition_type() -> StringView { "Synced"@ }

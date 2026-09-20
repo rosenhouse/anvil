@@ -163,6 +163,7 @@ pub open spec fn handle_init(vsts: VStatefulSetView, resp_o: DefaultResp, state:
         let req = APIRequest::ListRequest(ListRequest {
             kind: PodView::kind(),
             namespace: vsts.metadata.namespace->0,
+            name: None,
         });
         let state_prime = VStatefulSetReconcileState {
             reconcile_step: VStatefulSetReconcileStepView::AfterListPod,

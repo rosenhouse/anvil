@@ -89,11 +89,13 @@ impl GetRequest {
     }
 }
 
-// ListRequest lists all the objects of kind in namespace.
+// ListRequest lists the objects of kind in namespace; with name set, only the
+// object of that name (a metadata.name field selector).
 
 pub struct ListRequest {
     pub kind: Kind,
     pub namespace: StringView,
+    pub name: Option<StringView>,
 }
 
 // CreateRequest creates the obj.

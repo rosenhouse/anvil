@@ -67,6 +67,7 @@ pub open spec fn reconcile_core(vrs: VReplicaSetView, resp_o: Option<ResponseVie
                 let req = APIRequest::ListRequest(ListRequest {
                     kind: PodView::kind(),
                     namespace: namespace,
+                    name: None,
                 });
                 let state_prime = VReplicaSetReconcileState {
                     reconcile_step: VReplicaSetRecStepView::AfterListPods,

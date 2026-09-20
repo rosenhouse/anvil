@@ -38,6 +38,7 @@ pub fn test_listrequest_key() {
             plural: "plural".to_string(),
         }),
         namespace: "namespace".to_string(),
+        name: None,
     };
     assert_eq!(api_method.key(), "kind/namespace");
 }
