@@ -407,7 +407,7 @@ two entry points rather than one overloaded `reconcile_with`:
 ### 3.2 The sync reconciler
 
 The sync reconciler is one controller per kind, triggered by outer objects of that kind. Its
-reconcile is the one of the main design, section 1.2, with two changes:
+reconcile is the one of the main design, sections 1.2 and 1.5, with two changes:
 
 - At `Init`, `cluster_of(outer)` is read. `None` (the selector field is
   missing, which the boot check rules out for stored objects) is reported
@@ -420,7 +420,10 @@ reconcile is the one of the main design, section 1.2, with two changes:
   generation, then `Error`, so the shim requeues -- and no request is sent to
   the inner side. This is what bounds the mirror kinds the model can write
   (section 5.2). A refused (claimed) binding stays in the set, because it is
-  bound: its requests are sent and the shim answers them `Forbidden`.
+  bound: its requests are sent and the shim answers them `Forbidden`. Both
+  checks come before the finalizer is added, so an object that names no inner
+  cluster or a binding the process does not know is never owned (main design,
+  section 1.5).
   The one branch that would write a mirror, the Create after a `NotFound`, is
   guarded by the same test; that guard is unreachable at run time (Init already
   refused) and is there so that every Create the model emits names a mirror kind
@@ -452,7 +455,9 @@ inner kind. Its reconcile is the one of the main design, section 1.3, with
 one change: the parent is listed when some listed outer object has the
 mirror's parent uid **and** `cluster_of` equal to the binding's cluster
 name. Under the CEL rule the second conjunct is redundant; without it the
-janitor of the old cluster collects the mirror of a parent that moved.
+janitor of the old cluster collects the mirror of a parent that moved. The
+List names the mirror's own name as a field selector, so it costs one object
+per reconcile whatever the namespace holds.
 
 R3's premise is the other side of that asymmetry: `parent_absent` says no outer
 copy of the kind carries the mirror's parent uid and says nothing about which
@@ -484,8 +489,9 @@ The binary:
    (`bindings::binding_of_capi_secret`). Per binding: build the clients, run
    the access check, create or verify the claim, start the janitors (one
    kube-runtime controller per kind on the binding's watch client, with a
-   graceful-shutdown token), and register the clients with the sync
-   controllers' client map. On change: rebuild the clients in place. On
+   graceful-shutdown token, its watch filtered to changes of a mirror's
+   generation and its requeue the `--janitor-interval` flag, ten minutes by
+   default), and register the clients with the sync controllers' client map. On change: rebuild the clients in place. On
    delete: stop the janitors, drop the clients.
 5. Creates the readiness file.
 
@@ -509,7 +515,8 @@ controller of the inner clusters is generic in the same way: for each kind it is
 given it stamps `observedGeneration` and a `Ready` condition.
 
 The outer RBAC (`deploy/widget_sync/rbac.yaml`) carries one pair of rules per
-configured kind -- `<plural>` get, list, watch and `<plural>/status` patch --
+configured kind -- `<plural>` get, list, watch and update, the last for the
+finalizer the controller owns on each object, and `<plural>/status` patch --
 beside `secrets` get, list and watch cluster-wide (bindings live in any
 namespace), `customresourcedefinitions` get for the boot shape check, and
 `namespaces` get on `kube-system` for the outer cluster id. Each binding's
@@ -523,7 +530,9 @@ admin. The deploy README's "RBAC" paragraph is the list.
 `widget-sync-inner-a` and `widget-sync-inner-b` -- with the Secrets
 `default/a-kubeconfig` and `default/b-kubeconfig` in the outer one. Three e2e
 suites run against them: `e2e/src/widget_sync_e2e.rs` covers one binding of one
-kind, `widget_sync_kinds_e2e.rs` the genericity over kinds (a Gadget selected by
+kind, the teardown of a deleted outer copy included (under a finalizer of a
+third party, with the mirror held by the inner side, and the janitor collecting
+a stale mirror planted by hand), `widget_sync_kinds_e2e.rs` the genericity over kinds (a Gadget selected by
 its name, and an object naming a cluster that is no binding of the process), and
 `widget_sync_bindings_e2e.rs` the bindings (two objects of one namespace bound to
 different clusters, a copied kubeconfig refused by the claim, a Secret removed
@@ -539,7 +548,7 @@ README's "Scenarios" list is what to read for the sequences themselves.
 
 The statements of the main design, section 3.3, with parameters:
 
-- R1, R2: `∀ k: SyncKind, outer: SyncedObjectView` with `outer.kind == k.outer_kind`
+- R1, R2, R4: `∀ k: SyncKind, outer: SyncedObjectView` with `outer.kind == k.outer_kind`
   and `binding_of(k, outer) ∈ k.bindings` (an outer copy of a binding the
   reconciler does not serve is refused, section 3.2), under the sync controller
   for `k` and the janitors for `k` and every binding of the outer's namespace
@@ -648,7 +657,8 @@ one-store cluster installs the mirror kind of every binding of `k.bindings`,
 not only of `b`: the sync controller of `k` serves all of them, so a Create it
 sends for an outer copy of another *served* binding must still name a known kind
 (`MultiCluster::request_ok`, which `models_ok` asks of the reconcile model as a
-function, for every object it could be triggered by, not only the stored ones).
+function, for every object of the model's kind it could be triggered by that
+has the shape of a stored one, `stored_object_ok`; main design, section 5.4).
 
 The theorem is still read for one binding `b` at a time -- the ESRs it consumes
 and the D3 it assumes are `b`'s, and the janitors of the other bindings enter as
@@ -691,9 +701,11 @@ bindings of the same kind. Nothing else runs: `kinds_deployed` fixes the
 cluster's controllers to be the deployment's, where `widget_multi_cluster_theorem`
 admits any other controller meeting its hypotheses. So this cluster exercises
 neither R2's premise nor D3 -- nothing in it writes an inner status or a
-finalizer. The inner implementation of the main design, section 2.5, is composed
-with the pair on one store and could be admitted here too, but it is not among
-the deployment's controllers and no multi-store instance names it. Each
+finalizer on a mirror. The inner implementation of the main design, section
+2.5, is composed with the pair on one store, where its fairness discharges D3,
+and could be admitted here too, but it is not among the deployment's
+controllers and no multi-store instance names it. R4 is stated on one store
+only. Each
 is admitted by its model, which sends only requests the refinement handles and
 commutes with the relabeling (`lemma_sync_model_ok`, `lemma_janitor_model_ok`
 and the commutation lemmas, all already stated with the kind and the binding as

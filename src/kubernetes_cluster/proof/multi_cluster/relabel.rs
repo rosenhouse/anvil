@@ -710,6 +710,59 @@ pub proof fn lemma_abs_store_list<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: M
     assert(lhs =~= rhs);
 }
 
+// The same, for a List selected by name.
+pub proof fn lemma_abs_store_list_named<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: MultiClusterState<S>, namespace: StringView, kind: Kind, name: StringView)
+    requires
+        stores_sided(tc, s),
+        tc.sides.contains(tc.side_of_kind(kind)),
+    ensures ({
+        let sel = |o: DynamicObjectView| {
+            &&& o.object_ref().namespace == namespace
+            &&& o.object_ref().kind == kind
+            &&& o.object_ref().name == name
+        };
+        let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
+        abs_store(tc, r, s).values().filter(sel) == s.store(tc.side_of_kind(kind)).resources.values().filter(sel).map(f)
+    }),
+{
+    let sel = |o: DynamicObjectView| {
+        &&& o.object_ref().namespace == namespace
+        &&& o.object_ref().kind == kind
+        &&& o.object_ref().name == name
+    };
+    let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
+    let side = tc.side_of_kind(kind);
+    let a = abs_store(tc, r, s);
+    let store = s.store(side).resources;
+    let lhs = a.values().filter(sel);
+    let rhs = store.values().filter(sel).map(f);
+    assert forall |o1: DynamicObjectView| lhs.contains(o1) implies rhs.contains(o1) by {
+        a.dom().lemma_map_contains(|k: ObjectRef| a[k], o1);
+        let k = choose |k: ObjectRef| a.dom().contains(k) && a[k] == o1;
+        lemma_abs_store_index(tc, r, s, k);
+        assert(tc.side_of_kind(k.kind) == side);
+        let o = store[k];
+        assert(o1 == f(o));
+        assert(store.values().contains(o)) by {
+            store.dom().lemma_map_contains(|k: ObjectRef| store[k], o);
+            assert(store.dom().contains(k) && store[k] == o);
+        }
+        assert(store.values().filter(sel).contains(o));
+        store.values().filter(sel).lemma_map_contains(f, o1);
+    }
+    assert forall |o1: DynamicObjectView| rhs.contains(o1) implies lhs.contains(o1) by {
+        store.values().filter(sel).lemma_map_contains(f, o1);
+        let o = choose |o: DynamicObjectView| store.values().filter(sel).contains(o) && o1 == f(o);
+        store.dom().lemma_map_contains(|k: ObjectRef| store[k], o);
+        let k = choose |k: ObjectRef| store.dom().contains(k) && store[k] == o;
+        lemma_abs_store_index(tc, r, s, k);
+        assert(a.dom().contains(k) && a[k] == o1);
+        a.dom().lemma_map_contains(|k: ObjectRef| a[k], o1);
+        assert(a.values().contains(o1));
+    }
+    assert(lhs =~= rhs);
+}
+
 // ---------------------------------------------------------------------------
 // Multisets of messages.
 // ---------------------------------------------------------------------------

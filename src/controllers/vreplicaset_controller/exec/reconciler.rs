@@ -106,6 +106,7 @@ pub fn reconcile_core(vrs: &VReplicaSet, resp_o: Option<Response<VoidEResp>>, st
                 let req = KubeAPIRequest::ListRequest(KubeListRequest {
                     api_resource: Pod::api_resource(),
                     namespace: namespace,
+                    name: None,
                 });
                 let state_prime = VReplicaSetReconcileState {
                     reconcile_step: VReplicaSetReconcileStep::AfterListPods,

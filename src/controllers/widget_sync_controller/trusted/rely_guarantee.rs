@@ -246,12 +246,34 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
         })
 }
 
+// The Update the sync reconciler sends for the outer copy at `outer_key`: it
+// carries the resource version it read the copy with, and if it lands (that
+// version is the stored one) it adds the sync finalizer or removes it and changes
+// nothing else: not the spec, labels, annotations or owner references. (The API
+// server ignores the status of an Update.) A stale update, which the API server
+// rejects with Conflict, is unconstrained.
+pub open spec fn sync_finalizer_update_req(k: SyncKind, req: UpdateRequest, outer_key: ObjectRef) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let stored = s.resources()[req.key()];
+        &&& req.obj.kind == k.outer_kind
+        &&& req.namespace == outer_key.namespace
+        &&& req.name == outer_key.name
+        &&& req.obj.metadata.resource_version is Some
+        &&& (s.resources().contains_key(req.key()) && stored.metadata.resource_version == req.obj.metadata.resource_version) ==> {
+            &&& req.obj.spec == stored.spec
+            &&& (req.obj.metadata == with_sync_finalizer(stored.metadata) || req.obj.metadata == without_sync_finalizer(stored.metadata))
+        }
+    }
+}
+
 // Every request the sync reconciler of `k` sends while reconciling the outer copy
-// at `outer_key` is one of: Get of its mirror; Create of its mirror; Patch of its
-// mirror's spec; PatchStatus of the outer copy itself. Every mirror request names
-// the outer copy's namespace and name and a mirror kind of `k`. It never deletes,
-// never writes an outer copy's spec or metadata, never writes a mirror's status,
-// and never touches any other key.
+// at `outer_key` is one of: Get of its mirror; List of the mirror key, by name;
+// Create of its mirror; Patch of its mirror's spec; Delete of its mirror, by
+// uid; Update of the copy's finalizers (sync_finalizer_update_req); PatchStatus
+// of the copy itself. Every mirror request names the outer copy's
+// namespace and name and a mirror kind of `k`. It never writes an outer copy's
+// spec, labels or annotations, never writes a mirror's status, never deletes
+// without a uid precondition, and never touches any other key.
 pub open spec fn widget_sync_guarantee(k: SyncKind, controller_id: int) -> StatePred<ClusterState> {
     |s: ClusterState| {
         forall |msg| {
@@ -266,12 +288,25 @@ pub open spec fn widget_sync_guarantee(k: SyncKind, controller_id: int) -> State
                     &&& req.key.namespace == outer_key.namespace
                     &&& req.key.name == outer_key.name
                 },
+                APIRequest::ListRequest(req) => {
+                    &&& is_inner_kind(k, req.kind)
+                    &&& req.namespace == outer_key.namespace
+                    &&& req.name == Some(outer_key.name)
+                },
                 APIRequest::CreateRequest(req) => mirror_create_req(k, req, outer_key)(s),
                 APIRequest::PatchRequest(req) => {
                     &&& is_inner_kind(k, req.kind)
                     &&& req.namespace == outer_key.namespace
                     &&& req.name == outer_key.name
                 },
+                APIRequest::DeleteRequest(req) => {
+                    &&& is_inner_kind(k, req.key.kind)
+                    &&& req.key.namespace == outer_key.namespace
+                    &&& req.key.name == outer_key.name
+                    &&& req.preconditions is Some
+                    &&& req.preconditions->0.uid is Some
+                },
+                APIRequest::UpdateRequest(req) => sync_finalizer_update_req(k, req, outer_key)(s),
                 APIRequest::PatchStatusRequest(req) => sync_status_patch_req(k, req, outer_key),
                 _ => false,
             }

@@ -63,6 +63,7 @@ pub open spec fn req_msg_is_list_vrs_req(
     &&& req->ListRequest_0 == ListRequest {
         kind: VReplicaSetView::kind(),
         namespace: vd.metadata.namespace.unwrap(),
+        name: None,
     }
 }
 

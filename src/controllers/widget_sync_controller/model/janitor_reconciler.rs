@@ -67,6 +67,7 @@ pub open spec fn reconcile_core(k: SyncKind, b: Binding, inner: SyncedObjectView
                 let req = APIRequest::ListRequest(ListRequest {
                     kind: k.outer_kind,
                     namespace: inner.metadata.namespace->0,
+                    name: Some(inner.metadata.name->0),
                 });
                 (at_step(WidgetJanitorStepView::AfterListOuter), Some(RequestView::KRequest(req)))
             }

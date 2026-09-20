@@ -17,7 +17,7 @@ use crate::kubernetes_cluster::proof::composition::*;
 use crate::kubernetes_cluster::proof::core::*;
 use crate::kubernetes_cluster::spec::{api_server::types::*, cluster::*, message::*};
 use crate::widget_sync_controller::model::install::*;
-use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::spec::*, liveness::sync_spec_proof::*, liveness::sync_status_proof::*};
+use crate::widget_sync_controller::proof::{guarantee::*, liveness::cleanup_proof::*, liveness::release_proof::*, liveness::spec::*, liveness::sync_spec_proof::*, liveness::sync_status_proof::*};
 use crate::widget_sync_controller::trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*};
 use verus_temporal_logic::defs::*;
 use verus_temporal_logic::rules::*;
@@ -26,12 +26,13 @@ use vstd::set_lib::*;
 
 verus! {
 
-// R1, R2 and R3s, for every bound binding of the kind.
+// R1, R2, R3s and R4, for every bound binding of the kind.
 pub open spec fn widget_sync_esr(k: SyncKind) -> TempPred<ClusterState> {
     tla_forall(|b: Binding| if k.bindings.contains(b) {
         widget_spec_eventually_synced(k, b)
             .and(widget_status_eventually_mirrored(k, b))
             .and(widget_mirrors_stably_collected(k, b))
+            .and(widget_finalizer_eventually_released(k, b))
     } else {
         true_pred::<ClusterState>()
     })
@@ -204,6 +205,7 @@ pub proof fn widget_sync_singleton_core_holds(k: SyncKind, spec_ok: spec_fn(Valu
                 widget_spec_eventually_synced(k, b)
                     .and(widget_status_eventually_mirrored(k, b))
                     .and(widget_mirrors_stably_collected(k, b))
+                    .and(widget_finalizer_eventually_released(k, b))
             } else {
                 true_pred::<ClusterState>()
             };
@@ -228,8 +230,10 @@ pub proof fn widget_sync_singleton_core_holds(k: SyncKind, spec_ok: spec_fn(Valu
                     sync_eventually_synced(k, b, spec_ok, spec_rde, inner, id, ids[b]);
                     sync_eventually_mirrors_status(k, b, spec_ok, spec_rde, inner, id, ids[b]);
                     sync_mirrors_stably_collected(k, b, spec_ok, spec_rde, inner, id, ids[b]);
+                    sync_eventually_releases(k, b, spec_ok, spec_rde, inner, id, ids[b]);
                     entails_and(spec_rde, widget_spec_eventually_synced(k, b), widget_status_eventually_mirrored(k, b));
                     entails_and(spec_rde, widget_spec_eventually_synced(k, b).and(widget_status_eventually_mirrored(k, b)), widget_mirrors_stably_collected(k, b));
+                    entails_and(spec_rde, widget_spec_eventually_synced(k, b).and(widget_status_eventually_mirrored(k, b)).and(widget_mirrors_stably_collected(k, b)), widget_finalizer_eventually_released(k, b));
                 }
             }
             spec_entails_tla_forall(spec_rde, per_binding);
@@ -315,6 +319,20 @@ pub proof fn sync_guarantee_implies_janitor_rely(k: SyncKind, id: int)
                     assert(req.obj.metadata.name == Some(outer.metadata.name->0));
                     let key2 = ObjectRef { kind: k.outer_kind, namespace: req.namespace, name: req.obj.metadata.name->0 };
                     assert(key2 == outer_key);
+                }
+                APIRequest::UpdateRequest(req) => {
+                    // The sync reconciler's one Update takes or releases the finalizer
+                    // of an outer copy it read: everything else of the metadata is as
+                    // stored, so whatever the kind, the identity of a mirror survives.
+                    assert(sync_finalizer_update_req(k, req, outer_key)(s));
+                    let stored = s.resources()[req.key()];
+                    if s.resources().contains_key(req.key()) && stored.metadata.resource_version == req.obj.metadata.resource_version {
+                        assert(req.obj.metadata.owner_references == stored.metadata.owner_references);
+                        assert(req.obj.metadata.labels == stored.metadata.labels);
+                        assert(req.obj.metadata.annotations == stored.metadata.annotations);
+                        assert(preserves_mirror_identity(stored.metadata, req.obj.metadata));
+                    }
+                    assert(mirror_update_req(k, req)(s));
                 }
                 _ => {}
             }
@@ -552,6 +570,7 @@ pub proof fn widget_janitors_core_holds(k: SyncKind, sub: Set<Binding>, spec_ok:
 // (doc/widget_sync_fanout_design.md, section 5.1).
 pub proof fn widget_fanout_core_holds(k: SyncKind, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, ids: Map<Binding, int>, sync_id: int)
     requires
+        sync_kind_ok(k),
         ids_ok(k.bindings, ids, sync_id),
         janitors_registered(k, spec_ok, cluster, ids),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, ids)),
@@ -646,6 +665,7 @@ pub open spec fn widget_pair_core_set(k: SyncKind, b: Binding, janitor_id: int, 
 
 pub proof fn widget_pair_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, janitor_id: int, sync_id: int)
     requires
+        sync_kind_ok(k),
         // `b` is the whole configuration: the sync reconciler serves it alone,
         // which is what made the binding set of the old signature `{b}`.
         k.bindings == Set::<Binding>::empty().insert(b),

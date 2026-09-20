@@ -28,7 +28,7 @@ use crate::widget_sync_controller::{
     model::{install::*, sync_reconciler, sync_reconciler::WidgetSyncReconcileState},
     proof::{
         guarantee::*, helper_invariants::*, janitor_invariants::*,
-        liveness::{api_actions::*, spec::*, sync_spec_proof::*, terminate},
+        liveness::{api_actions::*, finalizer_proof, spec::*, sync_spec_proof::*, terminate},
         predicate::*, sync_invariants::*,
     },
     trusted::{liveness_theorem::*, rely_guarantee::*, spec_types::*, step::*},
@@ -141,9 +141,27 @@ pub proof fn r2_spec_with_phase_ii_is_stable(k: SyncKind, b: Binding, spec_ok: s
     stable_and_n!(r2_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(sync_phase_ii(controller_id, outer))));
 }
 
-// The bridge to R1's layers: the premise of R2 gives the premise of R1 and a
-// settled mirror.
-pub proof fn lemma_r2_layers_imply_r1_layers(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView)
+// The finalizer layer of R1, under the premise of R2.
+pub open spec fn r2_spec_with_finalizer(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView) -> TempPred<ClusterState> {
+    r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled).and(always(lift_state(sync_finalizer_held(controller_id, outer))))
+}
+
+pub proof fn r2_spec_with_finalizer_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView)
+    requires
+        k.bindings.contains(b),
+        outer.kind == k.outer_kind,
+        cluster_of(k.selector, outer) is Some,
+        b == binding_of(k, outer),
+    ensures valid(stable(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled))),
+{
+    r2_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    always_p_is_stable(lift_state(sync_finalizer_held(controller_id, outer)));
+    stable_and_n!(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(sync_finalizer_held(controller_id, outer))));
+}
+
+// The bridge to R1's layers up to phase II: the premise of R2 gives the premise
+// of R1 and a settled mirror.
+pub proof fn lemma_r2_phase_ii_implies_r1_phase_ii(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView)
     requires
         k.bindings.contains(b),
         outer.kind == k.outer_kind,
@@ -158,7 +176,6 @@ pub proof fn lemma_r2_layers_imply_r1_layers(k: SyncKind, b: Binding, spec_ok: s
         spec.entails(always(lift_state(phase_i(controller_id)))),
         spec.entails(always(lift_state(sync_phase_ii(controller_id, outer)))),
         spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
-        spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
 {
     entails_and_split(spec, r2_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(sync_phase_ii(controller_id, outer))));
     entails_and_split(spec, r2_spec_with_premise(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(phase_i(controller_id))));
@@ -170,7 +187,33 @@ pub proof fn lemma_r2_layers_imply_r1_layers(k: SyncKind, b: Binding, spec_ok: s
     entails_and(spec, sync_stable_spec(k, b, spec_ok, cluster, controller_id, janitor_id), always(lift_state(outer_spec_stable(k, b, outer))));
     entails_and(spec, sync_spec_with_desired(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(phase_i(controller_id))));
     entails_and(spec, sync_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(sync_phase_ii(controller_id, outer))));
-    entails_and(spec, sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(mirror_settled(k, b, outer))));
+}
+
+// The bridge to all of R1's layers.
+pub proof fn lemma_r2_layers_imply_r1_layers(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView)
+    requires
+        k.bindings.contains(b),
+        outer.kind == k.outer_kind,
+        cluster_of(k.selector, outer) is Some,
+        b == binding_of(k, outer),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+    ensures
+        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(sync_stable_spec(k, b, spec_ok, cluster, controller_id, janitor_id)),
+        spec.entails(always(lift_state(outer_stable(k, b, outer)))),
+        spec.entails(always(lift_state(inner_settled(k, outer, settled)))),
+        spec.entails(always(lift_state(mirror_settled(k, b, outer)))),
+        spec.entails(always(lift_state(phase_i(controller_id)))),
+        spec.entails(always(lift_state(sync_phase_ii(controller_id, outer)))),
+        spec.entails(always(lift_state(sync_finalizer_held(controller_id, outer)))),
+        spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+{
+    entails_and_split(spec, r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(sync_finalizer_held(controller_id, outer))));
+    lemma_r2_phase_ii_implies_r1_phase_ii(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer, settled);
+    entails_and(spec, sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(sync_finalizer_held(controller_id, outer))));
+    entails_and(spec, sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(mirror_settled(k, b, outer))));
 }
 
 // ---------------------------------------------------------------------------
@@ -503,7 +546,7 @@ pub open spec fn r2_phase_iii(k: SyncKind, b: Binding, controller_id: int, outer
 }
 
 pub open spec fn r2_spec_with_phase_iii(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView, settled: SyncedStatusView) -> TempPred<ClusterState> {
-    r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled).and(always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled))))
+    r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled).and(always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled))))
 }
 
 // The action under which the phase-III facts are preserved.
@@ -522,6 +565,7 @@ pub open spec fn r2_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -
         &&& outer_stable(k, b, outer)(s)
         &&& outer_stable(k, b, outer)(s_prime)
         &&& inner_settled(k, outer, settled)(s)
+        &&& sync_finalizer_held(controller_id, outer)(s)
     }
 }
 
@@ -532,7 +576,7 @@ pub proof fn lemma_always_r2_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
     ensures spec.entails(always(lift_action(r2_step_next(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)))),
 {
     lemma_r2_layers_imply_r1_layers(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer, settled);
@@ -555,7 +599,8 @@ pub proof fn lemma_always_r2_step_next(k: SyncKind, b: Binding, spec_ok: spec_fn
         later(lift_state(cluster.each_synced_object_in_etcd_is_well_formed(k.outer_kind))),
         lift_state(outer_stable(k, b, outer)),
         later(lift_state(outer_stable(k, b, outer))),
-        lift_state(inner_settled(k, outer, settled))
+        lift_state(inner_settled(k, outer, settled)),
+        lift_state(sync_finalizer_held(controller_id, outer))
     );
 }
 
@@ -567,7 +612,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_generation_ok(k: SyncKind, b: 
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
     ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_generation_ok(controller_id, outer))))),
 {
     let key = outer.object_ref();
@@ -621,7 +666,7 @@ pub proof fn lemma_true_leads_to_always_ongoing_generation_ok(k: SyncKind, b: Bi
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(always(lift_state(scheduled_generation_ok(controller_id, outer)))),
     ensures spec.entails(true_pred().leads_to(always(lift_state(ongoing_generation_ok(controller_id, outer))))),
 {
@@ -764,7 +809,7 @@ pub proof fn lemma_true_leads_to_always_get_responses_are_settled(k: SyncKind, b
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
     ensures spec.entails(true_pred().leads_to(always(lift_state(get_responses_are_settled(k, b, controller_id, outer, settled))))),
 {
     let key = outer.object_ref();
@@ -848,9 +893,61 @@ proof fn lemma_r2_reconcile_step(k: SyncKind, b: Binding, spec_ok: spec_fn(Value
         assert(reconcile_prime.local_state == state_prime.marshal());
         assert(WidgetSyncReconcileState::unmarshal(reconcile_prime.local_state)->Ok_0 == state_prime);
         assert(reconcile_prime.pending_req_msg is Some ==> req_o is Some && reconcile_prime.pending_req_msg->0.content->APIRequest_0 == req_o->0->KRequest_0);
+        // The snapshot is live and carries the finalizer (the finalizer layer).
+        assert(ongoing_satisfies(controller_id, key, snapshot_live_and_owned_if_marked(outer))(s));
+        assert(ongoing_satisfies(controller_id, key, snapshot_owned())(s));
+        assert(cr_outer.metadata.deletion_timestamp is None);
+        assert(has_sync_finalizer(cr_outer.metadata));
         match state.reconcile_step {
             WidgetSyncStepView::Init => {
                 assert(state_prime.reconcile_step is AfterGetInner);
+            },
+            // The steps that take or release the finalizer are reached from a
+            // snapshot without it or a terminating one: not from this one.
+            WidgetSyncStepView::AfterGetMirror => {
+                if reconcile.pending_req_msg is None {
+                    assert(resp_msg_opt is None);
+                    assert(state_prime.reconcile_step is Error);
+                } else {
+                    assert(sync_pending_request_is(k, controller_id, key, reconcile));
+                    assert(false);
+                }
+            },
+            WidgetSyncStepView::AfterAddFinalizer => {
+                if reconcile.pending_req_msg is None {
+                    assert(resp_msg_opt is None);
+                    assert(state_prime.reconcile_step is Error);
+                } else {
+                    assert(sync_pending_request_is(k, controller_id, key, reconcile));
+                    assert(false);
+                }
+            },
+            WidgetSyncStepView::AfterRemoveFinalizer => {
+                if reconcile.pending_req_msg is None {
+                    assert(resp_msg_opt is None);
+                    assert(state_prime.reconcile_step is Error);
+                } else {
+                    assert(sync_pending_request_is(k, controller_id, key, reconcile));
+                    assert(false);
+                }
+            },
+            WidgetSyncStepView::AfterListMirror => {
+                if reconcile.pending_req_msg is None {
+                    assert(resp_msg_opt is None);
+                    assert(state_prime.reconcile_step is Error);
+                } else {
+                    assert(sync_pending_request_is(k, controller_id, key, reconcile));
+                    assert(false);
+                }
+            },
+            WidgetSyncStepView::AfterDeleteMirror => {
+                if reconcile.pending_req_msg is None {
+                    assert(resp_msg_opt is None);
+                    assert(state_prime.reconcile_step is Error);
+                } else {
+                    assert(sync_pending_request_is(k, controller_id, key, reconcile));
+                    assert(false);
+                }
             },
             WidgetSyncStepView::AfterGetInner => {
                 if reconcile.pending_req_msg is None {
@@ -977,7 +1074,7 @@ pub proof fn lemma_true_leads_to_always_status_writes_are_desired(k: SyncKind, b
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(always(lift_state(ongoing_generation_ok(controller_id, outer)))),
         spec.entails(always(lift_state(get_responses_are_settled(k, b, controller_id, outer, settled)))),
     ensures spec.entails(true_pred().leads_to(always(lift_state(status_writes_are_desired(k, controller_id, outer, settled))))),
@@ -1034,7 +1131,7 @@ pub proof fn lemma_true_leads_to_always_scheduled_status_current(k: SyncKind, b:
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(always(lift_state(status_writes_are_desired(k, controller_id, outer, settled)))),
     ensures spec.entails(true_pred().leads_to(always(lift_state(scheduled_status_current(k, controller_id, outer, settled))))),
 {
@@ -1101,7 +1198,7 @@ pub proof fn lemma_true_leads_to_always_ongoing_status_current(k: SyncKind, b: B
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(always(lift_state(status_writes_are_desired(k, controller_id, outer, settled)))),
         spec.entails(always(lift_state(scheduled_status_current(k, controller_id, outer, settled)))),
     ensures spec.entails(true_pred().leads_to(always(lift_state(ongoing_status_current(k, controller_id, outer, settled))))),
@@ -1148,17 +1245,17 @@ pub proof fn lemma_true_leads_to_always_r2_phase_iii(k: SyncKind, b: Binding, sp
         cluster_of(k.selector, outer) is Some,
         b == binding_of(k, outer),
         sync_membership(k, b, spec_ok, cluster, controller_id, janitor_id),
-        spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
     ensures spec.entails(true_pred().leads_to(always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled))))),
 {
-    let spec_ii = r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    let spec_ii = r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     let a1 = lift_state(scheduled_generation_ok(controller_id, outer));
     let a2 = lift_state(ongoing_generation_ok(controller_id, outer));
     let c = lift_state(get_responses_are_settled(k, b, controller_id, outer, settled));
     let bw = lift_state(status_writes_are_desired(k, controller_id, outer, settled));
     let d1 = lift_state(scheduled_status_current(k, controller_id, outer, settled));
     let d2 = lift_state(ongoing_status_current(k, controller_id, outer, settled));
-    r2_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    r2_spec_with_finalizer_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     assert(spec_ii.entails(spec_ii));
 
     // Layer 1: a1 and c directly.
@@ -1246,6 +1343,7 @@ pub proof fn lemma_unfold_r2_spec_with_phase_iii(k: SyncKind, b: Binding, spec_o
         b == binding_of(k, outer),
         spec.entails(r2_spec_with_phase_iii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
     ensures
+        spec.entails(r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled)),
         spec.entails(always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled)))),
         spec.entails(always(lift_state(scheduled_generation_ok(controller_id, outer)))),
@@ -1255,7 +1353,8 @@ pub proof fn lemma_unfold_r2_spec_with_phase_iii(k: SyncKind, b: Binding, spec_o
         spec.entails(always(lift_state(scheduled_status_current(k, controller_id, outer, settled)))),
         spec.entails(always(lift_state(ongoing_status_current(k, controller_id, outer, settled)))),
 {
-    entails_and_split(spec, r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled))));
+    entails_and_split(spec, r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled))));
+    entails_and_split(spec, r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled), always(lift_state(sync_finalizer_held(controller_id, outer))));
     let p = lift_state(r2_phase_iii(k, b, controller_id, outer, settled));
     always_weaken(spec, p, lift_state(scheduled_generation_ok(controller_id, outer)));
     always_weaken(spec, p, lift_state(ongoing_generation_ok(controller_id, outer)));
@@ -1815,8 +1914,10 @@ pub proof fn lemma_premise_leads_to_always_status_synced(k: SyncKind, b: Binding
     let spec_p = r2_spec_with_premise(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     let spec_i = r2_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     let spec_ii = r2_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    let spec_f = r2_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     let spec_iii = r2_spec_with_phase_iii(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     let phase_iii_temp = always(lift_state(r2_phase_iii(k, b, controller_id, outer, settled)));
+    let finalizer_temp = always(lift_state(sync_finalizer_held(controller_id, outer)));
     let phase_ii_temp = always(lift_state(sync_phase_ii(controller_id, outer)));
     let phase_i_temp = always(lift_state(phase_i(controller_id)));
     let premise_temp = r2_premise(k, b, outer, settled);
@@ -1824,12 +1925,20 @@ pub proof fn lemma_premise_leads_to_always_status_synced(k: SyncKind, b: Binding
     assert(spec_iii.entails(spec_iii));
     lemma_true_leads_to_always_status_synced(k, b, spec_ok, spec_iii, cluster, controller_id, janitor_id, outer, settled);
     // Remove phase III.
-    r2_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
-    unpack_conditions_from_spec(spec_ii, phase_iii_temp, true_pred(), target);
+    r2_spec_with_finalizer_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    unpack_conditions_from_spec(spec_f, phase_iii_temp, true_pred(), target);
     temp_pred_equality(true_pred().and(phase_iii_temp), phase_iii_temp);
+    assert(spec_f.entails(spec_f));
+    lemma_true_leads_to_always_r2_phase_iii(k, b, spec_ok, spec_f, cluster, controller_id, janitor_id, outer, settled);
+    leads_to_trans(spec_f, true_pred(), phase_iii_temp, target);
+    // Remove the finalizer layer: R1's lemma applies since spec_ii gives R1's phase-II layer.
+    r2_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
+    unpack_conditions_from_spec(spec_ii, finalizer_temp, true_pred(), target);
+    temp_pred_equality(true_pred().and(finalizer_temp), finalizer_temp);
     assert(spec_ii.entails(spec_ii));
-    lemma_true_leads_to_always_r2_phase_iii(k, b, spec_ok, spec_ii, cluster, controller_id, janitor_id, outer, settled);
-    leads_to_trans(spec_ii, true_pred(), phase_iii_temp, target);
+    lemma_r2_phase_ii_implies_r1_phase_ii(k, b, spec_ok, spec_ii, cluster, controller_id, janitor_id, outer, settled);
+    finalizer_proof::lemma_true_leads_to_always_sync_finalizer_held(k, b, spec_ok, spec_ii, cluster, controller_id, janitor_id, outer);
+    leads_to_trans(spec_ii, true_pred(), finalizer_temp, target);
     // Remove phase II: R1's phase II lemma applies since spec_i gives R1's phase-I layer.
     r2_spec_with_phase_i_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer, settled);
     unpack_conditions_from_spec(spec_i, phase_ii_temp, true_pred(), target);

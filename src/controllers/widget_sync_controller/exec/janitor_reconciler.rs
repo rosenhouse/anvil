@@ -133,6 +133,7 @@ pub fn reconcile_core(kind: &SyncKindExec, binding: &ClusterRef, inner: &SyncedO
             let req = KubeAPIRequest::ListRequest(KubeListRequest {
                 api_resource: kind.outer_api_resource(),
                 namespace: namespace,
+                name: Some(name),
             });
             return (at_step(WidgetJanitorStep::AfterListOuter), Some(Request::KRequest(req)));
         },

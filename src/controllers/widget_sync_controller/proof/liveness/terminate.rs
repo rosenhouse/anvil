@@ -49,6 +49,11 @@ pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding,
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))))),
     ensures
         spec.entails(tla_forall(|key: ObjectRef| true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key))))),
 {
@@ -61,6 +66,11 @@ pub proof fn sync_reconcile_eventually_terminates(k: SyncKind, b: Binding,
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))), key);
         always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))), key);
+        always_tla_forall_apply::<ClusterState, ObjectRef>(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))), key);
         if key.kind == k.outer_kind {
             sync_reconcile_eventually_terminates_on_key(k, b, spec, cluster, controller_id, key);
         } else {
@@ -99,6 +109,11 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))),
         spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))))),
+        spec.entails(always(lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))))),
     ensures
         spec.entails(true_pred().leads_to(lift_state(Cluster::reconcile_idle(controller_id, key)))),
 {
@@ -129,7 +144,8 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus), sync_step_is_terminal());
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError), sync_step_is_terminal());
 
-    // The Create and the Patch of the mirror end in Done, or report their failure first.
+    // The Create, the Patch and the Delete of the mirror, and the Update of the
+    // outer copy's finalizers, end in Done, or report their failure first.
     or_leads_to_combine_and_equality!(
         spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_mirror_write())),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
@@ -139,6 +155,33 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     );
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner), sync_step_after_mirror_write());
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner), sync_step_after_mirror_write());
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror), sync_step_after_mirror_write());
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer), sync_step_after_mirror_write());
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer), sync_step_after_mirror_write());
+
+    // After the Get of the mirror it listed, the reconciler releases the outer
+    // copy, deletes the mirror, or is done.
+    or_leads_to_combine_and_equality!(
+        spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_get_mirror())),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterRemoveFinalizer)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterDeleteMirror)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
+        idle
+    );
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror), sync_step_after_get_mirror());
+
+    // After the List of the mirror key, the reconciler releases the outer copy,
+    // reads the mirror, or is done.
+    or_leads_to_combine_and_equality!(
+        spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_list_mirror())),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterRemoveFinalizer)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetMirror)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Error));
+        idle
+    );
+    cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror), sync_step_after_list_mirror());
 
     // After the Get of the mirror, the reconciler is at one of those steps, or done.
     or_leads_to_combine_and_equality!(
@@ -153,12 +196,16 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     );
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner), sync_step_after_get_inner());
 
-    // Init sends the Get; for an outer copy that names no inner cluster it writes
-    // the rejection into the status and ends; for one whose binding this
-    // reconciler does not serve it writes InnerUnreachable and ends in Error.
+    // Init sends the Get of the mirror, the Update that takes the finalizer or the
+    // teardown's List; for an outer copy that names no inner cluster it writes the
+    // rejection into the status and ends; for one whose binding this reconciler
+    // does not serve it writes InnerUnreachable and ends in Error; for a
+    // terminating copy without the finalizer it is done.
     or_leads_to_combine_and_equality!(
         spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_init())),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterAddFinalizer)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterListMirror)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
@@ -174,9 +221,14 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
         spec, true_pred(),
         idle,
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Init)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetMirror)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterAddFinalizer)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterRemoveFinalizer)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterListMirror)),
+        lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterDeleteMirror)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)),
@@ -191,9 +243,14 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, c
     ensures
         true_pred::<ClusterState>() == lift_state(Cluster::reconcile_idle(controller_id, key))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Init)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetMirror)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterAddFinalizer)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterRemoveFinalizer)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterListMirror)))
+            .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterDeleteMirror)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)))
             .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)))
@@ -201,9 +258,14 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, c
 {
     let rhs = lift_state(Cluster::reconcile_idle(controller_id, key))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Init)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetMirror)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterAddFinalizer)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterRemoveFinalizer)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterCreateInner)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchInner)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterListMirror)))
+        .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterDeleteMirror)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterReportError)))
         .or(lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::Done)))
@@ -214,9 +276,14 @@ proof fn lemma_true_equal_to_sync_idle_or_at_any_step(k: SyncKind, b: Binding, c
             let step = WidgetSyncReconcileState::unmarshal(s.ongoing_reconciles(controller_id)[key].local_state).unwrap().reconcile_step;
             match step {
                 WidgetSyncStepView::Init => {},
+                WidgetSyncStepView::AfterGetMirror => {},
+                WidgetSyncStepView::AfterAddFinalizer => {},
+                WidgetSyncStepView::AfterRemoveFinalizer => {},
                 WidgetSyncStepView::AfterGetInner => {},
                 WidgetSyncStepView::AfterCreateInner => {},
                 WidgetSyncStepView::AfterPatchInner => {},
+                WidgetSyncStepView::AfterListMirror => {},
+                WidgetSyncStepView::AfterDeleteMirror => {},
                 WidgetSyncStepView::AfterPatchOuterStatus => {},
                 WidgetSyncStepView::AfterReportError => {},
                 WidgetSyncStepView::Done => {},

@@ -97,6 +97,7 @@ pub open spec fn widget_disturbed_core_set(k: SyncKind, b: Binding, janitor_id: 
 // and its guarantee implies both members' relies on it.
 pub proof fn widget_pair_with_disturber_core_holds(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: CoreCluster, janitor_id: int, sync_id: int, disturber_id: int)
     requires
+        sync_kind_ok(k),
         k.bindings == Set::<Binding>::empty().insert(b),
         cluster.registry.contains_pair(janitor_id, widget_janitor_controller_spec(k, b, spec_ok, janitor_id)),
         cluster.registry.contains_pair(sync_id, widget_sync_controller_spec(k, spec_ok, sync_id, Map::empty().insert(b, janitor_id))),

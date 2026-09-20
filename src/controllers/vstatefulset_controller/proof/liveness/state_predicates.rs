@@ -53,6 +53,7 @@ pub open spec fn req_msg_is_list_pod_req(
     &&& req->ListRequest_0 == ListRequest {
         kind: Kind::PodKind,
         namespace: vsts_key.namespace,
+        name: None,
     }
 }
 

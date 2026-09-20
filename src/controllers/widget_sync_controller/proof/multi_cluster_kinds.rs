@@ -140,9 +140,10 @@ proof fn lemma_other_sync_ok(setups: Map<SyncKind, KindSetup>, cluster: Cluster,
     assert(k2.outer_kind != sk.outer_kind);
     // The model.
     assert(all_inner_kinds_installed(k2, spec_ok2, cluster));
-    lemma_sync_model_ok(k2, spec_ok2, tc);
     lemma_deployed_kind_cluster_ok(setups, cluster, bindings, k2);
     lemma_widget_kinds_ok(k2, bnd);
+    assert(cluster.synced_type_is_installed(k2.outer_kind, spec_ok2, k2.selector));
+    lemma_sync_model_ok(k2, bnd, spec_ok2, tc);
     assert forall |r: Relabeling<ClusterIdView>| widget_relabeling(tc, r) implies #[trigger] other_model_commutes(tc, r, m) by {
         let rm = m.reconcile_model;
         let t = rm.transition;

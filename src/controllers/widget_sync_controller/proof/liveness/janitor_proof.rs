@@ -364,10 +364,19 @@ pub proof fn lemma_list_answered_while_parent_absent(k: SyncKind, b: Binding, s:
     ensures !janitor_reconciler::parent_listed(k, b, handle_list_request(req, s.api_server).res->Ok_0, int_to_string_view(parent_uid)),
 {
     let parent = int_to_string_view(parent_uid);
-    let selected = s.resources().values().filter(|o: DynamicObjectView| {
-        &&& o.object_ref().namespace == req.namespace
-        &&& o.object_ref().kind == req.kind
-    });
+    // With or without a name selector, every object listed is a stored one.
+    let selected = if req.name is None {
+        s.resources().values().filter(|o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+        })
+    } else {
+        s.resources().values().filter(|o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+            &&& o.object_ref().name == req.name->0
+        })
+    };
     let objs = selected.to_seq();
     assert(handle_list_request(req, s.api_server).res->Ok_0 == objs);
     if janitor_reconciler::parent_listed(k, b, objs, parent) {
@@ -752,7 +761,7 @@ pub proof fn lemma_init_leads_to_list_req_in_flight(k: SyncKind, b: Binding,
         let inner = unmarshal(inner_kind(k, b), cr)->Ok_0;
         assert(has_mirror_identity(inner));
         assert(inner.metadata.namespace->0 == key.namespace);
-        let req = APIRequest::ListRequest(ListRequest { kind: k.outer_kind, namespace: inner.metadata.namespace->0 });
+        let req = APIRequest::ListRequest(ListRequest { kind: k.outer_kind, namespace: inner.metadata.namespace->0, name: Some(inner.metadata.name->0) });
         let msg = controller_req_msg(controller_id, key, s.rpc_id_allocator.allocate().1, req);
         assert(s_prime.ongoing_reconciles(controller_id)[key].pending_req_msg == Some(msg));
         assert(s_prime.in_flight().contains(msg));

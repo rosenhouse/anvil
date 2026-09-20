@@ -71,6 +71,7 @@ pub open spec fn reconcile_core(vd: VDeploymentView, resp_o: Option<ResponseView
             let req = APIRequest::ListRequest(ListRequest {
                 kind: VReplicaSetView::kind(),
                 namespace: namespace,
+                name: None,
             });
             let state_prime = VDeploymentReconcileState {
                 reconcile_step: VDeploymentReconcileStepView::AfterListVRS,

@@ -6,6 +6,7 @@
 use crate::kubernetes_api_objects::error::APIError;
 use crate::kubernetes_api_objects::exec::prelude::*;
 use crate::kubernetes_api_objects::exec::{api_resource::*, registry::*, synced_object::*};
+use crate::kubernetes_api_objects::spec::model_kind::*;
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::kubernetes_cluster::spec::cluster::Cluster;
@@ -144,6 +145,23 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
     let name = outer.metadata().name().unwrap();
     match state.reconcile_step {
         WidgetSyncStep::Init => {
+            if outer.metadata().has_deletion_timestamp() {
+                if !has_sync_finalizer(&outer.metadata()) {
+                    // Terminating without the sync finalizer: not ours to tear down.
+                    return (at_step(WidgetSyncStep::Done), None);
+                }
+                let selected = outer.cluster_of(&kind.selector);
+                if selected.is_none() {
+                    return write_outer_status_or_done(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::Rejected)));
+                }
+                let binding = binding_of(kind, outer);
+                if !kind.knows(&binding) {
+                    return report_error(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::InnerUnreachable)));
+                }
+                // Teardown: read the mirror key.
+                let req = KubeAPIRequest::ListRequest(mirror_list(kind, outer));
+                return (at_step(WidgetSyncStep::AfterListMirror), Some(Request::KRequest(req)));
+            }
             let selected = outer.cluster_of(&kind.selector);
             if selected.is_none() {
                 // The object names no inner cluster: report the rejection and end.
@@ -155,12 +173,36 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
                 // cluster as unreachable and requeue, without addressing it.
                 return report_error(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::InnerUnreachable)));
             }
+            if !has_sync_finalizer(&outer.metadata()) {
+                // Take ownership before any mirror exists.
+                let req = KubeAPIRequest::UpdateRequest(outer_finalizer_update(kind, outer, true));
+                return (at_step(WidgetSyncStep::AfterAddFinalizer), Some(Request::KRequest(req)));
+            }
             let req = KubeAPIRequest::GetRequest(KubeGetRequest {
                 api_resource: kind.inner_api_resource(&binding),
                 name: name,
                 namespace: namespace,
             });
             return (at_step(WidgetSyncStep::AfterGetInner), Some(Request::KRequest(req)));
+        },
+        // The Update of the finalizers either landed or did not. See the model.
+        WidgetSyncStep::AfterAddFinalizer => {
+            if !is_some_k_update_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            if extract_some_k_update_resp!(resp_o).is_ok() {
+                return (at_step(WidgetSyncStep::Done), None);
+            }
+            return (at_step(WidgetSyncStep::Error), None);
+        },
+        WidgetSyncStep::AfterRemoveFinalizer => {
+            if !is_some_k_update_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            if extract_some_k_update_resp!(resp_o).is_ok() {
+                return (at_step(WidgetSyncStep::Done), None);
+            }
+            return (at_step(WidgetSyncStep::Error), None);
         },
         WidgetSyncStep::AfterGetInner => {
             if !is_some_k_get_resp!(resp_o) {
@@ -230,6 +272,83 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
             }
             return report_error(kind, outer, failure_status(kind, outer, &patch_result.unwrap_err(), false));
         },
+        WidgetSyncStep::AfterListMirror => {
+            if !is_some_k_list_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let list_result = extract_some_k_list_resp!(resp_o);
+            if list_result.is_err() {
+                // A teardown writes no status; see the model.
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let objs = list_result.unwrap();
+            let binding = binding_of(kind, outer);
+            let inner_cluster = ClusterId::Remote(binding.clone());
+            let listed = listed_at(&kind.entry, &inner_cluster, &namespace, &name, &objs);
+            proof {
+                assert(ObjectRef { kind: model_kind(kind.entry@, inner_cluster@), namespace: namespace@, name: name@ } == spec_types::inner_key(kind@, outer@));
+            }
+            if !listed {
+                // Confirmed gone: release.
+                let req = KubeAPIRequest::UpdateRequest(outer_finalizer_update(kind, outer, false));
+                return (at_step(WidgetSyncStep::AfterRemoveFinalizer), Some(Request::KRequest(req)));
+            }
+            // Something is at the mirror key: read it.
+            let req = KubeAPIRequest::GetRequest(KubeGetRequest {
+                api_resource: kind.inner_api_resource(&binding),
+                name: name,
+                namespace: namespace,
+            });
+            return (at_step(WidgetSyncStep::AfterGetMirror), Some(Request::KRequest(req)));
+        },
+        WidgetSyncStep::AfterGetMirror => {
+            if !is_some_k_get_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let binding = binding_of(kind, outer);
+            let inner_cluster = ClusterId::Remote(binding.clone());
+            let get_result = extract_some_k_get_resp!(resp_o);
+            if get_result.is_err() {
+                let err = get_result.unwrap_err();
+                if err.is_object_not_found() {
+                    // Gone since the List: the next reconcile confirms that.
+                    return (at_step(WidgetSyncStep::Done), None);
+                }
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let unmarshalled = SyncedObject::unmarshal(&kind.entry, &inner_cluster, get_result.unwrap());
+            if unmarshalled.is_err() {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let inner = unmarshalled.unwrap();
+            if !is_mirror_of(&inner, outer) {
+                // Not ours: nothing of ours is left at the key. Release.
+                let req = KubeAPIRequest::UpdateRequest(outer_finalizer_update(kind, outer, false));
+                return (at_step(WidgetSyncStep::AfterRemoveFinalizer), Some(Request::KRequest(req)));
+            }
+            if inner.metadata().has_deletion_timestamp() {
+                // Being released by the inner side: wait for it.
+                return (at_step(WidgetSyncStep::Done), None);
+            }
+            if inner.metadata().uid().is_none() {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let req = KubeAPIRequest::DeleteRequest(mirror_delete(kind, outer, &binding, &inner));
+            return (at_step(WidgetSyncStep::AfterDeleteMirror), Some(Request::KRequest(req)));
+        },
+        WidgetSyncStep::AfterDeleteMirror => {
+            if !is_some_k_delete_resp!(resp_o) {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let delete_result = extract_some_k_delete_resp!(resp_o);
+            if delete_result.is_ok() {
+                return (at_step(WidgetSyncStep::Done), None);
+            }
+            if delete_result.unwrap_err().is_object_not_found() {
+                return (at_step(WidgetSyncStep::Done), None);
+            }
+            return (at_step(WidgetSyncStep::Error), None);
+        },
         WidgetSyncStep::AfterPatchOuterStatus => {
             if is_some_k_patch_status_resp!(resp_o) && extract_some_k_patch_status_resp_as_ref!(resp_o).is_ok() {
                 return (at_step(WidgetSyncStep::Done), None);
@@ -243,6 +362,219 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
             return (state, None);
         },
     }
+}
+
+// Whether `meta` carries the sync finalizer. See spec_types::has_sync_finalizer.
+pub fn has_sync_finalizer(meta: &ObjectMeta) -> (b: bool)
+    ensures b == spec_types::has_sync_finalizer(meta@),
+{
+    let finalizers = meta.finalizers();
+    if finalizers.is_none() {
+        return false;
+    }
+    let finalizers = finalizers.unwrap();
+    let ghost all = meta@.finalizers->0;
+    proof { assert(finalizers.deep_view() =~= all); }
+    let mut i: usize = 0;
+    while i < finalizers.len()
+        invariant
+            0 <= i <= finalizers.len(),
+            meta@.finalizers is Some,
+            all == meta@.finalizers->0,
+            finalizers.deep_view() == all,
+            forall |j: int| 0 <= j < i ==> #[trigger] all[j] != sync_finalizer(),
+        decreases finalizers.len() - i,
+    {
+        let f = finalizers[i].clone();
+        proof { assert(f@ == all[i as int]); }
+        if f.eq(&"anvil.dev/widget-sync".to_string()) {
+            proof {
+                assert(all[i as int] == sync_finalizer());
+                assert(all.contains(sync_finalizer()));
+            }
+            return true;
+        }
+        i = i + 1;
+    }
+    proof {
+        assert forall |j: int| 0 <= j < all.len() implies #[trigger] all[j] != sync_finalizer() by {}
+        assert(!all.contains(sync_finalizer()));
+    }
+    false
+}
+
+// `meta` with the sync finalizer appended. See spec_types::with_sync_finalizer.
+pub fn with_sync_finalizer(meta: &ObjectMeta) -> (res: ObjectMeta)
+    ensures res@ == spec_types::with_sync_finalizer(meta@),
+{
+    let mut finalizers = match meta.finalizers() {
+        Some(f) => f,
+        None => Vec::new(),
+    };
+    proof { assert(finalizers.deep_view() =~= finalizers_or_empty(meta@)); }
+    finalizers.push("anvil.dev/widget-sync".to_string());
+    proof { assert(finalizers.deep_view() =~= finalizers_or_empty(meta@).push(sync_finalizer())); }
+    let mut res = meta.clone();
+    res.set_finalizers(finalizers);
+    res
+}
+
+// `meta` without the sync finalizer. See spec_types::without_sync_finalizer.
+pub fn without_sync_finalizer(meta: &ObjectMeta) -> (res: ObjectMeta)
+    ensures res@ == spec_types::without_sync_finalizer(meta@),
+{
+    let finalizers = match meta.finalizers() {
+        Some(f) => f,
+        None => Vec::new(),
+    };
+    let ghost all = finalizers_or_empty(meta@);
+    let ghost pred = not_sync_finalizer();
+    proof { assert(finalizers.deep_view() =~= all); }
+    let mut rest: Vec<String> = Vec::new();
+    proof {
+        reveal(Seq::filter);
+        assert(all.subrange(0, 0) =~= Seq::<StringView>::empty());
+        assert(rest.deep_view() =~= all.subrange(0, 0).filter(pred));
+    }
+    let mut i: usize = 0;
+    while i < finalizers.len()
+        invariant
+            0 <= i <= finalizers.len(),
+            all == finalizers_or_empty(meta@),
+            finalizers.deep_view() == all,
+            pred == not_sync_finalizer(),
+            rest.deep_view() == all.subrange(0, i as int).filter(pred),
+        decreases finalizers.len() - i,
+    {
+        let f = finalizers[i].clone();
+        let ghost before = all.subrange(0, i as int);
+        let ghost after = all.subrange(0, i as int + 1);
+        proof {
+            reveal(Seq::filter);
+            assert(after.len() > 0);
+            assert(after.drop_last() =~= before);
+            assert(after.last() == all[i as int]);
+            assert(f@ == all[i as int]);
+        }
+        if !f.eq(&"anvil.dev/widget-sync".to_string()) {
+            rest.push(f);
+            proof {
+                reveal(Seq::filter);
+                assert(pred(all[i as int]));
+                assert(after.filter(pred) == before.filter(pred).push(all[i as int]));
+                assert(rest.deep_view() =~= before.filter(pred).push(all[i as int]));
+            }
+        } else {
+            proof {
+                reveal(Seq::filter);
+                assert(!pred(all[i as int]));
+                assert(after.filter(pred) == before.filter(pred));
+            }
+        }
+        i = i + 1;
+    }
+    proof { assert(all.subrange(0, all.len() as int) =~= all); }
+    let mut res = meta.clone();
+    if rest.len() == 0 {
+        res.unset_finalizers();
+    } else {
+        res.set_finalizers(rest);
+    }
+    res
+}
+
+// The Update that adds or removes the sync finalizer on the snapshot `outer`.
+// See model::outer_finalizer_update.
+pub fn outer_finalizer_update(kind: &SyncKindExec, outer: &SyncedObject, add: bool) -> (req: KubeUpdateRequest)
+    requires outer@.metadata.well_formed_for_namespaced(),
+    ensures req@ == sync_reconciler::outer_finalizer_update(outer@, add),
+{
+    let metadata = if add { with_sync_finalizer(&outer.metadata()) } else { without_sync_finalizer(&outer.metadata()) };
+    let mut updated = outer.clone();
+    updated.set_metadata(metadata);
+    KubeUpdateRequest {
+        api_resource: kind.outer_api_resource(),
+        name: outer.metadata().name().unwrap(),
+        namespace: outer.metadata().namespace().unwrap(),
+        obj: updated.marshal(),
+    }
+}
+
+// The List that reads the mirror key. See model::mirror_list.
+pub fn mirror_list(kind: &SyncKindExec, outer: &SyncedObject) -> (req: KubeListRequest)
+    requires outer@.metadata.well_formed_for_namespaced(),
+    ensures req@ == sync_reconciler::mirror_list(kind@, outer@),
+{
+    let binding = binding_of(kind, outer);
+    KubeListRequest {
+        api_resource: kind.inner_api_resource(&binding),
+        namespace: outer.metadata().namespace().unwrap(),
+        name: Some(outer.metadata().name().unwrap()),
+    }
+}
+
+// The Delete of the mirror `inner`, pinned to its uid. See model::mirror_delete.
+pub fn mirror_delete(kind: &SyncKindExec, outer: &SyncedObject, binding: &ClusterRef, inner: &SyncedObject) -> (req: KubeDeleteRequest)
+    requires
+        outer@.metadata.well_formed_for_namespaced(),
+        binding@ == spec_types::binding_of(kind@, outer@),
+    ensures req@ == sync_reconciler::mirror_delete(kind@, outer@, inner@),
+{
+    let mut preconditions = Preconditions::default();
+    preconditions.set_uid_from_object_meta(inner.metadata());
+    KubeDeleteRequest {
+        api_resource: kind.inner_api_resource(binding),
+        name: outer.metadata().name().unwrap(),
+        namespace: outer.metadata().namespace().unwrap(),
+        preconditions: Some(preconditions),
+    }
+}
+
+// Whether some object of `objs` is stored at the key of the entry's kind in
+// `cluster`, `namespace` and `name`. See model::listed_at.
+pub fn listed_at(entry: &RegistryEntry, cluster: &ClusterId, namespace: &String, name: &String, objs: &Vec<DynamicObject>) -> (res: bool)
+    ensures res == sync_reconciler::listed_at(objs.deep_view(), ObjectRef { kind: model_kind(entry@, cluster@), namespace: namespace@, name: name@ }),
+{
+    let ghost key = ObjectRef { kind: model_kind(entry@, cluster@), namespace: namespace@, name: name@ };
+    let ghost all = objs.deep_view();
+    let mut i: usize = 0;
+    while i < objs.len()
+        invariant
+            0 <= i <= objs.len(),
+            key == (ObjectRef { kind: model_kind(entry@, cluster@), namespace: namespace@, name: name@ }),
+            all == objs.deep_view(),
+            forall |j: int| 0 <= j < i ==> !sync_reconciler::is_at(#[trigger] all[j], key),
+        decreases objs.len() - i,
+    {
+        let obj = &objs[i];
+        let metadata = obj.metadata();
+        let obj_namespace = metadata.namespace();
+        let obj_name = metadata.name();
+        let kind_ok = SyncedObject::has_kind(entry, cluster, obj);
+        proof { assert(kind_ok == (obj@.kind == model_kind(entry@, cluster@))); }
+        let namespace_ok = match &obj_namespace {
+            Some(ns) => ns.eq(namespace),
+            None => false,
+        };
+        let name_ok = match &obj_name {
+            Some(n) => n.eq(name),
+            None => false,
+        };
+        proof {
+            assert(all[i as int] == obj@);
+            assert(metadata@ == obj@.metadata);
+            assert(kind_ok == (obj@.kind == key.kind));
+            assert(namespace_ok == (obj@.metadata.namespace == Some(key.namespace)));
+            assert(name_ok == (obj@.metadata.name == Some(key.name)));
+        }
+        if kind_ok && namespace_ok && name_ok {
+            proof { assert(sync_reconciler::is_at(all[i as int], key)); }
+            return true;
+        }
+        proof { assert(!sync_reconciler::is_at(all[i as int], key)); }
+        i = i + 1;
+    }
+    false
 }
 
 // The mirror the sync controller creates for `outer`. See spec_types::make_inner.

@@ -173,7 +173,7 @@ pub proof fn lemma_sync_rely_implies_mirror_write_facts(k: SyncKind, b: Binding,
                 HostId::Controller(id, okey) => {
                     assert(cluster.controller_models.contains_key(id));
                     if id == controller_id {
-                        assert(sync_request_is_guaranteed(k, msg, s));
+                        assert(widget_sync_guarantee(k, controller_id)(s));
                         if msg.content.is_create_request() {
                             let req = msg.content.get_create_request();
                             assert(mirror_create_req(k, req, okey)(s));
@@ -191,6 +191,22 @@ pub proof fn lemma_sync_rely_implies_mirror_write_facts(k: SyncKind, b: Binding,
                             assert(req.obj.metadata.name == Some(okey.name));
                             assert(ObjectRef { kind: k.outer_kind, namespace: req.namespace, name: req.obj.metadata.name->0 } == okey);
                         }
+                        if msg.content.is_update_request() {
+                            // The sync reconciler's one Update takes or releases the
+                            // finalizer of the outer copy it read: everything else of
+                            // the metadata, so the identity of any mirror, is as stored.
+                            let req = msg.content.get_update_request();
+                            assert(sync_finalizer_update_req(k, req, okey)(s));
+                            let stored = s.resources()[req.key()];
+                            if s.resources().contains_key(req.key()) && stored.metadata.resource_version == req.obj.metadata.resource_version {
+                                assert(req.obj.metadata.owner_references == stored.metadata.owner_references);
+                                assert(req.obj.metadata.labels == stored.metadata.labels);
+                                assert(req.obj.metadata.annotations == stored.metadata.annotations);
+                                assert(preserves_mirror_identity(stored.metadata, req.obj.metadata));
+                            }
+                            assert(mirror_update_req(k, req)(s));
+                        }
+                        assert(!msg.content.is_get_then_update_request());
                     } else {
                         assert(cluster.controller_models.remove(controller_id).contains_key(id));
                         if id == janitor_id {
@@ -239,6 +255,11 @@ pub open spec fn sync_invariants(k: SyncKind, b: Binding, spec_ok: spec_fn(Value
     .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))))))
     .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))))
     .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))))
+    .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))))))
+    .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))))))
+    .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))))))
+    .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))))))
+    .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))))))
     .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done)))))
     .and(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error)))))
     .and(always(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id))))
@@ -256,6 +277,7 @@ pub open spec fn sync_invariants(k: SyncKind, b: Binding, spec_ok: spec_fn(Value
     .and(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id))))
     .and(always(lift_state(builtin_deletes_never_target_mirrors(k, b))))
     .and(always(lift_state(sync_pending_requests_match_snapshots(k, controller_id))))
+    .and(always(lift_state(snapshots_are_current(controller_id))))
 }
 
 pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int)
@@ -289,6 +311,11 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
     always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))));
     always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))));
     always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))));
+    always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))));
+    always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))));
+    always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))));
+    always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))));
+    always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))));
     always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))));
     always_p_is_stable(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))));
     always_p_is_stable(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)));
@@ -306,6 +333,7 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
     always_p_is_stable(lift_state(janitor_deletes_are_sound(k, b, janitor_id)));
     always_p_is_stable(lift_state(builtin_deletes_never_target_mirrors(k, b)));
     always_p_is_stable(lift_state(sync_pending_requests_match_snapshots(k, controller_id)));
+    always_p_is_stable(lift_state(snapshots_are_current(controller_id)));
     stable_and_n!(
         always(lift_state(Cluster::every_in_flight_msg_has_unique_id())),
         always(lift_state(Cluster::every_in_flight_msg_has_lower_id_than_allocator())),
@@ -333,6 +361,11 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
         always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))))),
         always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))),
         always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))),
+        always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))))),
+        always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))))),
+        always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))))),
+        always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))))),
+        always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))))),
         always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done)))),
         always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error)))),
         always(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id))),
@@ -349,7 +382,8 @@ pub proof fn sync_invariants_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn
         always(lift_state(sync_triggering_crs_are_bound(k, controller_id))),
         always(lift_state(janitor_deletes_are_sound(k, b, janitor_id))),
         always(lift_state(builtin_deletes_never_target_mirrors(k, b))),
-        always(lift_state(sync_pending_requests_match_snapshots(k, controller_id)))
+        always(lift_state(sync_pending_requests_match_snapshots(k, controller_id))),
+        always(lift_state(snapshots_are_current(controller_id)))
     );
 }
 
@@ -432,12 +466,14 @@ pub proof fn sync_framework_invariants_hold_b(k: SyncKind, b: Binding, spec_ok: 
     // The second half rests on the first: the reconcile-state lemmas below need
     // the bookkeeping invariants sync_framework_invariants_hold_a establishes,
     // and the per-key form of one of them, which its tla_forall does not give back.
+    hide(sync_reconciler::reconcile_core);
     sync_framework_invariants_hold_a(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)))) by {
         cluster.lemma_always_pending_req_of_key_is_unique_with_unique_id(spec, controller_id, key);
     }
     cluster.lemma_always_there_is_the_controller_state(spec, controller_id);
     cluster.lemma_always_there_is_the_controller_state(spec, janitor_id);
+    lemma_sync_steps_without_a_pending_request(k, cluster, controller_id);
     cluster.lemma_always_there_is_no_request_msg_to_external_from_controller(spec, controller_id);
     cluster.lemma_always_synced_states_are_unmarshallable::<WidgetSyncReconcileState, VoidEReqView, VoidERespView>(spec, k.outer_kind, || sync_reconciler::reconcile_init_state(), |obj: SyncedObjectView, resp_o, st| sync_reconciler::reconcile_core(k, obj, resp_o, st), |st| sync_reconciler::reconcile_done(st), |st| sync_reconciler::reconcile_error(st), controller_id);
     WidgetSyncReconcileState::marshal_preserves_integrity();
@@ -445,14 +481,17 @@ pub proof fn sync_framework_invariants_hold_b(k: SyncKind, b: Binding, spec_ok: 
         cluster.lemma_always_no_pending_req_msg_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init));
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::Init))));
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterGetInner);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner));
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner))));
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterCreateInner);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner));
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterCreateInner))));
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterPatchInner);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner));
     }
@@ -468,6 +507,11 @@ pub proof fn sync_framework_invariants_hold_c(k: SyncKind, b: Binding, spec_ok: 
     ensures
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))))),
         spec.entails(always(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)))),
@@ -478,20 +522,49 @@ pub proof fn sync_framework_invariants_hold_c(k: SyncKind, b: Binding, spec_ok: 
     // Each part rests on the ones before it: the reconcile-state lemmas need the
     // bookkeeping invariants of _a, and the per-key form of one of them, which its
     // tla_forall does not give back.
+    hide(sync_reconciler::reconcile_core);
     WidgetSyncReconcileState::marshal_preserves_integrity();
     sync_framework_invariants_hold_b(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     sync_framework_invariants_hold_a(k, b, spec_ok, spec, cluster, controller_id, janitor_id);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_of_key_is_unique_with_unique_id(controller_id, key)))) by {
         cluster.lemma_always_pending_req_of_key_is_unique_with_unique_id(spec, controller_id, key);
     }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterPatchOuterStatus);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus));
     }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))));
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterReportError);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))) by {
         cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError));
     }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterGetMirror);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))))) by {
+        cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror));
+    }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterAddFinalizer);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))))) by {
+        cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer));
+    }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterRemoveFinalizer);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))))) by {
+        cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer));
+    }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterListMirror);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))))) by {
+        cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror));
+    }
+    lemma_sync_step_comes_with_a_pending_request(k, cluster, controller_id, WidgetSyncStepView::AfterDeleteMirror);
+    assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))))) by {
+        cluster.lemma_always_pending_req_in_flight_or_resp_in_flight_at_reconcile_state(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror));
+    }
     spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))));
+    spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))));
+    spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))));
+    spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))));
+    spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))));
+    spec_entails_always_tla_forall_equality(spec, |key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))));
+    lemma_sync_steps_without_a_pending_request(k, cluster, controller_id);
     assert forall |key: ObjectRef| spec.entails(always(lift_state(#[trigger] Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done)))) by {
         cluster.lemma_always_no_pending_req_msg_at_reconcile_state(spec, controller_id, key, cluster.reconcile_model(controller_id).done);
     }
@@ -527,6 +600,7 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, spec_ok: spec_fn(Valu
     lemma_always_sync_crs_are_bound(spec, cluster, k, spec_ok, controller_id);
     lemma_always_builtin_deletes_never_target_mirrors(spec, cluster, k, b, spec_ok);
     lemma_always_sync_pending_requests_match_snapshots(spec, cluster, k, controller_id);
+    lemma_always_snapshots_are_current(spec, cluster, controller_id);
     entails_always_and_n!(
         spec,
         lift_state(Cluster::every_in_flight_msg_has_unique_id()),
@@ -555,6 +629,11 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, spec_ok: spec_fn(Valu
         tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))),
         tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))),
         tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))),
+        tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))),
+        tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))),
+        tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))),
+        tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))),
+        tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))),
         tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))),
         tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))),
         lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)),
@@ -571,7 +650,8 @@ pub proof fn sync_invariants_hold(k: SyncKind, b: Binding, spec_ok: spec_fn(Valu
         lift_state(sync_triggering_crs_are_bound(k, controller_id)),
         lift_state(janitor_deletes_are_sound(k, b, janitor_id)),
         lift_state(builtin_deletes_never_target_mirrors(k, b)),
-        lift_state(sync_pending_requests_match_snapshots(k, controller_id))
+        lift_state(sync_pending_requests_match_snapshots(k, controller_id)),
+        lift_state(snapshots_are_current(controller_id))
     );
 }
 
@@ -667,6 +747,11 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, spec_ok: spec
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchInner)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))))),
+        spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))))),
         spec.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))))),
         spec.entails(always(lift_state(Cluster::no_pending_request_to_api_server_from_api_server_or_external()))),
@@ -681,6 +766,7 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, spec_ok: spec
         spec.entails(always(lift_state(janitor_deletes_are_sound(k, b, janitor_id)))),
         spec.entails(always(lift_state(builtin_deletes_never_target_mirrors(k, b)))),
         spec.entails(always(lift_state(sync_pending_requests_match_snapshots(k, controller_id)))),
+        spec.entails(always(lift_state(snapshots_are_current(controller_id)))),
 {
     let stable_spec = sync_stable_spec(k, b, spec_ok, cluster, controller_id, janitor_id);
     let wf = sync_next_with_wf(cluster, controller_id);
@@ -752,7 +838,17 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, spec_ok: spec
     assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus)))))));
     entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterPatchOuterStatus))))));
     assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError)))))));
+    assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror)))))));
+    assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer)))))));
+    assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer)))))));
+    assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror)))))));
+    assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror)))))));
     entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterReportError))))));
+    entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetMirror))))));
+    entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer))))));
+    entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer))))));
+    entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterListMirror))))));
+    entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::pending_req_in_flight_or_resp_in_flight_at_reconcile_state(controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterDeleteMirror))))));
     assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done))))));
     entails_trans(spec, inv, always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).done)))));
     assert(inv.entails(always(tla_forall(|key: ObjectRef| lift_state(Cluster::no_pending_req_msg_at_reconcile_state(controller_id, key, cluster.reconcile_model(controller_id).error))))));
@@ -781,6 +877,8 @@ pub proof fn lemma_sync_stable_spec_facts(k: SyncKind, b: Binding, spec_ok: spec
     entails_trans(spec, inv, always(lift_state(builtin_deletes_never_target_mirrors(k, b))));
     assert(inv.entails(always(lift_state(sync_pending_requests_match_snapshots(k, controller_id)))));
     entails_trans(spec, inv, always(lift_state(sync_pending_requests_match_snapshots(k, controller_id))));
+    assert(inv.entails(always(lift_state(snapshots_are_current(controller_id)))));
+    entails_trans(spec, inv, always(lift_state(snapshots_are_current(controller_id))));
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1400,11 @@ pub open spec fn mirror_settled(k: SyncKind, b: Binding, outer: SyncedObjectView
     |s: ClusterState| mirror_absent(k, outer)(s) || mirror_is_ours(k, b, outer)(s)
 }
 
+// The stored outer copy carries the sync finalizer.
+pub open spec fn outer_owned(outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| has_sync_finalizer(s.resources()[outer.object_ref()].metadata)
+}
+
 // The uid of the outer copy, as fixed by desired_state_is.
 pub open spec fn outer_uid(outer: SyncedObjectView) -> Uid {
     outer.metadata.uid->0
@@ -1369,7 +1472,62 @@ pub proof fn lemma_true_leads_to_always_phase_i(k: SyncKind, b: Binding, spec: T
 }
 
 // ---------------------------------------------------------------------------
-// The layers of the spec: premise, phase I, phase II, settled mirror.
+// Properties of the snapshots the sync reconciler works from.
+// ---------------------------------------------------------------------------
+
+// The scheduled snapshot of `key`, if any, satisfies `pred` in the state.
+pub open spec fn scheduled_satisfies(controller_id: int, key: ObjectRef, pred: spec_fn(DynamicObjectView, ClusterState) -> bool) -> StatePred<ClusterState> {
+    |s: ClusterState| s.scheduled_reconciles(controller_id).contains_key(key) ==> pred(s.scheduled_reconciles(controller_id)[key], s)
+}
+
+// The snapshot of the ongoing reconcile of `key`, if any, satisfies `pred`.
+pub open spec fn ongoing_satisfies(controller_id: int, key: ObjectRef, pred: spec_fn(DynamicObjectView, ClusterState) -> bool) -> StatePred<ClusterState> {
+    |s: ClusterState| s.ongoing_reconciles(controller_id).contains_key(key) ==> pred(s.ongoing_reconciles(controller_id)[key].triggering_cr, s)
+}
+
+pub open spec fn snapshots_satisfy(controller_id: int, key: ObjectRef, pred: spec_fn(DynamicObjectView, ClusterState) -> bool) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& scheduled_satisfies(controller_id, key, pred)(s)
+        &&& ongoing_satisfies(controller_id, key, pred)(s)
+    }
+}
+
+// The stored object at `key`, if any, satisfies `pred`.
+pub open spec fn stored_satisfies(key: ObjectRef, pred: spec_fn(DynamicObjectView, ClusterState) -> bool) -> StatePred<ClusterState> {
+    |s: ClusterState| s.resources().contains_key(key) ==> pred(s.resources()[key], s)
+}
+
+// A step never takes `pred` away from an object that has it.
+pub open spec fn preserves(pred: spec_fn(DynamicObjectView, ClusterState) -> bool) -> ActionPred<ClusterState> {
+    |s: ClusterState, s_prime: ClusterState| forall |o: DynamicObjectView| #[trigger] pred(o, s) ==> pred(o, s_prime)
+}
+
+// A snapshot is live, and one that carries the sync finalizer was taken while the
+// stored copy carried it, which it then keeps.
+pub open spec fn snapshot_live_and_owned_if_marked(outer: SyncedObjectView) -> spec_fn(DynamicObjectView, ClusterState) -> bool {
+    |o: DynamicObjectView, s: ClusterState| {
+        &&& o.metadata.deletion_timestamp is None
+        &&& has_sync_finalizer(o.metadata) ==> outer_owned(outer)(s)
+    }
+}
+
+pub open spec fn snapshot_owned() -> spec_fn(DynamicObjectView, ClusterState) -> bool {
+    |o: DynamicObjectView, s: ClusterState| has_sync_finalizer(o.metadata)
+}
+
+// The finalizer layer, per outer copy: the stored copy carries the sync finalizer,
+// and every snapshot the sync reconciler works from is live and carries it. A
+// reconcile that starts from such a snapshot begins with the Get of the mirror.
+pub open spec fn sync_finalizer_held(controller_id: int, outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        &&& snapshots_satisfy(controller_id, outer.object_ref(), snapshot_live_and_owned_if_marked(outer))(s)
+        &&& outer_owned(outer)(s)
+        &&& snapshots_satisfy(controller_id, outer.object_ref(), snapshot_owned())(s)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The layers of the spec: premise, phase I, phase II, finalizer, settled mirror.
 // ---------------------------------------------------------------------------
 
 pub open spec fn sync_spec_with_desired(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView) -> TempPred<ClusterState> {
@@ -1435,8 +1593,25 @@ pub proof fn sync_spec_with_phase_ii_is_stable(k: SyncKind, b: Binding, spec_ok:
     stable_and_n!(sync_spec_with_phase_i(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(sync_phase_ii(controller_id, outer))));
 }
 
+pub open spec fn sync_spec_with_finalizer(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView) -> TempPred<ClusterState> {
+    sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer).and(always(lift_state(sync_finalizer_held(controller_id, outer))))
+}
+
+pub proof fn sync_spec_with_finalizer_is_stable(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView)
+    requires
+        k.bindings.contains(b),
+        outer.kind == k.outer_kind,
+        cluster_of(k.selector, outer) is Some,
+        b == binding_of(k, outer),
+    ensures valid(stable(sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer))),
+{
+    sync_spec_with_phase_ii_is_stable(k, b, spec_ok, cluster, controller_id, janitor_id, outer);
+    always_p_is_stable(lift_state(sync_finalizer_held(controller_id, outer)));
+    stable_and_n!(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(sync_finalizer_held(controller_id, outer))));
+}
+
 pub open spec fn sync_spec_with_settled(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView) -> TempPred<ClusterState> {
-    sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer).and(always(lift_state(mirror_settled(k, b, outer))))
+    sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer).and(always(lift_state(mirror_settled(k, b, outer))))
 }
 
 // Unfolding the layers.
@@ -1453,6 +1628,7 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(k: SyncKind, b: Binding, spec_
         spec.entails(always(lift_state(Cluster::synced_desired_state_is(outer)))),
         spec.entails(always(lift_state(mirror_spec_undisturbed(k, outer)))),
         spec.entails(always(lift_state(mirror_undeleted(k, outer)))),
+        spec.entails(always(lift_state(outer_finalizer_undisturbed(outer)))),
         spec.entails(always(lift_state(phase_i(controller_id)))),
         spec.entails(always(lift_state(sync_phase_ii(controller_id, outer)))),
         spec.entails(always(lift_state(Cluster::crash_disabled(controller_id)))),
@@ -1469,6 +1645,7 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(k: SyncKind, b: Binding, spec_
     always_weaken(spec, lift_state(outer_spec_stable(k, b, outer)), lift_state(Cluster::synced_desired_state_is(outer)));
     always_weaken(spec, lift_state(outer_spec_stable(k, b, outer)), lift_state(mirror_spec_undisturbed(k, outer)));
     always_weaken(spec, lift_state(outer_spec_stable(k, b, outer)), lift_state(mirror_undeleted(k, outer)));
+    always_weaken(spec, lift_state(outer_spec_stable(k, b, outer)), lift_state(outer_finalizer_undisturbed(outer)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::crash_disabled(controller_id)));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::req_drop_disabled()));
     always_weaken(spec, lift_state(phase_i(controller_id)), lift_state(Cluster::pod_monkey_disabled()));
@@ -1479,8 +1656,28 @@ pub proof fn lemma_unfold_sync_spec_with_phase_ii(k: SyncKind, b: Binding, spec_
 }
 
 // ---------------------------------------------------------------------------
-// Unfolding the last layer.
+// Unfolding the last two layers.
 // ---------------------------------------------------------------------------
+
+pub proof fn lemma_unfold_sync_spec_with_finalizer(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView)
+    requires
+        k.bindings.contains(b),
+        outer.kind == k.outer_kind,
+        cluster_of(k.selector, outer) is Some,
+        b == binding_of(k, outer),
+        spec.entails(sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+    ensures
+        spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(always(lift_state(sync_finalizer_held(controller_id, outer)))),
+        spec.entails(always(lift_state(outer_owned(outer)))),
+        spec.entails(always(lift_state(snapshots_satisfy(controller_id, outer.object_ref(), snapshot_live_and_owned_if_marked(outer))))),
+        spec.entails(always(lift_state(snapshots_satisfy(controller_id, outer.object_ref(), snapshot_owned())))),
+{
+    entails_and_split(spec, sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(sync_finalizer_held(controller_id, outer))));
+    always_weaken(spec, lift_state(sync_finalizer_held(controller_id, outer)), lift_state(outer_owned(outer)));
+    always_weaken(spec, lift_state(sync_finalizer_held(controller_id, outer)), lift_state(snapshots_satisfy(controller_id, outer.object_ref(), snapshot_live_and_owned_if_marked(outer))));
+    always_weaken(spec, lift_state(sync_finalizer_held(controller_id, outer)), lift_state(snapshots_satisfy(controller_id, outer.object_ref(), snapshot_owned())));
+}
 
 pub proof fn lemma_unfold_sync_spec_with_settled(k: SyncKind, b: Binding, spec_ok: spec_fn(Value) -> bool, spec: TempPred<ClusterState>, cluster: Cluster, controller_id: int, janitor_id: int, outer: SyncedObjectView)
     requires
@@ -1490,10 +1687,13 @@ pub proof fn lemma_unfold_sync_spec_with_settled(k: SyncKind, b: Binding, spec_o
         b == binding_of(k, outer),
         spec.entails(sync_spec_with_settled(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
     ensures
+        spec.entails(sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
         spec.entails(sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer)),
+        spec.entails(always(lift_state(sync_finalizer_held(controller_id, outer)))),
         spec.entails(always(lift_state(mirror_settled(k, b, outer)))),
 {
-    entails_and_split(spec, sync_spec_with_phase_ii(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(mirror_settled(k, b, outer))));
+    entails_and_split(spec, sync_spec_with_finalizer(k, b, spec_ok, cluster, controller_id, janitor_id, outer), always(lift_state(mirror_settled(k, b, outer))));
+    lemma_unfold_sync_spec_with_finalizer(k, b, spec_ok, spec, cluster, controller_id, janitor_id, outer);
 }
 
 // ---------------------------------------------------------------------------
@@ -1640,6 +1840,8 @@ pub open spec fn sync_step_ctx(k: SyncKind, b: Binding, cluster: Cluster, contro
         &&& Cluster::synced_desired_state_is(outer)(s)
         &&& mirror_spec_undisturbed(k, outer)(s)
         &&& mirror_undeleted(k, outer)(s)
+        &&& outer_finalizer_undisturbed(outer)(s)
+        &&& Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)(s)
         &&& Cluster::the_synced_object_in_reconcile_is(controller_id, outer)(s)
         &&& Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, outer.object_ref())(s)
         &&& sync_pending_requests_match_snapshots(k, controller_id)(s)
@@ -1694,6 +1896,8 @@ pub proof fn lemma_always_sync_step_next(k: SyncKind, b: Binding, spec_ok: spec_
         lift_state(Cluster::synced_desired_state_is(outer)),
         lift_state(mirror_spec_undisturbed(k, outer)),
         lift_state(mirror_undeleted(k, outer)),
+        lift_state(outer_finalizer_undisturbed(outer)),
+        lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)),
         lift_state(Cluster::the_synced_object_in_reconcile_is(controller_id, outer)),
         lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, key)),
         lift_state(sync_pending_requests_match_snapshots(k, controller_id)),
@@ -1720,6 +1924,8 @@ pub proof fn lemma_always_sync_step_next(k: SyncKind, b: Binding, spec_ok: spec_
             .and(lift_state(Cluster::synced_desired_state_is(outer)))
             .and(lift_state(mirror_spec_undisturbed(k, outer)))
             .and(lift_state(mirror_undeleted(k, outer)))
+            .and(lift_state(outer_finalizer_undisturbed(outer)))
+            .and(lift_state(Cluster::every_in_flight_msg_from_controller_has_key_kind(k.outer_kind, controller_id)))
             .and(lift_state(Cluster::the_synced_object_in_reconcile_is(controller_id, outer)))
             .and(lift_state(Cluster::every_msg_from_key_is_pending_req_msg_of(controller_id, key)))
             .and(lift_state(sync_pending_requests_match_snapshots(k, controller_id)))

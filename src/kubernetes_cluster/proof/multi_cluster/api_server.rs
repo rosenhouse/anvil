@@ -76,16 +76,29 @@ pub proof fn lemma_list_relabel<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: Mul
             == ListResponse { res: Ok(relabel_list(tc, r, handle_list_request(req, s.store(side)).res->Ok_0)) }
     }),
 {
-    lemma_abs_store_list(tc, r, s, req.namespace, req.kind);
-    let sel = |o: DynamicObjectView| {
-        &&& o.object_ref().namespace == req.namespace
-        &&& o.object_ref().kind == req.kind
-    };
     let f = |o: DynamicObjectView| relabel_obj(tc, r, o);
-    let selected = s.store(side).resources.values().filter(sel);
-    selected.lemma_to_seq_to_set_id();
-    assert(abs_store(tc, r, s).values().filter(sel) == selected.map(f));
-    assert(selected.to_seq().to_set() == selected);
+    if req.name is None {
+        lemma_abs_store_list(tc, r, s, req.namespace, req.kind);
+        let sel = |o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+        };
+        let selected = s.store(side).resources.values().filter(sel);
+        selected.lemma_to_seq_to_set_id();
+        assert(abs_store(tc, r, s).values().filter(sel) == selected.map(f));
+        assert(selected.to_seq().to_set() == selected);
+    } else {
+        lemma_abs_store_list_named(tc, r, s, req.namespace, req.kind, req.name->0);
+        let sel = |o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+            &&& o.object_ref().name == req.name->0
+        };
+        let selected = s.store(side).resources.values().filter(sel);
+        selected.lemma_to_seq_to_set_id();
+        assert(abs_store(tc, r, s).values().filter(sel) == selected.map(f));
+        assert(selected.to_seq().to_set() == selected);
+    }
 }
 
 // ---------------------------------------------------------------------------

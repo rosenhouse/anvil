@@ -275,8 +275,11 @@ pub open spec fn widget_sync_touches_widget_kinds_only(k: SyncKind, id: int) -> 
             &&& msg.src.is_controller_id(id)
         } ==> match msg.content->APIRequest_0 {
             APIRequest::GetRequest(req) => is_inner_kind(k, req.key.kind),
+            APIRequest::ListRequest(req) => is_inner_kind(k, req.kind),
             APIRequest::CreateRequest(req) => is_inner_kind(k, req.obj.kind),
             APIRequest::PatchRequest(req) => is_inner_kind(k, req.kind),
+            APIRequest::DeleteRequest(req) => is_inner_kind(k, req.key.kind),
+            APIRequest::UpdateRequest(req) => req.obj.kind == k.outer_kind,
             APIRequest::PatchStatusRequest(req) => req.kind == k.outer_kind,
             _ => false,
         }
@@ -292,8 +295,11 @@ proof fn widget_sync_guarantee_implies_widget_kinds_only(k: SyncKind, id: int)
             && msg.src.is_controller_id(id)
             implies (match msg.content->APIRequest_0 {
                 APIRequest::GetRequest(req) => is_inner_kind(k, req.key.kind),
+                APIRequest::ListRequest(req) => is_inner_kind(k, req.kind),
                 APIRequest::CreateRequest(req) => is_inner_kind(k, req.obj.kind),
                 APIRequest::PatchRequest(req) => is_inner_kind(k, req.kind),
+                APIRequest::DeleteRequest(req) => is_inner_kind(k, req.key.kind),
+                APIRequest::UpdateRequest(req) => req.obj.kind == k.outer_kind,
                 APIRequest::PatchStatusRequest(req) => req.kind == k.outer_kind,
                 _ => false,
             }) by {
@@ -314,6 +320,9 @@ proof fn widget_sync_guarantee_implies_widget_kinds_only(k: SyncKind, id: int)
                     assert(is_inner_kind(k, req.obj.kind)) by {
                         assert(req.obj.kind == inner_kind(k, binding_of(k, outer)));
                     }
+                }
+                APIRequest::UpdateRequest(req) => {
+                    assert(sync_finalizer_update_req(k, req, outer_key)(s));
                 }
                 _ => {}
             }

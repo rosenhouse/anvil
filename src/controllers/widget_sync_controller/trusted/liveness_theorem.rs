@@ -1,6 +1,6 @@
-// The properties the Widget sync example is verified against (R1, R2, R3, R3s)
-// and its one liveness assumption about the inner side (D3), with the kind `k`
-// and the binding `b` as parameters. Motivation: doc/widget_sync_design.md,
+// The properties the Widget sync example is verified against (R1, R2, R3, R3s,
+// R4) and its one liveness assumption about the inner side (D3), with the kind
+// `k` and the binding `b` as parameters. Motivation: doc/widget_sync_design.md,
 // section 3, and doc/widget_sync_fanout_design.md, section 5.1.
 //
 // Every cluster is one logical store in this model: the outer copy has kind
@@ -31,19 +31,41 @@ pub open spec fn widget_spec_eventually_synced_per_cr(k: SyncKind, b: Binding, o
 
 // The premise of R1: the outer copy is one of `k`, it names an inner cluster, it
 // exists with this uid and spec and is not terminating, every in-flight write of
-// the mirror's spec writes `outer.spec`, and no in-flight Delete would remove a
-// mirror of the outer copy. Convergence is promised for the time after the outer
-// copy stops changing and out-of-band edits and deletes of the mirror stop. R1
-// says nothing about status, so it does not need the outer copy's generation to be
-// fixed.
+// the outer copy's metadata that would land keeps the sync finalizer, every
+// in-flight write of the mirror's spec writes `outer.spec`, and no in-flight
+// Delete would remove a mirror of the outer copy. Convergence is promised for the
+// time after the outer copy stops changing and out-of-band edits and deletes of
+// the mirror stop. R1 says nothing about status, so it does not need the outer
+// copy's generation to be fixed.
 pub open spec fn outer_spec_stable(k: SyncKind, b: Binding, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         &&& outer.kind == k.outer_kind
         &&& cluster_of(k.selector, outer) is Some
         &&& binding_of(k, outer) == b
         &&& Cluster::synced_desired_state_is(outer)(s)
+        &&& outer_finalizer_undisturbed(outer)(s)
         &&& mirror_spec_undisturbed(k, outer)(s)
         &&& mirror_undeleted(k, outer)(s)
+    }
+}
+
+// Every in-flight write of the outer copy's metadata that would land keeps the
+// sync finalizer: an Update whose resource version is the stored one carries it,
+// and so does a transactional update. The sync controller adds its finalizer
+// before it creates the mirror, and this is what keeps the finalizer there; the
+// controller's own writes satisfy it (its release runs only on a terminating
+// copy). A stale Update, which the API server rejects, is unconstrained, and a
+// patch never touches finalizers.
+pub open spec fn outer_finalizer_undisturbed(outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let key = outer.object_ref();
+        forall |msg: Message| #[trigger] s.in_flight().contains(msg) && msg.content is APIRequest ==> match msg.content->APIRequest_0 {
+            APIRequest::UpdateRequest(req) => (req.key() == key && s.resources().contains_key(key)
+                && req.obj.metadata.resource_version == s.resources()[key].metadata.resource_version)
+                ==> has_sync_finalizer(req.obj.metadata),
+            APIRequest::GetThenUpdateRequest(req) => req.key() == key ==> has_sync_finalizer(req.obj.metadata),
+            _ => true,
+        }
     }
 }
 
@@ -289,6 +311,83 @@ pub open spec fn bound_parent_absent(k: SyncKind, b: Binding, key: ObjectRef, pa
     |s: ClusterState| {
         &&& key.kind == inner_kind(k, b)
         &&& parent_absent(k, key, parent_uid)(s)
+    }
+}
+
+// R4, release: once the outer copy is terminating and the writes that would keep
+// it from being released have stopped, no object with its uid holds the sync
+// finalizer any more, for good: the sync controller has deleted the mirror,
+// confirmed it gone and removed its finalizer, after which the API server removes
+// the copy if that was its last finalizer. R4 needs D3 (a mirror with finalizers
+// of its own is released by the inner side) and R3 (a stale mirror at the key is
+// collected) the way R1 does.
+pub open spec fn widget_finalizer_eventually_released(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
+    tla_forall(|outer: SyncedObjectView| widget_finalizer_eventually_released_per_cr(k, b, outer))
+}
+
+pub open spec fn widget_finalizer_eventually_released_per_cr(k: SyncKind, b: Binding, outer: SyncedObjectView) -> TempPred<ClusterState> {
+    always(lift_state(outer_terminating_stable(k, b, outer))).leads_to(always(lift_state(finalizer_released(outer))))
+}
+
+// The premise of R4: `outer` is an outer copy of `k` that names the binding `b`;
+// while an object with its uid is stored at its key, that object is terminating
+// and carries `outer.spec`; and every in-flight write of the copy that would
+// land releases the sync finalizer rather than keep it (outer_release_undisturbed).
+// Nothing is said about the copy's finalizers themselves: the conclusion is about
+// them, and the copy may stay stored under finalizers of others.
+pub open spec fn outer_terminating_stable(k: SyncKind, b: Binding, outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let key = outer.object_ref();
+        let stored = s.resources()[key];
+        &&& outer.kind == k.outer_kind
+        &&& outer.metadata.name is Some
+        &&& outer.metadata.namespace is Some
+        &&& outer.metadata.uid is Some
+        &&& cluster_of(k.selector, outer) is Some
+        &&& binding_of(k, outer) == b
+        &&& (s.resources().contains_key(key) && stored.metadata.uid == outer.metadata.uid) ==> {
+            &&& stored.metadata.deletion_timestamp is Some
+            &&& unmarshal(k.outer_kind, stored) is Ok
+            &&& unmarshal(k.outer_kind, stored)->Ok_0.spec == outer.spec
+        }
+        &&& outer_release_undisturbed(k, outer)(s)
+    }
+}
+
+// The writes that would keep the outer copy from being released have stopped: no
+// in-flight Update of its key that would land carries the sync finalizer (the sync
+// controller's own release does not; a third party releasing a finalizer of its
+// own while keeping the sync finalizer in place is such a write, and R4 promises
+// the release for the time after it lands), no transactional update of the key
+// carries it, every in-flight Patch of the key writes `outer.spec`, and nothing
+// is creating the mirror any more: no in-flight Create names the mirror key. The
+// sync controller creates no mirror of a terminating copy; a mirror another
+// party keeps recreating would keep the teardown from confirming it gone.
+pub open spec fn outer_release_undisturbed(k: SyncKind, outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let key = outer.object_ref();
+        let ikey = inner_key(k, outer);
+        forall |msg: Message| #[trigger] s.in_flight().contains(msg) && msg.content is APIRequest ==> match msg.content->APIRequest_0 {
+            APIRequest::UpdateRequest(req) => (req.key() == key && s.resources().contains_key(key)
+                && req.obj.metadata.resource_version == s.resources()[key].metadata.resource_version)
+                ==> !has_sync_finalizer(req.obj.metadata),
+            APIRequest::GetThenUpdateRequest(req) => req.key() == key ==> !has_sync_finalizer(req.obj.metadata),
+            APIRequest::PatchRequest(req) => req.key() == key ==> writes_outer_spec(req.spec, outer),
+            APIRequest::CreateRequest(req) => !(req.obj.kind == ikey.kind && req.namespace == ikey.namespace && req.obj.metadata.name == Some(ikey.name)),
+            _ => true,
+        }
+    }
+}
+
+// No object with the outer copy's uid holding the sync finalizer is stored at its
+// key: the finalizer was removed, or the copy is gone. Uids are never reused, so
+// this is stable once the copy is terminating.
+pub open spec fn finalizer_released(outer: SyncedObjectView) -> StatePred<ClusterState> {
+    |s: ClusterState| {
+        let key = outer.object_ref();
+        !(s.resources().contains_key(key)
+            && s.resources()[key].metadata.uid == outer.metadata.uid
+            && has_sync_finalizer(s.resources()[key].metadata))
     }
 }
 

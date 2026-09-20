@@ -337,7 +337,7 @@ where
     info!("starting controller");
     Controller::new(crs, watcher::Config::default()) // The controller's reconcile is triggered when a CR is created/updated
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new() })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -389,7 +389,7 @@ where
         .owns(Api::<Pod>::all(client.clone()), watcher::Config::default()) // Watch owned Pods
         .owns(Api::<O>::all(client.clone()), watcher::Config::default()) // Watch owned CRs of type O
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new() })) // The reconcile function is registered
+        .run(reconcile, error_policy, Arc::new(Data { clusters: ClusterClients::single(client), cr_cluster: ClusterId::Primary, field_manager: None, delete_pause_file: None, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE })) // The reconcile function is registered
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -445,7 +445,7 @@ where
     info!("starting controller (custom resource in {:?} cluster)", cr_cluster);
     Controller::new(crs, watcher::Config::default())
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -513,7 +513,7 @@ where
                 .map(|ns| ObjectRef::<K>::new(&o.name_any()).within(&ns))
         })
         .shutdown_on_signal()
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -536,6 +536,56 @@ where
 // a constant.
 pub type ReconcilerFactory<R> = Arc<dyn Fn(ClusterClients) -> BoxFuture<'static, R> + Send + Sync>;
 
+// The kube-runtime controller of a dynamic runner. With `generation_only`, the
+// kind's own watch is filtered on the generation of each object, so an event
+// that changes only the status (an inner implementation reporting on a mirror)
+// does not trigger a reconcile; the reflector store the controller reads its
+// objects from still sees every event. Feeding a controller a filtered stream is
+// kube-runtime's `unstable-runtime-stream-control` API, which the `dyn-runtime`
+// feature turns on; built without it, the runner takes every event, which costs
+// reconciles and nothing else.
+fn dyn_controller(crs: Api<KubeDynamicObject>, api_resource: kube::api::ApiResource, generation_only: bool) -> Controller<KubeDynamicObject> {
+    #[cfg(feature = "dyn-runtime")]
+    if generation_only {
+        use kube::runtime::{reflector::store::Writer, WatchStreamExt};
+        use std::sync::Mutex;
+        let writer = Writer::new(api_resource.clone());
+        let reader = writer.as_reader();
+        // The generation each object was last seen with, by reference. The same
+        // rule as controller-runtime's GenerationChangedPredicate, kept here
+        // because kube-runtime's predicate_filter wants a DynamicType with a
+        // default, which a discovered ApiResource has not.
+        let seen: Arc<Mutex<HashMap<ObjectRef<KubeDynamicObject>, Option<i64>>>> = Arc::new(Mutex::new(HashMap::new()));
+        let dyntype = api_resource.clone();
+        let stream = watcher::watcher(crs, watcher::Config::default())
+            .reflect(writer)
+            .touched_objects()
+            .filter(move |item| {
+                let pass = match item {
+                    Ok(obj) => {
+                        let key = ObjectRef::from_obj_with(obj, dyntype.clone());
+                        let generation = obj.meta().generation;
+                        let mut seen = seen.lock().unwrap();
+                        if seen.get(&key) == Some(&generation) {
+                            false
+                        } else {
+                            seen.insert(key, generation);
+                            true
+                        }
+                    }
+                    Err(_) => true,
+                };
+                futures::future::ready(pass)
+            });
+        return Controller::for_stream_with(stream, reader, api_resource);
+    }
+    #[cfg(not(feature = "dyn-runtime"))]
+    if generation_only {
+        warn!("built without the dyn-runtime feature: the watch of {} triggers on every event", api_resource.kind);
+    }
+    Controller::new_with(crs, watcher::Config::default(), api_resource)
+}
+
 // run_dyn_controller runs a DynReconciler for one kind of the registry in the
 // cluster `cr_api` names: the kube-runtime controller is built on
 // Api<DynamicObject> with the entry's discovered ApiResource, and every
@@ -551,6 +601,7 @@ pub async fn run_dyn_controller<R, E>(
     make_reconciler: ReconcilerFactory<R>,
     entry: RegistryEntry,
     cr_cluster: ClusterId,
+    options: DynRunnerOptions,
     field_manager: Option<String>,
     delete_pause_file: Option<String>,
     fault_injection: bool,
@@ -572,10 +623,14 @@ where
         async move { reconcile_dyn_with::<R, E>(cr, ctx, make_reconciler, entry, fault_injection).await }
     };
 
-    info!("starting controller for {} (custom resource in {:?} cluster)", api_resource.kind, cr_cluster);
-    Controller::new_with(crs, watcher::Config::default(), api_resource.clone())
+    info!(
+        "starting controller for {} (custom resource in {:?} cluster, requeue {:?}, generation triggers only: {})",
+        api_resource.kind, cr_cluster, options.requeue, options.generation_triggers_only
+    );
+    let controller = dyn_controller(crs, api_resource.clone(), options.generation_triggers_only);
+    controller
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new(), requeue: options.requeue }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -649,7 +704,7 @@ where
     drop(triggers);
     controller
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -710,7 +765,7 @@ where
                 .map(|ns| ObjectRef::<KubeDynamicObject>::new_with(&o.name_any(), mapped_resource.clone()).within(&ns))
         })
         .graceful_shutdown_on(shutdown)
-        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new() }))
+        .run(reconcile, error_policy, Arc::new(Data { clusters, cr_cluster, field_manager, delete_pause_file, retry_backoff: RetryBackoff::new(), requeue: DEFAULT_REQUEUE }))
         .for_each(|res| async move {
             match res {
                 Ok(o) => info!("reconciled {:?}", o),
@@ -792,7 +847,7 @@ enum Fetched<K> {
 // not the per-object backoff of error_policy: this read never reached the
 // reconciler, so kube-runtime sees the reconcile succeed and error_policy is
 // not consulted.
-fn fetch_outcome<K>(result: kube::Result<K>, log_header: &str, cr_name: &str) -> Fetched<K> {
+fn fetch_outcome<K>(result: kube::Result<K>, log_header: &str, cr_name: &str, requeue: Duration) -> Fetched<K> {
     match result {
         Err(kube_client::error::Error::Api(ErrorResponse { reason, .. })) if &reason == "NotFound" => {
             warn!("{} Custom resource {} not found, end reconcile", log_header, cr_name);
@@ -800,7 +855,7 @@ fn fetch_outcome<K>(result: kube::Result<K>, log_header: &str, cr_name: &str) ->
         }
         Err(err) => {
             warn!("{} Get custom resource {} failed with error: {}, will retry reconcile", log_header, cr_name, err);
-            Fetched::Failed(Action::requeue(Duration::from_secs(60)))
+            Fetched::Failed(Action::requeue(requeue))
         }
         Ok(cr) => Fetched::Object(cr),
     }
@@ -855,7 +910,7 @@ where
 
     let cr_api = Api::<K>::namespaced(cr_client, &cr_namespace);
     // Get the custom resource by a quorum read to Kubernetes' storage (etcd) to get the most updated custom resource
-    let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name) {
+    let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name, ctx.requeue) {
         Fetched::Object(cr) => cr,
         Fetched::Gone => {
             ctx.retry_backoff.forget(&retry_key);
@@ -918,7 +973,7 @@ where
     let retry_key = (cr_namespace.clone(), cr_name.clone());
 
     let cr_api = Api::<KubeDynamicObject>::namespaced_with(cr_client, &cr_namespace, entry.kube_api_resource());
-    let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name) {
+    let cr = match fetch_outcome(cr_api.get(&cr_name).await, &log_header, &cr_name, ctx.requeue) {
         Fetched::Object(cr) => cr,
         Fetched::Gone => {
             ctx.retry_backoff.forget(&retry_key);
@@ -962,6 +1017,15 @@ where
 // api_of builds the API handle a request goes through: the namespaced handle of
 // the request's resource on the client bound for the resource's cluster. An
 // unbound cluster is the error of client_of.
+// The list parameters of a List request: a metadata.name field selector when the
+// request names one object, otherwise the whole namespace.
+fn list_params(list_req: &KubeListRequest) -> ListParams {
+    match &list_req.name {
+        Some(name) => ListParams::default().fields(&format!("metadata.name={}", name)),
+        None => ListParams::default(),
+    }
+}
+
 async fn api_of(ctx: &Data, api_resource: &ApiResource, namespace: &str) -> std::result::Result<Api<KubeDynamicObject>, ClusterUnavailable> {
     let client = ctx.clusters.client_for(api_resource).await?;
     Ok(Api::<KubeDynamicObject>::namespaced_with(client, namespace, api_resource.as_kube_ref()))
@@ -1051,7 +1115,7 @@ where
                             let key = list_req.key();
                             let res = match api_of(ctx, &list_req.api_resource, &list_req.namespace).await {
                                 Err(e) => Err(unavailable_answer(log_header, "List", &cluster, &key, e)),
-                                Ok(api) => match api.list(&ListParams::default()).await {
+                                Ok(api) => match api.list(&list_params(&list_req)).await {
                                     Err(err) => {
                                         log_request_failure(log_header, "List", &cluster, &key, &err);
                                         Err(kube_error_to_api_error(&err))
@@ -1299,7 +1363,7 @@ where
         state = state_prime;
     }
 
-    return Ok(Action::requeue(Duration::from_secs(60)));
+    return Ok(Action::requeue(ctx.requeue));
 }
 
 // transactional_get_then_delete_by_retry retries get and then delete upon conflict errors to simulate atomic operations.
@@ -1696,6 +1760,29 @@ pub struct Data {
     pub field_manager: Option<String>,
     pub delete_pause_file: Option<String>,
     pub retry_backoff: RetryBackoff,
+    // How long after a reconcile ends the object is reconciled again. The
+    // periodic requeue is what the liveness of the verified reconcilers rests
+    // on; the watches are latency optimizations.
+    pub requeue: Duration,
+}
+
+// The requeue interval every runner uses unless told otherwise.
+pub const DEFAULT_REQUEUE: Duration = Duration::from_secs(60);
+
+// Options of a dynamic runner: the interval a reconcile that ended is run again
+// after, and whether the kind's own watch triggers a reconcile on every event of
+// an object or only on a change of its generation, which a spec change or a
+// deletion stamp bumps and a status write does not.
+#[derive(Clone, Copy, Debug)]
+pub struct DynRunnerOptions {
+    pub requeue: Duration,
+    pub generation_triggers_only: bool,
+}
+
+impl Default for DynRunnerOptions {
+    fn default() -> Self {
+        DynRunnerOptions { requeue: DEFAULT_REQUEUE, generation_triggers_only: false }
+    }
 }
 
 // deletes_withheld is the delete-withholding gate: true when a pause file is

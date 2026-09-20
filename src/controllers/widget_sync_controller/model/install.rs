@@ -4,6 +4,7 @@ use crate::kubernetes_cluster::spec::cluster::{Cluster, ControllerModel};
 use crate::reconciler::spec::io::{VoidEReqView, VoidERespView};
 use crate::widget_sync_controller::model::{disturber_reconciler, inner_impl_reconciler, janitor_reconciler, sync_reconciler};
 use crate::widget_sync_controller::model::{disturber_reconciler::WidgetDisturberReconcileState, inner_impl_reconciler::WidgetInnerImplReconcileState, janitor_reconciler::WidgetJanitorReconcileState, sync_reconciler::WidgetSyncReconcileState};
+use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::spec_types::*;
 use vstd::prelude::*;
 
@@ -81,14 +82,15 @@ pub open spec fn widget_janitor_controller_model(k: SyncKind, b: Binding) -> Con
     }
 }
 
-// The inner implementation of a mirrored kind: it writes the status the sync
-// controller carries back out (inner_impl_reconciler.rs).
-pub open spec fn widget_inner_impl_controller_model(kind: Kind) -> ControllerModel {
+// The inner implementation of a mirrored kind, owning the finalizer `finalizer`
+// if any: it writes the status the sync controller carries back out
+// (inner_impl_reconciler.rs).
+pub open spec fn widget_inner_impl_controller_model(kind: Kind, finalizer: Option<StringView>) -> ControllerModel {
     ControllerModel {
         reconcile_model: Cluster::synced_reconcile_model::<WidgetInnerImplReconcileState, VoidEReqView, VoidERespView>(
             kind,
             || inner_impl_reconciler::reconcile_init_state(),
-            |obj: SyncedObjectView, resp_o, s| inner_impl_reconciler::reconcile_core(kind, obj, resp_o, s),
+            |obj: SyncedObjectView, resp_o, s| inner_impl_reconciler::reconcile_core(kind, finalizer, obj, resp_o, s),
             |s| inner_impl_reconciler::reconcile_done(s),
             |s| inner_impl_reconciler::reconcile_error(s),
         ),

@@ -170,6 +170,7 @@ pub open spec fn list_req_msg_content(kind: Kind, namespace: StringView) -> Mess
     MessageContent::APIRequest(APIRequest::ListRequest(ListRequest{
         kind: kind,
         namespace: namespace,
+        name: None,
     }))
 }
 

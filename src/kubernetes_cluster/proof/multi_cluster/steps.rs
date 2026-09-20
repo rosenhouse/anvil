@@ -74,14 +74,17 @@ pub open spec fn relabel_req_content<S>(tc: MultiCluster<S>, r: Relabeling<S>, c
 }
 
 // No controller has an external system, and every request a controller sends
-// is one the refinement handles.
+// is one the refinement handles. Only objects a reconcile can run on are asked
+// about: stored objects of the model's kind (as in models_commute), so that a
+// request built from the triggering object inherits what is known of it.
 pub open spec fn models_ok<S>(tc: MultiCluster<S>) -> bool {
     forall |id: int| #[trigger] tc.cluster.controller_models.contains_key(id) ==> {
         let m = tc.cluster.controller_models[id];
         &&& m.external_model is None
         &&& forall |cr: DynamicObjectView, resp: Option<ResponseContent>, ls: ReconcileLocalState| {
             let req_o = (#[trigger] (m.reconcile_model.transition)(cr, resp, ls)).1;
-            req_o is Some && req_o->0 is KubernetesRequest ==> tc.request_ok(req_o->0->KubernetesRequest_0)
+            cr.kind == m.reconcile_model.kind && stored_object_ok(tc, cr) && req_o is Some && req_o->0 is KubernetesRequest
+                ==> tc.request_ok(req_o->0->KubernetesRequest_0)
         }
     }
 }
@@ -469,6 +472,7 @@ pub proof fn lemma_controller_step<S>(tc: MultiCluster<S>, r: Relabeling<S>, s: 
                 }
             }
             if req_o2 is Some && req_o2->0 is KubernetesRequest {
+                assert(rs.triggering_cr.kind == model.kind && stored_object_ok(tc, rs.triggering_cr));
                 assert(tc.request_ok(req_o2->0->KubernetesRequest_0));
             }
         },

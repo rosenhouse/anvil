@@ -249,10 +249,19 @@ pub open spec fn handle_list_request(req: ListRequest, s: APIServerState) -> Lis
     // s.resources.values() returns the set of objects in s.resources
     // This will not make list return fewer number of objects because
     // each object is unique in terms of {name, namespace, kind}
-    ListResponse{res: Ok(s.resources.values().filter(|o: DynamicObjectView| {
-        &&& o.object_ref().namespace == req.namespace
-        &&& o.object_ref().kind == req.kind
-    }).to_seq())}
+    if req.name is None {
+        ListResponse{res: Ok(s.resources.values().filter(|o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+        }).to_seq())}
+    } else {
+        // A metadata.name field selector: at most the one object of that name.
+        ListResponse{res: Ok(s.resources.values().filter(|o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+            &&& o.object_ref().name == req.name->0
+        }).to_seq())}
+    }
 }
 
 pub open spec fn create_request_admission_check(installed_types: InstalledTypes, req: CreateRequest, s: APIServerState) -> Option<APIError> {

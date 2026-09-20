@@ -191,6 +191,7 @@ pub fn handle_init(
             KubeListRequest {
                 api_resource: Pod::api_resource(),
                 namespace: vsts.metadata().namespace().unwrap(),
+                name: None,
             },
         );
         let state_prime = VStatefulSetReconcileState {

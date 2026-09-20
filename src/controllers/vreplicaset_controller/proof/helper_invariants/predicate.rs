@@ -407,6 +407,7 @@ pub open spec fn filtered_pods_invariant_matrix(controller_id: int, key: ObjectR
         &&& req_msg.content.get_list_request() == ListRequest {
             kind: PodView::kind(),
             namespace: triggering_cr.metadata.namespace.unwrap(),
+            name: None,
         }
         &&& forall |msg| {
             let req_msg = s.ongoing_reconciles(controller_id)[triggering_cr.object_ref()].pending_req_msg->0;

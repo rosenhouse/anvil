@@ -174,6 +174,7 @@ pub open spec fn req_msg_is_list_pods_req(
     &&& request->ListRequest_0 == ListRequest {
         kind: PodView::kind(),
         namespace: vrs.metadata.namespace.unwrap(),
+        name: None,
     }
 }
 

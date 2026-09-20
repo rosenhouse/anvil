@@ -11,12 +11,22 @@
 // implementation computes is its own business, and the pair's properties are
 // stated over whatever status it writes.
 //
+// It owns a finalizer, or none (`finalizer`). With one, it takes the finalizer
+// on a live mirror before it writes a status, and on a terminating mirror it
+// releases the finalizer instead of writing one: that release is what D3 asks of
+// the inner side, and the cluster running this model beside the pair proves D3
+// from it (composition/widget_inner_impl_reconciler.rs). With none, it never
+// touches finalizers, no mirror of its kind ever terminates, and D3 holds
+// vacuously there.
+//
 // Its guarantee (proof/inner_impl.rs) implies the relies of both reconcilers: a
 // status patch of a mirror is a request the sync reconciler's rely permits
-// (`req.kind != k.outer_kind`) and one the janitor's rely does not constrain.
+// (`req.kind != k.outer_kind`) and one the janitor's rely does not constrain, and
+// an update of the finalizers keeps the mirror's identity.
 use crate::kubernetes_api_objects::spec::prelude::*;
 use crate::kubernetes_api_objects::spec::synced_object::*;
 use crate::reconciler::spec::io::*;
+use crate::vstd_ext::string_view::*;
 use crate::widget_sync_controller::trusted::spec_types::*;
 use vstd::prelude::*;
 
@@ -24,6 +34,8 @@ verus! {
 
 pub enum WidgetInnerImplStepView {
     Init,
+    AfterAddFinalizer,
+    AfterRemoveFinalizer,
     AfterPatchStatus,
     Done,
 }
@@ -42,8 +54,8 @@ pub open spec fn reconcile_done(state: WidgetInnerImplReconcileState) -> bool {
     state.reconcile_step is Done
 }
 
-// The implementation does not care how its status write fares: a failed patch is
-// retried by the next reconcile, as the sync controller's own status write is.
+// The implementation does not care how its write fares: a failed patch or update
+// is retried by the next reconcile, as the sync controller's own writes are.
 pub open spec fn reconcile_error(state: WidgetInnerImplReconcileState) -> bool {
     false
 }
@@ -98,6 +110,20 @@ pub open spec fn inner_status_patch(kind: Kind, inner: SyncedObjectView) -> Patc
     }
 }
 
+// The Update that takes (`add`) or releases the finalizer `f` on the snapshot
+// `inner` the reconcile runs on, the sync controller's way
+// (sync_reconciler::outer_finalizer_update): everything else, the resource
+// version included, is the snapshot's, so the update lands only if nobody wrote
+// the mirror since the snapshot was taken.
+pub open spec fn inner_finalizer_update(inner: SyncedObjectView, f: StringView, add: bool) -> UpdateRequest {
+    let metadata = if add { with_finalizer(inner.metadata, f) } else { without_finalizer(inner.metadata, f) };
+    UpdateRequest {
+        namespace: inner.metadata.namespace->0,
+        name: inner.metadata.name->0,
+        obj: marshal(inner.with_metadata(metadata)),
+    }
+}
+
 // The status the implementation writes is one that reports the mirror as caught
 // up with the generation the patch tested. This is the load-bearing half of
 // "the premise of R2 is producible" (doc/widget_sync_design.md, section 2.5):
@@ -113,11 +139,32 @@ pub proof fn lemma_inner_impl_status_is_caught_up(inner: SyncedObjectView)
 {
 }
 
-pub open spec fn reconcile_core(kind: Kind, inner: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetInnerImplReconcileState) -> (WidgetInnerImplReconcileState, Option<RequestView<VoidEReqView>>) {
+pub open spec fn reconcile_core(kind: Kind, finalizer: Option<StringView>, inner: SyncedObjectView, resp_o: Option<ResponseView<VoidERespView>>, state: WidgetInnerImplReconcileState) -> (WidgetInnerImplReconcileState, Option<RequestView<VoidEReqView>>) {
     match state.reconcile_step {
         WidgetInnerImplStepView::Init => {
-            let req = APIRequest::PatchStatusRequest(inner_status_patch(kind, inner));
-            (at_step(WidgetInnerImplStepView::AfterPatchStatus), Some(RequestView::KRequest(req)))
+            if finalizer is Some && inner.metadata.deletion_timestamp is Some {
+                if has_finalizer(inner.metadata, finalizer->0) {
+                    // The mirror is going away: release it. Whatever a real
+                    // implementation tears down first is not modelled.
+                    let req = APIRequest::UpdateRequest(inner_finalizer_update(inner, finalizer->0, false));
+                    (at_step(WidgetInnerImplStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
+                } else {
+                    (at_step(WidgetInnerImplStepView::Done), None)
+                }
+            } else if finalizer is Some && !has_finalizer(inner.metadata, finalizer->0) {
+                // Take the finalizer before doing any work on the mirror.
+                let req = APIRequest::UpdateRequest(inner_finalizer_update(inner, finalizer->0, true));
+                (at_step(WidgetInnerImplStepView::AfterAddFinalizer), Some(RequestView::KRequest(req)))
+            } else {
+                let req = APIRequest::PatchStatusRequest(inner_status_patch(kind, inner));
+                (at_step(WidgetInnerImplStepView::AfterPatchStatus), Some(RequestView::KRequest(req)))
+            }
+        },
+        WidgetInnerImplStepView::AfterAddFinalizer => {
+            (at_step(WidgetInnerImplStepView::Done), None)
+        },
+        WidgetInnerImplStepView::AfterRemoveFinalizer => {
+            (at_step(WidgetInnerImplStepView::Done), None)
         },
         WidgetInnerImplStepView::AfterPatchStatus => {
             (at_step(WidgetInnerImplStepView::Done), None)
