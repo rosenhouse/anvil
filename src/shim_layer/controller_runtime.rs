@@ -1858,7 +1858,7 @@ mod tests {
     use super::*;
 
     fn object(name: &str, uid: &str, generation: i64) -> KubeDynamicObject {
-        let resource = kube::api::ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk("anvil.dev", "v1", "Widget"));
+        let resource = kube::api::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk("anvil.dev", "v1", "Widget"));
         let mut obj = KubeDynamicObject::new(name, &resource).within("default");
         obj.metadata.uid = Some(uid.to_string());
         obj.metadata.generation = Some(generation);
@@ -1880,7 +1880,7 @@ mod tests {
     // changed and forgets the ones it does not list.
     #[test]
     fn the_generation_filter_passes_changes_and_recreations_only() {
-        let resource = kube::api::ApiResource::from_gvk(&kube::api::GroupVersionKind::gvk("anvil.dev", "v1", "Widget"));
+        let resource = kube::api::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk("anvil.dev", "v1", "Widget"));
         let mut filter = GenerationFilter::new(resource);
         use watcher::Event::{Applied, Deleted, Restarted};
         assert_eq!(names(filter.filter(Applied(object("a", "u1", 1)))), vec!["a"]);
