@@ -248,10 +248,10 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
 
 // The Update the sync reconciler sends for the outer copy at `outer_key`: it
 // carries the resource version it read the copy with, and if it lands (that
-// version is the stored one) it adds the sync finalizer or removes it and changes
-// nothing else: not the spec, labels, annotations or owner references. (The API
-// server ignores the status of an Update.) A stale update, which the API server
-// rejects with Conflict, is unconstrained.
+// version is the stored one) it adds the sync finalizer to a copy without it, or
+// removes it, and changes nothing else: not the spec, labels, annotations or
+// owner references. (The API server ignores the status of an Update.) A stale
+// update, which the API server rejects with Conflict, is unconstrained.
 pub open spec fn sync_finalizer_update_req(k: SyncKind, req: UpdateRequest, outer_key: ObjectRef) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let stored = s.resources()[req.key()];
@@ -261,7 +261,10 @@ pub open spec fn sync_finalizer_update_req(k: SyncKind, req: UpdateRequest, oute
         &&& req.obj.metadata.resource_version is Some
         &&& (s.resources().contains_key(req.key()) && stored.metadata.resource_version == req.obj.metadata.resource_version) ==> {
             &&& req.obj.spec == stored.spec
-            &&& (req.obj.metadata == with_sync_finalizer(stored.metadata) || req.obj.metadata == without_sync_finalizer(stored.metadata))
+            &&& ({
+                ||| req.obj.metadata == with_sync_finalizer(stored.metadata) && !has_sync_finalizer(stored.metadata)
+                ||| req.obj.metadata == without_sync_finalizer(stored.metadata)
+            })
         }
     }
 }

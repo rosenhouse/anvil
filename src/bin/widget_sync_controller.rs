@@ -442,10 +442,10 @@ async fn main() -> Result<()> {
 
             // The janitors of a binding, one per configured kind, started by the
             // binding manager once the binding's credential and claim are good
-            // and stopped when its Secret changes or goes away. The sync
-            // reconciler never deletes (its guarantee), so the pause file only
-            // ever acts on the janitors; it is given to every runner so that the
-            // gate holds for every Delete this process could send.
+            // and stopped when its Secret changes or goes away. The pause file
+            // is given to every runner, so the gate holds for every Delete this
+            // process sends: the janitors' and the sync reconciler's teardown
+            // of a deleted outer copy's mirror.
             let janitor_clusters = clusters.clone();
             let janitor_kinds: Vec<(KindConfig, RegistryEntry)> =
                 configured.iter().map(|(kind, entry, _)| (kind.clone(), entry.clone())).collect();

@@ -1,5 +1,5 @@
 // The properties the Widget sync example is verified against (R1, R2, R3, R3s,
-// R4) and its one liveness assumption about the inner side (D3), with the kind
+// R4) and its liveness assumptions about the inner side (D3, D4), with the kind
 // `k` and the binding `b` as parameters. Motivation: doc/widget_sync_design.md,
 // section 3, and doc/widget_sync_fanout_design.md, section 5.1.
 //
@@ -52,10 +52,10 @@ pub open spec fn outer_spec_stable(k: SyncKind, b: Binding, outer: SyncedObjectV
 // Every in-flight write of the outer copy's metadata that would land keeps the
 // sync finalizer: an Update whose resource version is the stored one carries it,
 // and so does a transactional update. The sync controller adds its finalizer
-// before it creates the mirror, and this is what keeps the finalizer there; the
-// controller's own writes satisfy it (its release runs only on a terminating
-// copy). A stale Update, which the API server rejects, is unconstrained, and a
-// patch never touches finalizers.
+// before it creates the mirror; this premise keeps it there. The controller's
+// own writes satisfy it, since its release runs only on a terminating copy. A
+// stale Update, which the API server rejects, is unconstrained, and a patch
+// never touches finalizers.
 pub open spec fn outer_finalizer_undisturbed(outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let key = outer.object_ref();
@@ -316,11 +316,14 @@ pub open spec fn bound_parent_absent(k: SyncKind, b: Binding, key: ObjectRef, pa
 
 // R4, release: once the outer copy is terminating and the writes that would keep
 // it from being released have stopped, no object with its uid holds the sync
-// finalizer any more, for good: the sync controller has deleted the mirror,
-// confirmed it gone and removed its finalizer, after which the API server removes
-// the copy if that was its last finalizer. R4 needs D3 (a mirror with finalizers
-// of its own is released by the inner side) and R3 (a stale mirror at the key is
-// collected) the way R1 does.
+// finalizer any more, for good; the API server then removes the copy if that was
+// its last finalizer. R4 states the release only. In the model the sync
+// controller gets there by deleting the mirror and confirming it gone with a
+// List (model/sync_reconciler.rs); that ordering is not part of R4. R4 is proved
+// under the hypotheses of R1, D3 and the janitor's ESR: it uses D3 for a mirror
+// the inner side holds under a finalizer of its own, and it does not wait for a
+// stale mirror at the key to be collected. R4 has no multi-store reading
+// (proof/multi_cluster.rs states R1, R2, R3, R3s and the delete soundness only).
 pub open spec fn widget_finalizer_eventually_released(k: SyncKind, b: Binding) -> TempPred<ClusterState> {
     tla_forall(|outer: SyncedObjectView| widget_finalizer_eventually_released_per_cr(k, b, outer))
 }
@@ -354,15 +357,17 @@ pub open spec fn outer_terminating_stable(k: SyncKind, b: Binding, outer: Synced
     }
 }
 
-// The writes that would keep the outer copy from being released have stopped: no
-// in-flight Update of its key that would land carries the sync finalizer (the sync
-// controller's own release does not; a third party releasing a finalizer of its
-// own while keeping the sync finalizer in place is such a write, and R4 promises
-// the release for the time after it lands), no transactional update of the key
-// carries it, every in-flight Patch of the key writes `outer.spec`, and nothing
-// is creating the mirror any more: no in-flight Create names the mirror key. The
-// sync controller creates no mirror of a terminating copy; a mirror another
-// party keeps recreating would keep the teardown from confirming it gone.
+// The writes that would keep the outer copy from being released have stopped.
+// No in-flight Update of its key that would land carries the sync finalizer, and
+// no transactional update of the key does; the sync controller's own release
+// satisfies this. A third party that releases a finalizer of its own while
+// keeping the sync finalizer in place is such a write, and R4 promises the
+// release for the time after it lands. Every in-flight Patch of the key writes
+// `outer.spec`. No in-flight Create names the mirror key: the sync controller
+// creates no mirror from a terminating snapshot, a Create built from an earlier
+// live snapshot may still be in flight and R4's clock starts once it is
+// consumed, and a mirror another party kept recreating would keep the teardown
+// from confirming it gone.
 pub open spec fn outer_release_undisturbed(k: SyncKind, outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let key = outer.object_ref();
@@ -380,8 +385,9 @@ pub open spec fn outer_release_undisturbed(k: SyncKind, outer: SyncedObjectView)
 }
 
 // No object with the outer copy's uid holding the sync finalizer is stored at its
-// key: the finalizer was removed, or the copy is gone. Uids are never reused, so
-// this is stable once the copy is terminating.
+// key: the finalizer was removed, or the copy is gone. Stable once the copy is
+// terminating: the API server lets the finalizers of a terminating object only
+// shrink, and uids are never reused, so no live object with this uid appears.
 pub open spec fn finalizer_released(outer: SyncedObjectView) -> StatePred<ClusterState> {
     |s: ClusterState| {
         let key = outer.object_ref();
@@ -395,8 +401,10 @@ pub open spec fn finalizer_released(outer: SyncedObjectView) -> StatePred<Cluste
 // mirror object of `b` is eventually removed, that is, the inner side of `b`
 // removes every finalizer it owns from an object with a deletion timestamp (and
 // nothing adds finalizers to such an object; the API server rejects that anyway),
-// after which the API server removes the object. An axiom in this version; an
-// inner implementation verified in Anvil would discharge it in its own guarantee.
+// after which the API server removes the object. Assumed for the pair on its
+// own; proved, from the implementation's fairness, for the closed cluster that
+// runs the modelled inner implementation beside the pair
+// (composition/widget_inner_impl_reconciler.rs, widget_implemented_d3_holds_for).
 //
 // It is indexed by the binding because that is the granularity at which it is
 // assumed: the janitor of `(k, b)` touches no mirror but `b`'s, so its

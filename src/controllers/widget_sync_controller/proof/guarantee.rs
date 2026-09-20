@@ -753,6 +753,7 @@ proof fn lemma_snapshot_finalizer_update_is_guaranteed(k: SyncKind, controller_i
         cr_key.kind == k.outer_kind,
         unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[cr_key].triggering_cr) is Ok,
         unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[cr_key].triggering_cr)->Ok_0.object_ref() == cr_key,
+        add ==> !has_sync_finalizer(unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[cr_key].triggering_cr)->Ok_0.metadata),
     ensures ({
         let outer = unmarshal(k.outer_kind, s.ongoing_reconciles(controller_id)[cr_key].triggering_cr)->Ok_0;
         let req = sync_reconciler::outer_finalizer_update(outer, add);
@@ -846,6 +847,8 @@ proof fn lemma_sync_new_request_is_guaranteed(
                 },
                 APIRequest::UpdateRequest(update_req) => {
                     assert(update_req == sync_reconciler::outer_finalizer_update(outer, true));
+                    // The finalizer is added at Init only when the snapshot lacks it.
+                    assert(!has_sync_finalizer(outer.metadata));
                     lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, true);
                 },
                 APIRequest::ListRequest(list_req) => {

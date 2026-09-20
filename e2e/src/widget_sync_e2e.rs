@@ -7,8 +7,8 @@
 // widget_sync_bindings_e2e.rs. It checks, in order:
 //   1. a Widget created in the outer cluster gets a mirror in the inner cluster
 //      with the same spec, our label and parent-uid annotation, and no owner
-//      references, and carries the sync controller's finalizer
-//      `anvil.dev/widget-sync` itself, the mirror none of ours;
+//      references; the outer copy carries the sync finalizer
+//      `anvil.dev/widget-sync` and the mirror carries no finalizer of ours;
 //   2. the outer copy's status reports the inner copy's status, stamped with the
 //      outer generation (1 for a fresh object) and a true Synced condition;
 //   3. a spec change bumps the outer generation by exactly one, propagates, and
@@ -19,7 +19,7 @@
 //   5. a foreign inner object with the same name is refused, not adopted: it stays
 //      untouched and the outer copy reports Synced=False/ForeignObject;
 //   6. a mirror whose parent is alive survives the janitor: for longer than the
-//      janitor's resync interval, from the moment step 1 first saw it, it keeps
+//      janitor's interval, from the moment step 1 first saw it, it keeps
 //      its uid and never carries a deletion timestamp (a janitor that recognised
 //      no parent would delete it and the sync reconciler would recreate it under
 //      a new uid);
@@ -28,20 +28,20 @@
 //      status is Synced=True against the recreated mirror;
 //   8. deleting the outer copy under a finalizer of a third party tears the
 //      mirror down: the sync controller deletes the mirror, confirms it gone and
-//      releases its own finalizer while the copy stays terminating under the
-//      other one, and creates no mirror for it; once the other finalizer is
-//      removed the copy disappears, and recreating it under the same name with
-//      another spec gives a fresh mirror with the new parent uid and spec, and
-//      the outer status converges to Synced=True at generation 1 of the new
-//      object;
+//      releases its own finalizer, while the copy stays terminating under the
+//      other one and gets no mirror. Once the other finalizer is removed the
+//      copy disappears. Recreating it under the same name with another spec
+//      gives a fresh mirror with the new parent uid and spec, and the outer
+//      status converges to Synced=True at generation 1 of the new object;
 //   9. a mirror the inner side holds under a finalizer of its own is stamped by
 //      the teardown and waited for: the outer copy stays terminating under the
 //      sync finalizer until the inner finalizer is removed, then it is released
 //      and disappears;
-//  10. the janitor is the safety net: a stale mirror planted by hand, made stale
-//      by an edit that keeps its generation, is collected at the janitor's next
-//      resync; and an outer copy whose sync finalizer is removed by hand -- the
-//      escape hatch -- disappears at once and leaves its mirror to the janitor;
+//  10. the janitor is the safety net: a mirror planted by hand and made stale
+//      by an annotation edit, which does not bump its generation and so does not
+//      trigger the janitor's watch, is collected at the janitor's next interval;
+//      and an outer copy whose sync finalizer is removed by hand -- the escape
+//      hatch -- disappears at once and leaves its mirror to the janitor;
 //  11. deleting the outer copy of a foreign inner object releases it at once,
 //      and the foreign object survives.
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -77,7 +77,7 @@ pub(crate) const TIMEOUT: Duration = Duration::from_secs(300);
 // Intervals of the controller under test, from src/shim_layer/controller_runtime.rs.
 // reconcile_with requeues a finished reconcile after 60s: that is the sync
 // reconciler's requeue (its watches do not relist on their own). The janitor's
-// resync is the --janitor-interval flag, which deploy/widget_sync/deploy_local.yaml
+// interval is the --janitor-interval flag, which deploy/widget_sync/deploy_local.yaml
 // sets to 60s for the testbed (the binary's default is 10 minutes; a unit test
 // of the binary holds the manifest to this value). A failed reconcile is
 // retried by error_policy on a schedule of its own,
@@ -120,7 +120,7 @@ pub(crate) const ONE_RECONCILE: Duration = Duration::from_secs(
 pub(crate) const BACKED_OFF_RETRY: Duration =
     Duration::from_secs(RETRY_CAP.as_secs() + REMOTE_TIMEOUT.as_secs() + MARGIN.as_secs());
 pub(crate) const JANITOR_INTERVAL: Duration = Duration::from_secs(60);
-// A window in which the janitor has certainly resynced a mirror at least once.
+// A window in which the janitor has certainly revisited a mirror at least once.
 // The janitor's reconciles of a live mirror succeed, so this is its requeue and
 // not its retry schedule.
 pub(crate) const JANITOR_WINDOW: Duration = Duration::from_secs(JANITOR_INTERVAL.as_secs() + MARGIN.as_secs());
@@ -512,7 +512,7 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
 
     // 6. The mirror survives the janitor while its parent is alive. Every poll
     //    since step 1 has checked its uid and deletion timestamp; this wait covers
-    //    whatever is left of a window that contains at least one janitor resync
+    //    whatever is left of a window that contains at least one janitor interval
     //    of the mirror (the janitor also ran on every event of the mirror so far).
     info!(
         "mirror survival: {:?} of the {:?} window covered by the checks so far",
@@ -520,7 +520,7 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
         JANITOR_WINDOW
     );
     let (i, u) = (inner.clone(), mirror_uid.clone());
-    wait_until("mirror with a live parent keeps its uid through the janitor's resync window", JANITOR_WINDOW + MARGIN, move || {
+    wait_until("mirror with a live parent keeps its uid through the janitor's interval", JANITOR_WINDOW + MARGIN, move || {
         let (i, u) = (i.clone(), u.clone());
         async move {
             still_the_same_mirror(&i.get("demo").await?, &u)?;
@@ -713,7 +713,7 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
     //     cluster: created with the label alone, which the janitor ignores, then
     //     annotated with the uid of the outer copy that just went -- an edit
     //     that keeps the generation, so the janitor's watch, which triggers on
-    //     generation changes only, stays quiet, and its resync is what finds the
+    //     generation changes only, stays quiet, and its interval is what finds the
     //     stale mirror: within JANITOR_WINDOW, the testbed's interval plus slack.
     let mut planted = widget("planted", 1, "planted");
     planted.metadata.labels = Some([(MANAGED_BY_KEY.to_string(), MANAGED_BY_VALUE.to_string())].into());
@@ -729,7 +729,7 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
         .map_err(failed("annotate the planted mirror with a departed parent uid"))?;
     let planted_at = Instant::now();
     let i = inner.clone();
-    wait_until("the stale mirror planted by hand is collected by the janitor's resync", JANITOR_WINDOW + MARGIN, move || {
+    wait_until("the stale mirror planted by hand is collected at the janitor's interval", JANITOR_WINDOW + MARGIN, move || {
         let i = i.clone();
         async move { Ok(i.get_opt("planted").await?.is_none()) }
     })

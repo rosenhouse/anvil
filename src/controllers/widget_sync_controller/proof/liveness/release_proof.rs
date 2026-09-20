@@ -14,8 +14,9 @@
 //    snapshot carries the stored copy's version, since nothing writes the copy
 //    but a release.
 // 3. The walk. A reconcile of the copy lists the mirror key. Finding nothing
-//    there, it releases the copy with the Update built from its snapshot, which
-//    lands, or finds the copy written since, which by the premise is a release.
+//    there, it releases the copy with the Update built from its snapshot. The
+//    Update lands, or the copy was written since the snapshot, and by the
+//    premise that write was a release.
 //    Finding something, it reads it: not the mirror, and it releases; the mirror,
 //    and it deletes it, after which the inner side releases the mirror (D3).
 //    Nothing recreates the mirror (the premise), so the mirror key is empty from

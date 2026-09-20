@@ -117,12 +117,12 @@ two can disagree, and the condition is the controller's assessment.
 
 The mirror carries `anvil.dev/managed-by: widget-sync` and
 `anvil.dev/parent-uid: <outer uid>`, no owner references and no finalizers of
-ours. The outer copy carries the finalizer `anvil.dev/widget-sync` from its
-first reconcile on: deleting it makes the controller delete the mirror,
-confirm it gone and release the finalizer, and only then does the copy
-disappear ("Scenarios" below; `doc/widget_sync_design.md`, section 1.5). A
-terminating outer copy gets no status writes; what the teardown is waiting on
-is in the controller's log.
+ours. The outer copy carries the sync finalizer, `anvil.dev/widget-sync`,
+from its first reconcile on: deleting it makes the controller delete the
+mirror, confirm it gone and release the finalizer, and only then does the copy
+disappear ("Scenarios" below; `doc/widget_sync_design.md`, section 1.5). Once
+the teardown has started, the copy gets no status writes; the controller's log
+shows each request the teardown sends and which one failed.
 
 ## Scenarios
 
@@ -136,25 +136,28 @@ is in the controller's log.
   in the outer cluster. The inner object is never modified; the outer copy
   reports `ForeignObject` with `Stalled=True`.
 - Delete the outer copy. It stays, terminating, while the controller deletes
-  the mirror, confirms with a List that nothing is left at its name and removes
-  its finalizer `anvil.dev/widget-sync`; then it disappears, within seconds.
-  Recreate it under the same name once it is gone: a fresh mirror, and no
-  `StaleMirror` in between. Add a finalizer of your own first
-  (`kubectl patch widget demo --type json -p '[{"op":"add","path":"/metadata/finalizers/-","value":"example.com/hold"}]'`)
-  and the copy stays under it after the controller has released its own, the
-  mirror gone and never recreated, until you remove yours.
+  the mirror, confirms with a List that nothing is left at its name and
+  removes the sync finalizer; then it disappears. Recreate it under the same
+  name once it is gone: a fresh mirror, and no `StaleMirror` in between. To
+  watch the release on its own, put a finalizer of your own on the copy once
+  it carries the sync finalizer and before deleting it
+  (`kubectl --context kind-widget-sync-outer patch widget demo --type json -p '[{"op":"add","path":"/metadata/finalizers/-","value":"example.com/hold"}]'`):
+  the controller releases the sync finalizer, the mirror is gone and never
+  recreated, and the copy stays under yours until you remove it.
 - Delete the outer copy while its inner cluster is disconnected (below), or
   while the mirror carries a finalizer someone put on it in the inner cluster.
-  The copy stays terminating under `anvil.dev/widget-sync`: the teardown
-  writes no status, and the log says which request failed or that the mirror
-  is being released by the inner side. Reconnect, or remove the inner
-  finalizer, and the copy disappears at the controller's next attempt. The
-  escape hatch, if the inner cluster is not coming back, is the conventional
-  one: remove the controller's finalizer by hand,
-  `kubectl patch widget demo --type json -p '[{"op":"remove","path":"/metadata/finalizers/0"}]'`
-  (check the index with `kubectl get widget demo -o jsonpath='{.metadata.finalizers}'`).
-  The copy disappears at once; the mirror is then the janitor's to collect
-  once the inner cluster answers, at its next pass.
+  The copy stays terminating under the sync finalizer and gets no status
+  writes. The log shows which request failed; for a mirror the inner side
+  holds, the mirror's own `deletionTimestamp` in the inner cluster is what to
+  look at. Reconnect, or remove the inner finalizer, and the copy disappears
+  at the controller's next attempt. The escape hatch, if the inner cluster is
+  not coming back, is the conventional one: remove the sync finalizer by hand,
+  with a `test` that guards against removing someone else's,
+  `kubectl --context kind-widget-sync-outer patch widget demo --type json -p '[{"op":"test","path":"/metadata/finalizers/0","value":"anvil.dev/widget-sync"},{"op":"remove","path":"/metadata/finalizers/0"}]'`
+  (if the test fails, the sync finalizer is not first: see the list with
+  `kubectl --context kind-widget-sync-outer get widget demo -o jsonpath='{.metadata.finalizers}'`
+  and use its index). The copy disappears at once; the mirror is then the
+  janitor's to collect once the inner cluster answers, at its next pass.
 - Plant a stale mirror by hand: create a `Widget` in the inner cluster with
   the label `anvil.dev/managed-by: widget-sync` and the annotation
   `anvil.dev/parent-uid: <any uid no outer copy of that name has>`. The
@@ -572,13 +575,42 @@ see a collection within a minute). Its watch of the mirrors triggers a
 reconcile on a change of a mirror's `metadata.generation` only -- a spec
 change or a deletion stamp -- and not on the status writes of the inner
 implementation, which are the bulk of a workload cluster's events. The long
-interval is deliberate: the sync controller tears a mirror down before it
-lets its outer copy go, so the janitor is the safety net behind that
-teardown, for a mirror whose outer copy was deleted without the controller's
-finalizer, and a stale mirror costs nothing but a name until the next pass.
-The e2e tests wait for a collection within the interval plus a margin
-(`JANITOR_WINDOW` in `e2e/src/widget_sync_e2e.rs`), and the binary's unit
-tests hold the default and the manifest's value to what this paragraph says.
+interval is deliberate. The sync controller tears a mirror down before it
+lets its outer copy go; the janitor is the safety net behind that teardown
+(`doc/widget_sync_design.md`, section 1.3), and a stale mirror costs nothing
+but a name until the next pass. A read of the mirror that fails before its
+reconcile runs is retried after the 60-second requeue of "Retries", not the
+interval. The e2e tests wait for a collection within the interval plus a
+margin (`JANITOR_WINDOW` in `e2e/src/widget_sync_e2e.rs`), and the binary's
+unit tests hold the default and the manifest's value to what this paragraph
+says.
+
+**Removing objects, bindings, kinds and the controller.** The sync finalizer
+makes order matter. A copy is released only once its mirror is confirmed
+gone, which needs the copy's inner cluster: delete the copies that name a
+cluster and wait for them to go before the cluster's binding Secret, the
+Cluster API `Cluster` that owns it, or a namespace that holds both. A copy
+whose binding is gone reports `Synced=False/InnerUnreachable` and keeps the
+sync finalizer, because nothing in this process can confirm anything for a
+cluster it has no client for; a namespace deleted around such copies stays
+`Terminating` on them. The same holds for the controller itself and for a
+kind: stop the controller, or drop a `--kind`, only after the copies of every
+kind it serves are gone, and remove a CRD only after that, since only a
+running controller releases the finalizer. A build without the finalizer
+cannot release it either, so before rolling back to one, strip the finalizer
+from every served copy. The escape hatch applies to any of these, one object
+at a time as in "Scenarios" or a namespace at a time:
+
+```sh
+kubectl --context kind-widget-sync-outer -n default get widgets -o name \
+  | xargs -n1 kubectl --context kind-widget-sync-outer -n default patch --type json \
+      -p '[{"op":"test","path":"/metadata/finalizers/0","value":"anvil.dev/widget-sync"},{"op":"remove","path":"/metadata/finalizers/0"}]'
+```
+
+The `test` refuses an object whose first finalizer is someone else's; look at
+that one by hand. A copy stripped this way is deleted by the API server at
+once if it was terminating, and its mirror is the janitor's to collect once
+its cluster answers.
 
 **Probes.** A startup probe, `test -f /run/widget-sync/ready`, waits for a
 file the binary creates (path from `READY_FILE`, on a small emptyDir) once
@@ -644,7 +676,7 @@ this section says — but do not read the log going quiet in the first minute
 after clearing the key as the deletes having resumed. Nothing else changes
 while paused, and the sync reconciler never adopts: a restored outer `Widget`
 whose uid differs from the mirror's annotation reports
-`Synced=False/ForeignObject` and gets a new mirror only after the old one is
+`Synced=False/StaleMirror` and gets a new mirror only after the old one is
 gone. Resuming therefore lets the janitor delete every
 mirror whose annotation no longer matches, and the sync reconciler then
 recreates them; what the pause buys is the time to confirm that the restore

@@ -1,20 +1,22 @@
 // The inner implementation (widget_sync_controller/model/inner_impl_reconciler.rs)
-// as a Welder controller spec, and the Widget pair composed with it: a cluster
+// as a Welder controller spec, and the Widget pair composed with it. A cluster
 // running the janitor, the sync reconciler and the controller that writes the
-// mirror's status, and that owns a finalizer on it or none, still has R1, R2,
-// R3, R3s and R4. The implementation's Welder spec asserts no rely and an empty
-// ESR; its fairness is what the D3 proof of this cluster needs
-// (widget_implemented_d3_holds_for): with the implementation's finalizer set,
-// the release it sends for a terminating mirror lands, and with none no mirror
-// of its kind ever terminates. So the closed statement of this cluster
-// (widget_implemented_esrs_hold_for) assumes D3 nowhere.
+// mirror's status, with or without a finalizer of its own on the mirror, still
+// has R1, R2, R3, R3s and R4. The implementation's Welder spec asserts no rely
+// and an empty ESR. Its fairness is what the D3 proof of this cluster needs
+// (widget_implemented_d3_holds_for): with a finalizer, the release it sends for
+// a terminating mirror lands; with none, no mirror of its kind ever terminates.
+// So the closed statement of this cluster (widget_implemented_esrs_hold_for)
+// assumes D3 nowhere. D3 is proved on the closed three-controller cluster, not
+// as the implementation's ESR under a rely: the proof does not carry over to a
+// cluster with a fourth controller.
 //
 // This is a one-store reading: the implementation and the outer copies share an
 // API server. The multi-store one, which is the shape a deployment has, needs the
 // implementation's commutation lemma and widget_other_controller_ok besides, as
-// the disturber has (proof/multi_cluster.rs); it is not written yet.
+// the disturber has (proof/multi_cluster.rs); this file does not give it.
 //
-// Nor does this give R2 being reached: the implementation's fairness makes it
+// Nor does this reach R2's premise: the implementation's fairness makes it
 // write a status, not settle on one (doc/widget_sync_design.md, section 2.5).
 use crate::composition::widget_janitor_reconciler::*;
 use crate::composition::widget_sync_reconciler::*;

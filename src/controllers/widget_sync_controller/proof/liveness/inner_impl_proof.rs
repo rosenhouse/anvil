@@ -3,14 +3,16 @@
 // implementation's kind is eventually gone.
 //
 // With the implementation's finalizer set, the mirror's finalizers are the
-// implementation's alone (nothing else in this cluster writes finalizers of that
-// kind), so a terminating mirror holds exactly that finalizer, and the
+// implementation's alone: nothing else in this cluster writes finalizers of that
+// kind. A terminating mirror therefore holds exactly that finalizer. The
 // implementation's next reconcile of it, working from a current snapshot, sends
-// the Update that releases it, which removes the mirror. Nothing else writes a
-// terminating mirror: the sync controller's spec patches and the
+// the Update that releases it, and the API server removes the mirror. Nothing
+// else writes a terminating mirror: the sync controller's spec patches and the
 // implementation's own status patches test the generation of a live view of the
 // mirror, and the deletion stamp bumped it. With no finalizer, no mirror of the
-// kind ever carries one, so none ever terminates, and D3 holds vacuously.
+// kind ever carries one, so none ever terminates, and D3 holds vacuously. The
+// proof is of this closed cluster (d3_membership fixes its three controllers);
+// it is not the implementation's ESR under a rely.
 #![allow(unused_imports)]
 use crate::kubernetes_api_objects::error::*;
 use crate::kubernetes_api_objects::spec::prelude::*;

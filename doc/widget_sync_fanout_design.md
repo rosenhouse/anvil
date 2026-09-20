@@ -421,9 +421,7 @@ reconcile is the one of the main design, sections 1.2 and 1.5, with two changes:
   the inner side. This is what bounds the mirror kinds the model can write
   (section 5.2). A refused (claimed) binding stays in the set, because it is
   bound: its requests are sent and the shim answers them `Forbidden`. Both
-  checks come before the finalizer is added, so an object that names no inner
-  cluster or a binding the process does not know is never owned (main design,
-  section 1.5).
+  checks come before the finalizer is added (main design, section 1.5).
   The one branch that would write a mirror, the Create after a `NotFound`, is
   guarded by the same test; that guard is unreachable at run time (Init already
   refused) and is there so that every Create the model emits names a mirror kind
@@ -456,8 +454,7 @@ one change: the parent is listed when some listed outer object has the
 mirror's parent uid **and** `cluster_of` equal to the binding's cluster
 name. Under the CEL rule the second conjunct is redundant; without it the
 janitor of the old cluster collects the mirror of a parent that moved. The
-List names the mirror's own name as a field selector, so it costs one object
-per reconcile whatever the namespace holds.
+List carries the mirror's name as a field selector (main design, section 5.4).
 
 R3's premise is the other side of that asymmetry: `parent_absent` says no outer
 copy of the kind carries the mirror's parent uid and says nothing about which
@@ -489,9 +486,9 @@ The binary:
    (`bindings::binding_of_capi_secret`). Per binding: build the clients, run
    the access check, create or verify the claim, start the janitors (one
    kube-runtime controller per kind on the binding's watch client, with a
-   graceful-shutdown token, its watch filtered to changes of a mirror's
-   generation and its requeue the `--janitor-interval` flag, ten minutes by
-   default), and register the clients with the sync controllers' client map. On change: rebuild the clients in place. On
+   graceful-shutdown token, a watch filtered to generation changes and the
+   requeue of `--janitor-interval`), and register the clients with the sync
+   controllers' client map. On change: rebuild the clients in place. On
    delete: stop the janitors, drop the clients.
 5. Creates the readiness file.
 
@@ -704,8 +701,7 @@ neither R2's premise nor D3 -- nothing in it writes an inner status or a
 finalizer on a mirror. The inner implementation of the main design, section
 2.5, is composed with the pair on one store, where its fairness discharges D3,
 and could be admitted here too, but it is not among the deployment's
-controllers and no multi-store instance names it. R4 is stated on one store
-only. Each
+controllers and no multi-store instance names it. Each
 is admitted by its model, which sends only requests the refinement handles and
 commutes with the relabeling (`lemma_sync_model_ok`, `lemma_janitor_model_ok`
 and the commutation lemmas, all already stated with the kind and the binding as
