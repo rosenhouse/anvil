@@ -345,13 +345,12 @@ The rules behind the diagram:
 - Past `Init`, the teardown writes no status: the copy is going away, and a
   failed request is logged by the shim and retried from `Error` on the
   backoff. `Init` reports two outcomes, before any request to the inner side:
-  a copy that names no inner cluster (`Rejected`, permanent; under the
-  immutability rule such a copy carries the finalizer only if someone added
-  it by hand, since the finalizer is added after the cluster is read) and one
-  whose binding this process does not serve (`InnerUnreachable`). Both keep
-  the finalizer: nothing can be confirmed for them. A copy whose binding is
-  gone, its Secret deleted, is the second case, for as long as the binding is
-  gone.
+  a copy that names no inner cluster (`Rejected`, permanent) and one whose
+  binding this process does not serve (`InnerUnreachable`). Both keep the
+  finalizer: nothing can be confirmed for them. A copy whose binding is gone,
+  its Secret deleted, is the second case, for as long as the binding is gone;
+  the first can only carry the finalizer if someone added it by hand, by the
+  last rule below.
 - A terminating copy without the sync finalizer is not this controller's to
   tear down: it is left alone, and no mirror is created for it. A copy that
   carries the finalizer beside finalizers of others is torn down the same way;
