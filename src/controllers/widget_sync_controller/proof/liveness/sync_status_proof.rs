@@ -81,6 +81,8 @@ pub proof fn lemma_written_status_is_desired(k: SyncKind, b: Binding, outer: Syn
     assert(inner_status.stalled_condition() == settled.stalled_condition());
     assert(ready_condition_for(g, inner_status, SyncOutcomeView::Synced) == ready_condition_for(g, settled, SyncOutcomeView::Synced));
     assert(stalled_condition_for(g, inner_status, SyncOutcomeView::Synced) == stalled_condition_for(g, settled, SyncOutcomeView::Synced));
+    assert(conditions_of(inner_status) == conditions_of(settled));
+    assert(copied_conditions_for(g, inner_status, SyncOutcomeView::Synced) == copied_conditions_for(g, settled, SyncOutcomeView::Synced));
     assert(outer_status_for(g, inner_status, SyncOutcomeView::Synced) == outer_status_for(g, settled, SyncOutcomeView::Synced));
 }
 

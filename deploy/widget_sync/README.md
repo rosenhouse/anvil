@@ -44,7 +44,8 @@ On the outer copy:
 
 - `status.observedGeneration == metadata.generation`: the controller has
   acted on the current spec, whether or not it succeeded; the outcome is in
-  the conditions, all of which carry the same `observedGeneration`.
+  the `Synced`, `Ready` and `Stalled` conditions, which carry the same
+  `observedGeneration`.
 - Condition `Synced` with `status: "True"` and `observedGeneration ==
   metadata.generation`: the spec is in the inner cluster and `ready` and
   `observedCount` are the inner implementation's status for it.
@@ -66,15 +67,28 @@ On the outer copy:
   (same normalization as `Ready`). Otherwise `False` with `Synced`'s reason,
   so a synced mirror with no `Stalled` condition reads `Stalled=False/Synced`.
   `Ready` and `Stalled` are never both `True`.
+- The conditions after those three: every condition the inner copy carries
+  of another type, in the inner order, the first of each type, with status,
+  reason and message as the inner copy wrote them and `observedGeneration`
+  set to the outer generation at which it was read; the inner condition's
+  own `observedGeneration` is not read. While `Synced` is `False` they are
+  kept as last reported, with the `observedGeneration` they were read at,
+  and filtered the same way: `Synced=False` says the copies are kept, not
+  the stamp, which can equal the current generation. An inner `Synced`
+  condition is dropped (a Crossplane-style implementation loses its `Synced`
+  and has its `Ready` merged). No condition carries `lastTransitionTime`,
+  and a CRD whose conditions require it is refused at boot ("Kinds and
+  their shape"). In the demo the echo controller writes `Echoed`, which the
+  outer copy carries. The rules: `doc/widget_sync_design.md`, section 1.4.
 
 Wait on `Synced`, which the sync controller writes for every kind it serves.
 `kubectl wait --for=condition=` reads the condition's status only, not its
 `observedGeneration`, so right after a spec edit it returns on the previous
 generation's `Synced=True`; wait for
 `--for=jsonpath='{.status.observedGeneration}'=<generation>` first. Alert on
-`Ready != True`, which covers `False` and `Unknown` alike; it fires on every
+`Ready != True`, which covers `False` and `Unknown` alike. It fires on every
 spec edit while the inner side converges, so hold it for the convergence time
-you tolerate (there is no `lastTransitionTime` to hold it on). `kubectl wait
+you tolerate. There is no `lastTransitionTime` to hold it on. `kubectl wait
 --for=condition=Ready` waits for `True`, so it times out for a kind whose
 implementation reports no `Ready` condition: the outer copy reads
 `Ready=Unknown/NoInnerReadyCondition` for it.
@@ -201,7 +215,7 @@ them:
 | `metadata` | read; the mirror's name, namespace, label and annotation written on create | namespaced scope |
 | `spec` | copied verbatim outer to inner; the selector field read when the selector is `field` | the selector field, when used: required string with the immutability rule |
 | `status.observedGeneration` | read on the inner copy, written on the outer copy | integer |
-| `status.conditions[]` | read on the inner copy (`Ready`, `Stalled`); written on the outer copy (`Synced`, `Ready`, `Stalled`) | array of objects with `type` (string, required), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else |
+| `status.conditions[]` | read on the inner copy (all: `Ready` and `Stalled` are merged, `Synced` dropped, the other types copied); written on the outer copy (`Synced`, `Ready`, `Stalled`, then the copies) | array of objects with `type` (string, required, not restricted to the three own types), `status` (string, required), `reason`, `message` (strings), `observedGeneration` (integer); an item requires nothing else; `x-kubernetes-list-type: map` keyed by `type` is recommended, not checked |
 | every other status field | mirrored verbatim inner to outer while `Synced` | none, and `status` requires none of them |
 | the status subresource | | enabled, so `metadata.generation` follows the spec |
 
@@ -223,8 +237,23 @@ A schema may **require** only what the controller always writes: at the status
 level `observedGeneration` and `conditions`, and in a condition `type`,
 `status` and `observedGeneration`. The controller writes no
 `lastTransitionTime`, because it reads no clocks. The `Synced` condition never
-carries a `message`. `Ready` and `Stalled` carry neither `reason` nor `message`
-from an inner condition that has none.
+carries a `message`. `Ready`, `Stalled` and a copied condition carry neither
+`reason` nor `message` from an inner condition that has none. A copied
+condition kept while `Synced` is `False` is rewritten with the fields it was
+stored with, which the same schema admitted.
+
+The demo CRDs declare `status.conditions` a map list keyed by `type`
+(`x-kubernetes-list-type: map`, issue #31). The API server then refuses any
+write that repeats a type, in the inner clusters too, where the same manifest
+is installed: an inner implementation that writes two conditions of one type
+gets a 422. The sync controller's own write is a JSON patch that replaces the
+whole list, not a server-side apply, so the map type does not make it merge: a
+condition another manager applies to the outer copy is removed on the
+controller's next synced write. Changing an installed CRD from an atomic list
+to a map is accepted; stored objects are not rewritten, and an object that
+already repeats a type is refused updates until its list is fixed (on a server
+without validation ratcheting) -- the outer copy heals on the controller's next
+write, an inner copy when its implementation rewrites the list.
 
 A CRD generated from `metav1.Condition` declares all five condition fields with
 the types the table demands and marks `lastTransitionTime`, `message` and

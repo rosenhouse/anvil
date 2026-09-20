@@ -54,10 +54,10 @@ spec:
                       nullable: true
                       type: string
                     status:
-                      description: On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner copy, whatever the inner implementation writes.
+                      description: 'On an outer copy: Synced is True or False; Ready and Stalled are True, False or Unknown; a copied condition''s status is the inner copy''s, as written. On an inner copy, whatever the inner implementation writes.'
                       type: string
                     type:
-                      description: Synced, Ready or Stalled on an outer copy; whatever the inner implementation reports on an inner copy (the sync controller reads Ready and Stalled).
+                      description: 'On an outer copy: Synced, Ready or Stalled, or a type copied from the inner copy. On an inner copy: whatever the inner implementation reports; the sync controller merges Ready and Stalled, drops Synced, and copies the rest.'
                       type: string
                   required:
                   - status
@@ -65,6 +65,9 @@ spec:
                   type: object
                 nullable: true
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               observedGeneration:
                 description: The generation of this object that the writer of this status last processed.
                 format: int64

@@ -42,7 +42,7 @@ spec:
             nullable: true
             properties:
               conditions:
-                description: On an outer copy, exactly Synced, Ready and Stalled, all with observedGeneration equal to the generation the sync controller reconciled. Synced is True when the spec is in the inner cluster and the inner status observes it; otherwise False with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or, after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or RequestFailed. While Synced is True, Ready is the inner copy's own Ready condition (status, reason and message; an inner status that is none of True, False and Unknown reads Unknown), except that an inner Stalled=True forces Ready=False with that condition's reason and message, and a mirror with no Ready condition reads Unknown with reason NoInnerReadyCondition. While Synced is False, Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating, Forbidden, InnerUnreachable and RequestFailed, False for StaleMirror, ForeignObject, CreateFailed and Rejected. Stalled is True with the sync controller's reason for ForeignObject, Forbidden and Rejected; otherwise, while Synced is True, it is the inner copy's own Stalled condition, and False with Synced's reason when the inner copy has no Stalled condition or Synced is False. Ready and Stalled are never both True.
+                description: 'On an outer copy: Synced, Ready and Stalled first, all with observedGeneration equal to the generation the sync controller reconciled; then the inner copy''s conditions of other types, in the inner order, the first of each type, with status, reason and message as the inner copy wrote them and observedGeneration equal to the outer generation at which it was read (while Synced is False they are kept as last reported, with the stamp they were read at). An inner Synced condition is dropped. No condition carries lastTransitionTime. The rules: doc/widget_sync_design.md, section 1.4. Synced is True when the spec is in the inner cluster and the inner status observes it; otherwise False with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or, after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or RequestFailed. While Synced is True, Ready is the inner copy''s own Ready condition (status, reason and message; an inner status that is none of True, False and Unknown reads Unknown), except that an inner Stalled=True forces Ready=False with that condition''s reason and message, and a mirror with no Ready condition reads Unknown with reason NoInnerReadyCondition. While Synced is False, Ready has reason NotSynced and is Unknown for InnerConverging, InnerTerminating, Forbidden, InnerUnreachable and RequestFailed, False for StaleMirror, ForeignObject, CreateFailed and Rejected. Stalled is True with the sync controller''s reason for ForeignObject, Forbidden and Rejected; otherwise, while Synced is True, it is the inner copy''s own Stalled condition, and False with Synced''s reason when the inner copy has no Stalled condition or Synced is False. Ready and Stalled are never both True.'
                 items:
                   description: A condition in the usual metav1.Condition shape. `lastTransitionTime` is omitted because the verified controller does not read clocks.
                   properties:
@@ -60,10 +60,10 @@ spec:
                       nullable: true
                       type: string
                     status:
-                      description: On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner copy, whatever the inner implementation writes.
+                      description: 'On an outer copy: Synced is True or False; Ready and Stalled are True, False or Unknown; a copied condition''s status is the inner copy''s, as written. On an inner copy, whatever the inner implementation writes.'
                       type: string
                     type:
-                      description: Synced, Ready or Stalled on an outer copy; whatever the inner implementation reports on an inner copy (the sync controller reads Ready and Stalled).
+                      description: 'On an outer copy: Synced, Ready or Stalled, or a type copied from the inner copy. On an inner copy: whatever the inner implementation reports; the sync controller merges Ready and Stalled, drops Synced, and copies the rest.'
                       type: string
                   required:
                   - status
@@ -71,6 +71,9 @@ spec:
                   type: object
                 nullable: true
                 type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
               observedCount:
                 description: Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
                 format: int32

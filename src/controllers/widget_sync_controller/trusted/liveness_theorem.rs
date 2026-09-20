@@ -124,7 +124,8 @@ pub open spec fn spec_synced(k: SyncKind, outer: SyncedObjectView) -> StatePred<
 // copy eventually and stably carries the status the sync controller derives from
 // it, outer_status_for(g, settled, Synced): the mirrored remainder of the inner
 // status, its Ready and Stalled conditions merged with a true Synced condition,
-// all stamped with the outer copy's own generation g.
+// and its other conditions, the first of each type, after the three, all
+// stamped with the outer copy's own generation g.
 //
 // The premise fixes the inner status (its mirrored remainder and its conditions;
 // its observed_generation is fixed by inner_caught_up) instead of assuming that

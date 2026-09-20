@@ -301,14 +301,16 @@ impl SyncOutcomeView {
     // Whether Ready reads Unknown rather than False while not synced. The split
     // is by reason. A reason that can arise without the reconcile having read a
     // caught-up inner status for the current spec -- the mirror is converging
-    // or terminating, the inner cluster did not answer, a request failed or was
-    // refused -- reads Unknown: the mirror may still be running the spec, and
-    // Ready does not deny it. A reason that arises only once the reconcile knows
-    // no mirror of this copy runs the spec -- the object at the mirror key is
-    // foreign or stale, the Create failed, a request was rejected -- reads
-    // False. Unknown is the safe side where a reason can arise both ways, such
-    // as a Create refused after a NotFound. The same split over the reason the
-    // request carries is reason_reads_ready_unknown.
+    // or terminating (InnerConverging, InnerTerminating), the inner cluster did
+    // not answer (InnerUnreachable), a request failed or was refused
+    // (RequestFailed, Forbidden) -- reads Unknown: the mirror may still be
+    // running the spec, and Ready does not deny it. A reason that arises only
+    // once the reconcile knows no mirror of this copy runs the spec -- the
+    // object at the mirror key is foreign or stale (ForeignObject, StaleMirror),
+    // the Create failed (CreateFailed), a request was rejected (Rejected) --
+    // reads False. Where a reason can arise both ways, such as a Create refused
+    // after a NotFound, Unknown retracts nothing. reason_reads_ready_unknown is
+    // the same split, keyed by the reason the request carries.
     pub open spec fn ready_unknown(self) -> bool {
         match self {
             SyncOutcomeView::InnerConverging => true,
@@ -374,14 +376,76 @@ pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: Sy
     }
 }
 
+// The condition types the sync controller writes itself. An inner condition of
+// one of these types is merged (Ready, Stalled) or dropped (Synced), never
+// copied. Types match exactly: "ready" is another type.
+pub open spec fn is_own_condition_type(type_: StringView) -> bool {
+    ||| type_ == synced_condition_type()
+    ||| type_ == ready_condition_type()
+    ||| type_ == stalled_condition_type()
+}
+
+pub open spec fn has_condition_of_type(conds: Seq<SyncedConditionView>, type_: StringView) -> bool {
+    exists |i: int| 0 <= i < conds.len() && #[trigger] conds[i].type_ == type_
+}
+
+// The conditions of `conds` the sync controller copies: those whose type is not
+// one of its own, in order, the first of each type only -- the one condition()
+// names -- with status, reason and message as they are. Defined from the back:
+// a condition is kept when its type is not an own type and no earlier condition
+// of its type was kept.
+pub open spec fn copied_conditions(conds: Seq<SyncedConditionView>) -> Seq<SyncedConditionView>
+    decreases conds.len(),
+{
+    if conds.len() == 0 {
+        Seq::empty()
+    } else {
+        let kept = copied_conditions(conds.drop_last());
+        let last = conds.last();
+        if is_own_condition_type(last.type_) || has_condition_of_type(kept, last.type_) {
+            kept
+        } else {
+            kept.push(last)
+        }
+    }
+}
+
+// `conds` with every condition stamped `generation`.
+pub open spec fn stamped(conds: Seq<SyncedConditionView>, generation: Option<int>) -> Seq<SyncedConditionView> {
+    conds.map_values(|c: SyncedConditionView| SyncedConditionView { observed_generation: generation, ..c })
+}
+
+pub open spec fn conditions_of(status: SyncedStatusView) -> Seq<SyncedConditionView> {
+    if status.conditions is Some { status.conditions->0 } else { Seq::empty() }
+}
+
+// The conditions that follow the three own conditions on the outer copy. When
+// synced they are the inner copy's copied conditions, stamped with the outer
+// generation the caught-up inner status was read at. Otherwise they are the
+// source's -- the outer copy's previous status -- kept with the stamp they were
+// read at, and filtered the same way: the previous status may have been written
+// by anyone, and the guarantee is proved of this function's result, not of what
+// was stored. The kept stamp can equal the current generation; Synced=False is
+// what says the tail is kept.
+pub open spec fn copied_conditions_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> Seq<SyncedConditionView> {
+    if outcome.synced() {
+        stamped(copied_conditions(conditions_of(source)), outer_generation)
+    } else {
+        copied_conditions(conditions_of(source))
+    }
+}
+
 // The status the sync controller writes on the outer copy for a snapshot at
 // generation `outer_generation`, as a function of that generation, of a source
 // status and of the outcome of the reconcile. When the outcome is Synced the
-// source is the inner copy's status: its mirrored remainder is copied and its
-// Ready and Stalled conditions are merged into the outer copy's. Otherwise the
-// source is the outer copy's previous status (status_or_default), whose mirrored
-// remainder is kept as previously reported and whose conditions are not read.
-// observed_generation and every condition carry `outer_generation`.
+// source is the inner copy's status: its mirrored remainder is copied, its Ready
+// and Stalled conditions are merged into the outer copy's, and its other
+// conditions follow those three (copied_conditions_for). Otherwise the source is
+// the outer copy's previous status (status_or_default), whose mirrored remainder
+// and copied conditions are kept as previously reported and whose own conditions
+// are not read. observed_generation and the three own conditions carry
+// `outer_generation`; a copied condition carries the outer generation at which
+// it was read off the inner copy.
 pub open spec fn outer_status_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedStatusView {
     SyncedStatusView {
         observed_generation: outer_generation,
@@ -390,7 +454,7 @@ pub open spec fn outer_status_for(outer_generation: Option<int>, source: SyncedS
             synced_condition_for(outer_generation, outcome),
             ready_condition_for(outer_generation, source, outcome),
             stalled_condition_for(outer_generation, source, outcome),
-        ]),
+        ] + copied_conditions_for(outer_generation, source, outcome)),
     }
 }
 

@@ -197,9 +197,10 @@ the status with its own `observedGeneration`.
 On the **outer** copy every status write by the sync reconciler, the ones
 that report a failure included, sets `status.observedGeneration := g`, the
 generation of the snapshot it reconciled, and the patch's generation test
-makes it land only while the copy is still at `g`. The status carries three
-conditions, `Synced`, `Ready` and `Stalled`, all with
-`condition.observedGeneration == g` (G-gen, section 3.1). `Synced` is `True`
+makes it land only while the copy is still at `g`. The status carries
+`Synced`, `Ready` and `Stalled` first, all with
+`condition.observedGeneration == g` (G-gen, section 3.1), then the copied
+conditions described below. `Synced` is `True`
 exactly when the reconcile verified `Inner.spec == σ` for the snapshot's `σ`
 and the inner status observes the mirror's current generation; the patch's
 generation test is what keeps a snapshot the outer copy has moved past from
@@ -223,18 +224,18 @@ status is, that is when `Synced` is `True`. Each is `True`, `False` or
 `Unknown` (`ready_condition_for`, `stalled_condition_for`); an inner condition
 whose status is none of the three is reported `Unknown` (`three_valued`).
 
-- `Ready`, when not synced, has reason `NotSynced` and no message. Its
-  status is `Unknown` or `False` by the outcome's reason
+- `Ready`, when not synced, has reason `NotSynced` and no message. The
+  outcome's reason decides between `Unknown` and `False`
   (`SyncOutcomeView::ready_unknown`). A reason that can arise without the
   reconcile having read a caught-up inner status for the current spec reads
   `Unknown`: `InnerConverging`, `InnerTerminating`, `InnerUnreachable`,
   `RequestFailed` and `Forbidden`. The mirror may still be running the spec,
   so `Ready` does not deny it. A reason that arises only once the reconcile
   knows no mirror of this copy runs the spec reads `False`: `ForeignObject`,
-  `StaleMirror`, `Rejected` and `CreateFailed`. The split is by reason, so
-  `Unknown` is also what a `Forbidden` or `RequestFailed` answer to the
-  `Create` after a `NotFound` reads, where the reconcile did see that no
-  mirror exists; `Unknown` is the safe side.
+  `StaleMirror`, `Rejected` and `CreateFailed`. The split is by reason. So a
+  `Forbidden` or `RequestFailed` answer to the `Create` that follows a
+  `NotFound` also reads `Unknown`, although the reconcile saw that no mirror
+  exists. `Unknown` retracts nothing.
 - `Ready`, when synced: if the inner `Stalled` condition is `True`, `False`
   with that condition's reason and message; else, if there is an inner
   `Ready` condition, its status, reason and message; else `Unknown` with
@@ -242,7 +243,7 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
   when synced and the inner `Ready` condition is `True`. The inner
   condition's own `observedGeneration` is not read: the outer stamp says the
   sync reconciler reconciled this generation, not that the inner condition
-  was computed for it; `inner_caught_up` tests the inner
+  was computed for it. `inner_caught_up` tests the inner
   `status.observedGeneration` only.
 - `Stalled`: if the outcome is permanent (`ForeignObject`, `Forbidden`,
   `Rejected`), `True` with that reason and no message; else, if synced and
@@ -254,6 +255,26 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
 
 The inner condition the merge reads is the first of its type, which is what
 the exec scan finds (`SyncedStatusView::condition`).
+
+The conditions after the three are copied from the inner copy: every inner
+condition whose type is not `Synced`, `Ready` or `Stalled`, in the inner
+order, the first of each type (`copied_conditions`), with status, reason and
+message as the inner copy wrote them (a copied status is not normalized),
+each stamped with the outer generation at which the caught-up inner status
+was read (`copied_conditions_for`); the inner condition's own stamp is
+discarded, as for `Ready`. Own types match exactly: `ready` is another type.
+An inner `Synced` condition is dropped: the three types are the sync
+controller's own. While not synced the copied conditions are kept as last
+reported, with the stamp they were read at, as the mirrored fields are.
+`Synced=False` says the tail is kept; the stamp says which generation it was
+read at, and can equal the current one. A copied condition carries no
+`lastTransitionTime`, because the controller reads no clock (issue #49,
+finding 15); the exec builder drops it by rebuilding each copy from the five
+fields of the view (pinned by
+`unit_tests::widget_sync_controller::outer_status_for`). No two conditions
+on the outer copy share a type. The demo CRDs declare `status.conditions` a
+map list keyed by `type`, so their API servers refuse any write that repeats
+one; the boot check neither requires nor checks the list type.
 
 The rest of this section describes `reconcile_core`, not a theorem. What the
 guarantee proves of a status write is (G-shape) and (G-gen) (section 3.1), which
@@ -573,7 +594,7 @@ which names the model kind of a configured kind in a cluster. `π` is
 
 Trusted beyond the specification, under `widget_sync_controller/`: one
 `external_body` function in `trusted/exec_types.rs` — `outer_status_for`,
-which builds the outer status, its three conditions included, by hand to match
+which builds the outer status, conditions included, by hand to match
 the spec's definition — four `external_body` items in `model/install.rs`, the
 `Marshallable` instances of the reconcile states, whose `marshal` and
 `unmarshal` are the eight uninterpreted spec functions the hygiene script pins
@@ -610,8 +631,10 @@ namespace, of exactly `make_inner(outer)` for an outer copy at `outer_key`
 whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `PatchStatus` of the outer copy testing uid and generation, whose status and
 `Synced`, `Ready` and `Stalled` conditions carry the tested generation as
-`observedGeneration` (G-gen), and whose condition list is those three and
-nothing else, in that order (G-shape). It sends nothing else.
+`observedGeneration` (G-gen), and whose condition list begins with those
+three, in that order, followed by conditions of other types, no two of one
+type (G-shape). It sends nothing else. (G-gen) covers the three own conditions
+only: a copied condition carries the generation it was read at.
 
 (G-shape) also relates the three to each other. `Synced` is `True` or `False`;
 `Ready` and `Stalled` are each `True`, `False` or `Unknown`. `Ready` is `True`
@@ -621,15 +644,16 @@ only when `Synced` is, and never at the same time as `Stalled`. `Synced` is
 say so rather than reporting one: `Ready` is `Unknown` or `False` with reason
 `NotSynced`, `Stalled` repeats `Synced`'s reason, and neither carries a
 message. `Synced`'s reason names the outcome, and the outcome decides which
-of `Unknown` and `False` (section 1.4), so (G-shape) pins it: `Ready` is
+of `Unknown` and `False` `Ready` reads (section 1.4), so (G-shape) pins it: `Ready` is
 `Unknown` exactly under the five reasons of `reason_reads_ready_unknown`
 (`lemma_ready_unknown_by_reason`).
 
 What (G-shape) never does is relate a reported condition to the inner cluster.
-The mirrored remainder is unconstrained, and so are the `Ready` and `Stalled`
-text where `Synced` is `True` -- the path that carries the inner status, and so
-the path that matters. Tying either to the status the mirror held needs the
-`Get` response that produced it, which no state keeps, so a reconciler reporting
+The mirrored remainder, the copied conditions, and the `Ready` and `Stalled`
+text where `Synced` is `True` are all unconstrained. That last is the path
+that carries the inner status, and so the path that matters. Tying any of
+them to the status the mirror held needs the `Get` response that produced
+it, which no state keeps, so a reconciler reporting
 `Synced` and `Ready` over invented mirrored fields still satisfies the
 guarantee. Issue #49 finding 2 is open.
 
@@ -682,9 +706,11 @@ inner_settled(outer, settled)(s)  := spec_synced(outer)(s) && inner_caught_up(in
 status_synced(outer, settled)(s)  := the outer copy's status == outer_status_for(its generation, settled, Synced)
 
 outer_status_for(g, src, c) := { observedGeneration: g, π: π(src),
-                                 conditions: [Synced(g, c), Ready(g, src, c), Stalled(g, src, c)] }
+                                 conditions: [Synced(g, c), Ready(g, src, c), Stalled(g, src, c)] ++ copied(g, src, c) }
     // src is the inner status when c is Synced (its conditions are read), else the previous outer status;
-    // the three conditions are defined in section 1.4; every one carries observedGeneration g
+    // the three own conditions are defined in section 1.4; each of the three carries observedGeneration g;
+    // copied(g, src, Synced) is src's conditions of other types, the first of each type, stamped g;
+    // copied(g, src, c), c ≠ Synced, is the same filter over src, the previous outer status, with stamps kept
 
 mirror_object_is(k, a, u)(s) := an object with uid u at k is a mirror pointing at a
 object_is_gone(k, u)(s)      := no object with uid u is at k

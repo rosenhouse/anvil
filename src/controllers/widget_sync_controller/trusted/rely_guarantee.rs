@@ -174,8 +174,8 @@ pub open spec fn widget_janitor_rely(k: SyncKind, other_id: int) -> StatePred<Cl
 // The status patch the sync reconciler sends for the outer copy at `outer_key`:
 // it tests the copy's uid and generation, (G-gen) the status it writes carries
 // observedGeneration equal to the tested generation, as do its Synced, Ready and
-// Stalled conditions, and (G-shape) those three are the whole condition list and
-// agree with each other.
+// Stalled conditions, and (G-shape) those three head the condition list, agree
+// with each other, and are followed only by conditions of other types.
 pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, outer_key: ObjectRef) -> bool {
     let status = unmarshal_status(req.status);
     let conds = status->Ok_0->0.conditions->0;
@@ -186,6 +186,9 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& req.tests.generation is Some
     &&& status is Ok
     &&& status->Ok_0 is Some
+    // (G-gen) covers the status and the three own conditions only. A copied
+    // condition keeps the generation at which it was read off the inner copy;
+    // the guarantee says nothing about it.
     &&& status->Ok_0->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.synced_condition() is Some
     &&& status->Ok_0->0.synced_condition()->0.observed_generation == req.tests.generation
@@ -193,22 +196,29 @@ pub open spec fn sync_status_patch_req(k: SyncKind, req: PatchStatusRequest, out
     &&& status->Ok_0->0.ready_condition()->0.observed_generation == req.tests.generation
     &&& status->Ok_0->0.stalled_condition() is Some
     &&& status->Ok_0->0.stalled_condition()->0.observed_generation == req.tests.generation
-    // (G-shape) Synced, Ready and Stalled are the status's only conditions, in that
-    // order, and they agree with each other. Synced is True or False; Ready and
-    // Stalled are each True, False or Unknown. Ready is True only when Synced is,
-    // and never while Stalled is True.
+    // (G-shape) Synced, Ready and Stalled are the status's first three conditions,
+    // in that order; the conditions after them are of no own type and no two of
+    // one type, so a reader finds each type at most once. The three agree with
+    // each other: Synced is True or False; Ready and Stalled are each True, False
+    // or Unknown; Ready is True only when Synced is, and never while Stalled is
+    // True.
     //
     // The clause relates the reported conditions to each other, never to the inner
-    // cluster. The mirrored remainder is unconstrained, and so are the Ready and
-    // Stalled text when Synced is True -- which is the path that matters. Tying
-    // either to the status the mirror held needs the Get response that produced it,
-    // which no state keeps, so #49 finding 2's reconciler, reporting Synced and
-    // Ready over invented mirrored fields, still satisfies this guarantee (3.1).
+    // cluster. The mirrored remainder, the copied conditions, and the Ready and
+    // Stalled text when Synced is True are all unconstrained; that last is the
+    // path that carries the inner status, and so the path that matters. Tying any
+    // of them to the status the mirror held needs the Get response that produced
+    // it, which no state keeps, so #49 finding 2's reconciler, reporting Synced
+    // and Ready over invented mirrored fields, still satisfies this guarantee
+    // (3.1).
     &&& status->Ok_0->0.conditions is Some
-    &&& conds.len() == 3
+    &&& conds.len() >= 3
     &&& conds[0].type_ == synced_condition_type()
     &&& conds[1].type_ == ready_condition_type()
     &&& conds[2].type_ == stalled_condition_type()
+    &&& forall |i: int| 3 <= i < conds.len() ==> !is_own_condition_type(#[trigger] conds[i].type_)
+    &&& forall |i: int, j: int| #![trigger conds[i].type_, conds[j].type_]
+            3 <= i < j < conds.len() ==> conds[i].type_ != conds[j].type_
     &&& (conds[0].status == condition_true() || conds[0].status == condition_false())
     &&& (conds[1].status == condition_true() || conds[1].status == condition_false() || conds[1].status == condition_unknown())
     &&& (conds[2].status == condition_true() || conds[2].status == condition_false() || conds[2].status == condition_unknown())

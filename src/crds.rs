@@ -216,8 +216,14 @@ pub struct WidgetStatus {
     /// Mirrored from the inner copy while Synced is True; otherwise kept as last reported.
     #[serde(rename = "observedCount")]
     pub observed_count: Option<i32>,
-    /// On an outer copy, exactly Synced, Ready and Stalled, all with observedGeneration
-    /// equal to the generation the sync controller reconciled. Synced is True when the
+    /// On an outer copy: Synced, Ready and Stalled first, all with observedGeneration
+    /// equal to the generation the sync controller reconciled; then the inner copy's
+    /// conditions of other types, in the inner order, the first of each type, with
+    /// status, reason and message as the inner copy wrote them and observedGeneration
+    /// equal to the outer generation at which it was read (while Synced is False they
+    /// are kept as last reported, with the stamp they were read at). An inner Synced
+    /// condition is dropped. No condition carries lastTransitionTime. The rules:
+    /// doc/widget_sync_design.md, section 1.4. Synced is True when the
     /// spec is in the inner cluster and the inner status observes it; otherwise False
     /// with reason InnerConverging, InnerTerminating, StaleMirror, ForeignObject, or,
     /// after a failed request, Forbidden, InnerUnreachable, CreateFailed, Rejected or
@@ -242,11 +248,13 @@ pub struct WidgetStatus {
     Clone, Debug, Default, serde::Deserialize, serde::Serialize, schemars::JsonSchema, PartialEq,
 )]
 pub struct WidgetCondition {
-    /// Synced, Ready or Stalled on an outer copy; whatever the inner implementation
-    /// reports on an inner copy (the sync controller reads Ready and Stalled).
+    /// On an outer copy: Synced, Ready or Stalled, or a type copied from the inner copy.
+    /// On an inner copy: whatever the inner implementation reports; the sync controller
+    /// merges Ready and Stalled, drops Synced, and copies the rest.
     #[serde(rename = "type")]
     pub type_: String,
-    /// On an outer copy, True, False or Unknown; Synced is never Unknown. On an inner
+    /// On an outer copy: Synced is True or False; Ready and Stalled are True, False or
+    /// Unknown; a copied condition's status is the inner copy's, as written. On an inner
     /// copy, whatever the inner implementation writes.
     pub status: String,
     /// The generation of the object the condition was computed for.
@@ -323,13 +331,40 @@ impl Default for Gadget {
 /// installed, and exactly what `widget_sync_controller export` prints and what
 /// the manifests under deploy/widget_sync hold (crd_manifest_tests).
 ///
-/// The derive cannot express the CEL immutability rule on the selector field,
-/// so it is put back here. Without it `export` printed a Widget CRD that this
-/// very binary refuses at boot for the missing rule, which is a trap for
-/// anyone who installs what `export` prints.
+/// The derive cannot express the CEL immutability rule on the selector field
+/// or the map list type on `status.conditions`, so both are added here.
+/// Without the rule, `export` would print a Widget CRD that this binary
+/// refuses at boot.
 pub fn demo_crds(
 ) -> Vec<k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition> {
-    vec![widget_crd(), <Gadget as kube::CustomResourceExt>::crd()]
+    vec![with_conditions_as_map(widget_crd()), with_conditions_as_map(<Gadget as kube::CustomResourceExt>::crd())]
+}
+
+/// `status.conditions` as a map list keyed by `type`, set on every version the
+/// CRD serves. A server-side apply by another writer then merges by condition
+/// type instead of replacing the list, and the API server rejects a write with
+/// two conditions of one type -- which the sync controller never sends: its own
+/// three types are distinct and the conditions it copies are the first of each
+/// type (widget_sync_controller::trusted::spec_types::copied_conditions). The
+/// controller's own write is a JSON patch that replaces the list; the map type
+/// does not make it merge.
+fn with_conditions_as_map(
+    mut crd: k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition,
+) -> k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition {
+    for version in crd.spec.versions.iter_mut() {
+        let conditions = version
+            .schema
+            .as_mut()
+            .and_then(|schema| schema.open_api_v3_schema.as_mut())
+            .and_then(|schema| schema.properties.as_mut())
+            .and_then(|properties| properties.get_mut("status"))
+            .and_then(|status| status.properties.as_mut())
+            .and_then(|properties| properties.get_mut("conditions"))
+            .expect("the derived CRD declares status.conditions");
+        conditions.x_kubernetes_list_type = Some("map".to_string());
+        conditions.x_kubernetes_list_map_keys = Some(vec!["type".to_string()]);
+    }
+    crd
 }
 
 /// The name of the Widget field that selects an object's inner cluster, and

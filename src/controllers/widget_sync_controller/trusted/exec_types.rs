@@ -6,7 +6,7 @@
 // unmarshal, marshal, has_kind and api_resource are the trusted boundary of the
 // shape; the registry (exec::registry) is what ties a runtime kind and a cluster
 // to a model kind. What is left here is outer_status_for, which builds the outer
-// status, its three conditions included, by hand to match the spec's definition.
+// status, conditions included, by hand to match the spec's definition.
 use crate::kubernetes_api_objects::exec::{api_resource::*, registry::*, synced_object::*};
 use crate::kubernetes_api_objects::spec::api_resource::ClusterIdView;
 use crate::kubernetes_api_objects::spec::model_kind::*;
@@ -209,12 +209,15 @@ impl SyncOutcome {
 }
 
 // The status the sync controller writes on the outer copy, built by hand to
-// match spec_types::outer_status_for: the mirrored remainder of `source`, and the
-// three conditions, whose inner Ready and Stalled are the first of each type,
-// which is the one the spec's condition() names. `source` absent is the status
-// the outer copy has never carried, whose remainder is default_status_rest().
-// The body is unverified; unit_tests::widget_sync_controller::outer_status_for
-// pins it to the spec case by case.
+// match spec_types::outer_status_for. It carries the mirrored remainder of
+// `source`, the three own conditions, and then the source's other conditions,
+// the first of each type (spec_types::copied_conditions). The inner Ready and
+// Stalled it merges are the first of each type, the one the spec's condition()
+// names. A copied condition is restamped with the outer generation when synced
+// and keeps its stamp otherwise. `source` absent is the status the outer copy
+// has never carried, whose remainder is default_status_rest(). The body is
+// unverified; unit_tests::widget_sync_controller::outer_status_for pins it to
+// the spec case by case.
 #[verifier(external_body)]
 pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedStatus>, outcome: &SyncOutcome) -> (status: SyncedStatus)
     ensures status@ == spec_types::outer_status_for(
@@ -257,13 +260,25 @@ pub fn outer_status_for(outer_generation: Option<i64>, source: &Option<SyncedSta
     } else {
         make("Stalled", "False".to_string(), Some(reason.clone()), None)
     };
+    // spec_types::copied_conditions_for. Each copy is rebuilt from the viewed
+    // fields, so it carries nothing else (no lastTransitionTime).
+    let mut written = vec![synced_condition, ready_condition, stalled_condition];
+    let own_type = |type_: &str| type_ == "Synced" || type_ == "Ready" || type_ == "Stalled";
+    for c in conditions.iter() {
+        let type_ = c.type_();
+        if own_type(&type_) || written[3..].iter().any(|d| d.type_() == type_) {
+            continue;
+        }
+        let generation = if synced { outer_generation } else { c.observed_generation() };
+        written.push(SyncedCondition::new(type_, c.status(), generation, c.reason(), c.message()));
+    }
     let rest = match source {
         Some(s) => s.rest(),
         // The mirrored remainder of a status that was never written: the model's
         // default_status_rest().
         None => RawValue::empty_rest(),
     };
-    SyncedStatus::new(outer_generation, Some(vec![synced_condition, ready_condition, stalled_condition]), rest)
+    SyncedStatus::new(outer_generation, Some(written), rest)
 }
 
 }

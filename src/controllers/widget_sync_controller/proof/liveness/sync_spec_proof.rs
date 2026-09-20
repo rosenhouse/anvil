@@ -516,8 +516,8 @@ pub proof fn lemma_sync_init_leads_to_get_req_in_flight(k: SyncKind, b: Binding,
         spec.entails(lift_state(st_sync_init(controller_id, outer.object_ref()))
             .leads_to(lift_state(st_get_req_in_flight(k, controller_id, outer)))),
 {
-    // Hidden to keep the step case split within the rlimit: the Init step writes
-    // no status, and unfolding the builders in every arm is what exceeds it.
+    // Hidden so the step case split stays within the rlimit. The Init step
+    // writes no status; unfolding the builders in every arm is what exceeds it.
     hide(ready_condition_for);
     hide(stalled_condition_for);
     let key = outer.object_ref();
