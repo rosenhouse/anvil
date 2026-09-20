@@ -244,17 +244,6 @@ pub open spec fn handle_get_request(req: GetRequest, s: APIServerState) -> GetRe
     }
 }
 
-// A List with a metadata.name field selector: at most the one object of that
-// name. Not inlined, so that the handler below stays as small as it is where
-// it is inlined, in every unfolding of the API server's transition.
-pub open spec fn handle_list_request_by_name(req: ListRequest, s: APIServerState) -> ListResponse {
-    ListResponse{res: Ok(s.resources.values().filter(|o: DynamicObjectView| {
-        &&& o.object_ref().namespace == req.namespace
-        &&& o.object_ref().kind == req.kind
-        &&& o.object_ref().name == req.name->0
-    }).to_seq())}
-}
-
 #[verifier(inline)]
 pub open spec fn handle_list_request(req: ListRequest, s: APIServerState) -> ListResponse {
     // s.resources.values() returns the set of objects in s.resources
@@ -266,7 +255,12 @@ pub open spec fn handle_list_request(req: ListRequest, s: APIServerState) -> Lis
             &&& o.object_ref().kind == req.kind
         }).to_seq())}
     } else {
-        handle_list_request_by_name(req, s)
+        // A metadata.name field selector: at most the one object of that name.
+        ListResponse{res: Ok(s.resources.values().filter(|o: DynamicObjectView| {
+            &&& o.object_ref().namespace == req.namespace
+            &&& o.object_ref().kind == req.kind
+            &&& o.object_ref().name == req.name->0
+        }).to_seq())}
     }
 }
 
