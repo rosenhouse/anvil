@@ -585,8 +585,9 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                                     assert(inner.metadata.uid is Some);
                                 }
                             },
-                            // After a failed Create or Patch of the mirror, the failure is
-                            // being reported.
+                            // After a failed Create of the mirror, the failure is being
+                            // reported. After a Patch, either that or the spec the inner
+                            // cluster stored instead is being written into the status.
                             WidgetSyncStepView::AfterCreateInner => {
                                 assert(resp_msg_opt is Some);
                                 assert(state_prime.reconcile_step is AfterReportError);
@@ -594,7 +595,7 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                             },
                             WidgetSyncStepView::AfterPatchInner => {
                                 assert(resp_msg_opt is Some);
-                                assert(state_prime.reconcile_step is AfterReportError);
+                                assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
                                 assert(pending_status_patch_is_merged(k, msg, outer));
                             },
                             // The Delete of the mirror and the Update of the finalizers

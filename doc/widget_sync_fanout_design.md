@@ -234,12 +234,13 @@ in the decoder, before validation.
 
 Only the top level of `status` and the conditions item are inspected.
 
-Still unchecked: a structural schema prunes an undeclared field on write, so a
-mirrored remainder the outer CRD does not declare is silently dropped unless
-`status` carries `x-kubernetes-preserve-unknown-fields`. Which of the two a
-deployment should be held to is a decision, not an oversight — requiring the
-setting would refuse a CRD that declares its mirrored fields by hand, as both
-demo CRDs do. An inner cluster is not checked at all: not for serving the kind, not for
+A structural schema prunes an undeclared field on write, so a mirrored
+remainder the outer CRD does not declare is dropped unless `status` carries
+`x-kubernetes-preserve-unknown-fields`. The boot check warns about a status
+that declares neither, and refuses nothing: requiring the setting would refuse
+a CRD that declares its mirrored fields by hand, as both demo CRDs do, and the
+controller cannot tell a complete declaration from a missing one (issue #49,
+finding 4). An inner cluster is not checked at all: not for serving the kind, not for
 schema parity. Parity is an operational assumption.
 
 Assumed for this pass: fields are not removed from a CRD while the

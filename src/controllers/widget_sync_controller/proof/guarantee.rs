@@ -471,8 +471,8 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
 
 // The outcomes under which Ready reads Unknown are exactly those whose reason
 // reason_reads_ready_unknown names. Every reason that reads Unknown differs in
-// length from every reason that does not, except ForeignObject and
-// RequestFailed, which differ in their first character.
+// length from every reason that does not, except RequestFailed, which differs
+// in its first character from ForeignObject and SpecRewritten.
 pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     ensures outcome.ready_unknown() <==> reason_reads_ready_unknown(outcome.reason()),
 {
@@ -485,6 +485,7 @@ pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     reveal_strlit("InnerUnreachable");
     reveal_strlit("CreateFailed");
     reveal_strlit("Rejected");
+    reveal_strlit("SpecRewritten");
     reveal_strlit("RequestFailed");
     assert("Synced"@.len() == 6);
     assert("InnerConverging"@.len() == 15);
@@ -495,8 +496,10 @@ pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     assert("InnerUnreachable"@.len() == 16);
     assert("CreateFailed"@.len() == 12);
     assert("Rejected"@.len() == 8);
+    assert("SpecRewritten"@.len() == 13);
     assert("RequestFailed"@.len() == 13);
     assert("ForeignObject"@[0] != "RequestFailed"@[0]);
+    assert("SpecRewritten"@[0] != "RequestFailed"@[0]);
 }
 
 // No outcome but Synced reports the reason Synced. Each reason is a distinct
@@ -513,6 +516,7 @@ pub proof fn lemma_synced_is_the_only_synced_reason(outcome: SyncOutcomeView)
     reveal_strlit("InnerUnreachable");
     reveal_strlit("CreateFailed");
     reveal_strlit("Rejected");
+    reveal_strlit("SpecRewritten");
     reveal_strlit("RequestFailed");
     assert("Synced"@.len() != "InnerConverging"@.len());
     assert("Synced"@.len() != "InnerTerminating"@.len());
@@ -522,6 +526,7 @@ pub proof fn lemma_synced_is_the_only_synced_reason(outcome: SyncOutcomeView)
     assert("Synced"@.len() != "InnerUnreachable"@.len());
     assert("Synced"@.len() != "CreateFailed"@.len());
     assert("Synced"@.len() != "Rejected"@.len());
+    assert("Synced"@.len() != "SpecRewritten"@.len());
     assert("Synced"@.len() != "RequestFailed"@.len());
 }
 

@@ -339,11 +339,13 @@ impl SyncOutcomeView {
 
     // A case the reconciler cannot get out of by itself: a foreign object it
     // refuses to adopt, a credential the inner cluster refuses, a request it
-    // rejects, an object that names no inner cluster.
+    // rejects, an object that names no inner cluster, a Create answered NotFound
+    // because the inner namespace is missing and nothing here creates it.
     pub open spec fn permanent(self) -> bool {
         match self {
             SyncOutcomeView::ForeignObject => true,
-            SyncOutcomeView::Failed(failure) => failure is Forbidden || failure is Rejected,
+            SyncOutcomeView::Failed(failure) => failure is Forbidden || failure is Rejected || failure is CreateFailed
+                || failure is SpecRewritten,
             _ => false,
         }
     }
@@ -545,6 +547,10 @@ pub enum FailureReasonView {
     CreateFailed,
     // The request was rejected as invalid, or the object names no inner cluster.
     Rejected,
+    // The Patch of the mirror's spec landed and the inner cluster stored a
+    // different spec: admission or defaulting there rewrote it. Patching again
+    // would only repeat that, so the outcome is permanent.
+    SpecRewritten,
     // Anything else.
     RequestFailed,
 }
@@ -556,6 +562,7 @@ impl FailureReasonView {
             FailureReasonView::InnerUnreachable => "InnerUnreachable"@,
             FailureReasonView::CreateFailed => "CreateFailed"@,
             FailureReasonView::Rejected => "Rejected"@,
+            FailureReasonView::SpecRewritten => "SpecRewritten"@,
             FailureReasonView::RequestFailed => "RequestFailed"@,
         }
     }

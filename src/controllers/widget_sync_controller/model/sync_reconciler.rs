@@ -283,11 +283,23 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                 error
             } else {
                 let res = extract_some_k_patch_resp_view(resp_o);
-                if res is Ok {
-                    done
-                } else {
+                if res is Err {
                     // The Patch failed: report why, then requeue.
                     report_error(k, outer, failure_status(outer, res->Err_0, false))
+                } else {
+                    let unmarshalled = unmarshal(inner_key(k, outer).kind, res->Ok_0);
+                    if unmarshalled is Err {
+                        error
+                    } else if unmarshalled->Ok_0.spec != outer.spec {
+                        // The Patch landed and the inner cluster stored another
+                        // spec: admission or defaulting there rewrote it, and
+                        // patching again would only repeat that. The model's API
+                        // server stores what a Patch writes, so this is reachable
+                        // only against a real one.
+                        write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::SpecRewritten)))
+                    } else {
+                        done
+                    }
                 }
             }
         },

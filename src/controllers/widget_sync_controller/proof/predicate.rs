@@ -60,6 +60,7 @@ pub open spec fn sync_step_after_init() -> spec_fn(ReconcileLocalState) -> bool 
         ||| step == WidgetSyncStepView::AfterGetInner
         ||| step == WidgetSyncStepView::AfterAddFinalizer
         ||| step == WidgetSyncStepView::AfterListMirror
+        ||| step == WidgetSyncStepView::AfterRemoveFinalizer
         ||| step == WidgetSyncStepView::AfterPatchOuterStatus
         ||| step == WidgetSyncStepView::AfterReportError
         ||| step == WidgetSyncStepView::Done
@@ -110,6 +111,19 @@ pub open spec fn sync_step_after_get_inner() -> spec_fn(ReconcileLocalState) -> 
 // the Patch of the mirror: done, or reporting the failure before ending in
 // Error. The Delete of the mirror and the Update of the outer copy's finalizers
 // end in Done or Error, which this set covers too.
+// Every step the sync reconciler can be at right after answering the Patch of
+// the mirror's spec: the Patch of the outer copy's status when the inner cluster
+// stored another spec, the failure report, or done.
+pub open spec fn sync_step_after_patch_inner() -> spec_fn(ReconcileLocalState) -> bool {
+    |s: ReconcileLocalState| {
+        let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;
+        ||| step == WidgetSyncStepView::AfterPatchOuterStatus
+        ||| step == WidgetSyncStepView::AfterReportError
+        ||| step == WidgetSyncStepView::Done
+        ||| step == WidgetSyncStepView::Error
+    }
+}
+
 pub open spec fn sync_step_after_mirror_write() -> spec_fn(ReconcileLocalState) -> bool {
     |s: ReconcileLocalState| {
         let step = WidgetSyncReconcileState::unmarshal(s).unwrap().reconcile_step;

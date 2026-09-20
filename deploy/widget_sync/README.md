@@ -62,10 +62,11 @@ On the outer copy:
   current spec and `False` where it knows no mirror runs that spec. The
   `Ready` column of the table below says which.
 - Condition `Stalled`: `True` with the controller's own reason in a permanent
-  case (`ForeignObject`, `Forbidden`, `Rejected`). Otherwise, while `Synced`
-  is `True` and the inner copy has a `Stalled` condition, that condition
-  (same normalization as `Ready`). Otherwise `False` with `Synced`'s reason,
-  so a synced mirror with no `Stalled` condition reads `Stalled=False/Synced`.
+  case (`ForeignObject`, `Forbidden`, `Rejected`, `CreateFailed`,
+  `SpecRewritten`). Otherwise, while `Synced` is `True` and the inner copy
+  has a `Stalled` condition, that condition (same normalization as `Ready`).
+  Otherwise `False` with `Synced`'s reason, so a synced mirror with no
+  `Stalled` condition reads `Stalled=False/Synced`.
   `Ready` and `Stalled` are never both `True`.
 - The conditions after those three: every condition the inner copy carries
   of another type, in the inner order, the first of each type, with status,
@@ -105,8 +106,9 @@ A `False` `Synced` condition carries one of these reasons. The `Stalled` and
 | `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | `True` | `False` | the object is removed in the inner cluster |
 | `Forbidden` | the inner cluster refused a request for lack of authorization | `True` | `Unknown` | the credential's RBAC is fixed |
 | `InnerUnreachable` | the object's binding has no bound inner cluster (no kubeconfig Secret, or one that does not parse), or a request to it timed out or failed server-side; the inner cluster is not answering | `False` | `Unknown` | the inner cluster answers again, or its Secret appears |
-| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | `False` | `False` | the namespace is created |
+| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing, and nothing here creates it | `True` | `False` | the namespace is created |
 | `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | `True` | `False` | the schema or the object is fixed |
+| `SpecRewritten` | the spec written to the mirror came back different: admission or defaulting in the inner cluster rewrote it, and writing it again would only repeat that | `True` | `False` | the inner cluster stops rewriting the spec |
 | `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | `False` | `Unknown` | the next reconcile |
 
 After a failed request the controller writes the status once and requeues; that
@@ -293,6 +295,14 @@ this one. Without that check the API server would reject every status write with
 422 and nothing would report it: the object would carry no status at all, the
 only sign one WARN per attempt. A required field that declares a `default` is
 accepted, because defaulting runs before validation.
+
+A status that declares nothing beyond `observedGeneration` and `conditions`,
+and does not set `x-kubernetes-preserve-unknown-fields`, is **warned about at
+boot** rather than refused: everything the inner implementation reports past
+the conditions is pruned on write, so the outer copy shows conditions and
+nothing else. It is a warning because a CRD that declares its mirrored fields
+by hand is right to, as both demo CRDs do, and the controller cannot know what
+the inner side reports.
 
 An inner cluster is not checked at all: not for serving the kind, not for
 schema parity. Parity is an operational assumption. So is this, for now: **fields are

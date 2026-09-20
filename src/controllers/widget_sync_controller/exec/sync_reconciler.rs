@@ -267,10 +267,20 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
                 return (at_step(WidgetSyncStep::Error), None);
             }
             let patch_result = extract_some_k_patch_resp!(resp_o);
-            if patch_result.is_ok() {
-                return (at_step(WidgetSyncStep::Done), None);
+            if patch_result.is_err() {
+                return report_error(kind, outer, failure_status(kind, outer, &patch_result.unwrap_err(), false));
             }
-            return report_error(kind, outer, failure_status(kind, outer, &patch_result.unwrap_err(), false));
+            let inner_cluster = ClusterId::Remote(binding_of(kind, outer));
+            let unmarshalled = SyncedObject::unmarshal(&kind.entry, &inner_cluster, patch_result.unwrap());
+            if unmarshalled.is_err() {
+                return (at_step(WidgetSyncStep::Error), None);
+            }
+            let patched = unmarshalled.unwrap();
+            if !patched.spec().eq(&outer.spec()) {
+                // The inner cluster stored another spec than the one written.
+                return write_outer_status_or_done(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::SpecRewritten)));
+            }
+            return (at_step(WidgetSyncStep::Done), None);
         },
         WidgetSyncStep::AfterListMirror => {
             if !is_some_k_list_resp!(resp_o) {

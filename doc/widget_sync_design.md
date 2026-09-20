@@ -116,7 +116,8 @@ Init
       ├─ Found, label and parent-uid present, parent-uid ≠ u → status StaleMirror → Done
       ├─ Found, label or parent-uid missing → status ForeignObject → Done
       ├─ Found, ours, spec ≠ σ → Patch Inner {test uid, test generation; add /spec := σ}
-      │     ├─ Ok → Done
+      │     ├─ Ok, the patched object carries σ → Done
+      │     ├─ Ok, it carries another spec → status SpecRewritten → Done
       │     └─ error e → report Failed(e)
       ├─ Found, ours, spec == σ, Inner.status.observedGeneration == Inner.metadata.generation
       │     → status Synced, from Inner.status → Done
@@ -151,9 +152,24 @@ and differ only in the message, and the shim hands a failed test to the
 reconciler as `Conflict`, so a race on the mirror reads `RequestFailed` and
 is retried, while `Rejected` is reserved for a schema or webhook rejection.
 The shim also maps a connection failure or a client-side request timeout to
-`Timeout`, so a partition from the inner cluster reads `InnerUnreachable`. `ForeignObject`, `Forbidden` and `Rejected` are the
-permanent cases: nothing the reconciler does again changes the answer, and
-`Stalled` is `True` for them (section 1.4).
+`Timeout`, so a partition from the inner cluster reads `InnerUnreachable`.
+`ForeignObject`, `Forbidden`, `Rejected`, `CreateFailed` and `SpecRewritten`
+are the permanent cases: nothing the reconciler does again changes the answer,
+and `Stalled` is `True` for them (section 1.4). `CreateFailed` is one of them
+because nothing here creates the inner namespace, so the Create fails the same
+way until an operator does (issue #49, finding 10); the reconcile still
+retries on its requeue.
+
+**A rewritten spec is reported, not written again.** The Patch response
+carries the object as stored. A spec that is not the one the patch wrote means
+the inner cluster rewrote it: a mutating webhook, a CRD default, a
+canonicalization. Patching again would get the same answer every time, with a
+write on every reconcile and nothing said about it, so the outcome is
+`SpecRewritten` (issue #49, finding 5). The model's API server stores what a
+Patch writes, so this branch is reachable only against a real one: no theorem
+mentions it, and R1 is stated for a server that keeps what it is given.
+Whether to tolerate such a difference instead, by comparing only the fields the
+controller wrote, is the analysis that finding leaves open.
 
 **Patches test uid and generation.** A patch carries no `resourceVersion`, so
 writes by other actors to fields the patch does not test (inner status, labels,
@@ -238,10 +254,10 @@ landing.
 > fields are the inner implementation's status for it.
 
 Otherwise `Synced` is `False` with reason `InnerConverging`,
-`InnerTerminating`, `StaleMirror`, `ForeignObject`, or, after a failed
-request, `Forbidden`, `InnerUnreachable`, `CreateFailed`, `Rejected` or
-`RequestFailed` (section 1.2); the mirrored fields keep their last reported
-values. An inner implementation that never sets `observedGeneration` never
+`InnerTerminating`, `StaleMirror`, `ForeignObject`, `SpecRewritten`, or,
+after a failed request, `Forbidden`, `InnerUnreachable`, `CreateFailed`,
+`Rejected` or `RequestFailed` (section 1.2); the mirrored fields keep their
+last reported values. An inner implementation that never sets `observedGeneration` never
 reaches `Synced=True`.
 
 `Ready` and `Stalled` combine the sync reconciler's own outcome with the inner
@@ -258,7 +274,8 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
   `RequestFailed` and `Forbidden`. The mirror may still be running the spec,
   so `Ready` does not deny it. A reason that arises only once the reconcile
   knows no mirror of this copy runs the spec reads `False`: `ForeignObject`,
-  `StaleMirror`, `Rejected` and `CreateFailed`. The split is by reason. So a
+  `StaleMirror`, `Rejected`, `CreateFailed` and `SpecRewritten`. The split is
+  by reason. So a
   `Forbidden` or `RequestFailed` answer to the `Create` that follows a
   `NotFound` also reads `Unknown`, although the reconcile saw that no mirror
   exists. `Unknown` retracts nothing.
@@ -272,9 +289,10 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
   was computed for it. `inner_caught_up` tests the inner
   `status.observedGeneration` only.
 - `Stalled`: if the outcome is permanent (`ForeignObject`, `Forbidden`,
-  `Rejected`), `True` with that reason and no message; else, if synced and
-  the inner copy has a `Stalled` condition, its status, reason and message;
-  else `False` with the outcome's reason and no message.
+  `Rejected`, `CreateFailed`, `SpecRewritten`), `True` with that reason and
+  no message; else, if synced and the inner copy has a `Stalled` condition,
+  its status, reason and message; else `False` with the outcome's reason and
+  no message.
 - `Ready` and `Stalled` are never both `True`
   (`lemma_ready_and_stalled_exclusive`), which (G-shape) carries to a reader of
   the patch. It is not lifted to the stored outer copy.
