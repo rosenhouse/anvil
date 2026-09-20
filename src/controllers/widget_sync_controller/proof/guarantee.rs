@@ -177,8 +177,9 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
 
 // The steps at which the sync reconciler is working on the mirror: the Get of the
 // mirror and the two writes that can follow it. The Init step reaches AfterGetInner
-// only when its snapshot's selector names a cluster (the other outcome of Init is
-// the status write that reports the rejection), and the snapshot of a reconcile
+// only when its snapshot's selector names a cluster (a live copy that names none
+// has the rejection written into its status; a terminating one is released), and
+// the snapshot of a reconcile
 // never changes, so at these three steps the selection is a name. This is what the
 // Create of a mirror needs: without it, an outer copy naming no cluster and one
 // naming the empty cluster name are indistinguishable, which is what binding_of
@@ -852,8 +853,8 @@ proof fn lemma_sync_new_request_is_guaranteed(
                 },
                 APIRequest::UpdateRequest(update_req) => {
                     if outer.metadata.deletion_timestamp is Some {
-                        // The release of a terminating copy with no inner cluster
-                        // this controller can address.
+                        // This releases a terminating copy this controller cannot
+                        // address.
                         assert(update_req == sync_reconciler::outer_finalizer_update(outer, false));
                         lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, false);
                     } else {

@@ -414,17 +414,13 @@ pub fn check_kind_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether this kind's status schema would prune what the controller mirrors
-/// back: it declares nothing beyond the two fields the controller itself always
-/// writes, and it does not preserve unknown fields. A structural schema drops
-/// what it does not declare on write, so everything the inner implementation
-/// reports past the conditions is lost, and the outer copy shows conditions and
-/// nothing else.
-///
-/// This is a warning and not a shape error. A CRD that declares its mirrored
-/// fields by hand is right to, and both demo CRDs do; the controller cannot know
-/// what the inner side reports, so it cannot tell a complete declaration from a
-/// missing one. Issue #49, finding 4.
+/// Whether this kind's status schema declares nothing beyond the two fields the
+/// controller itself always writes and does not preserve unknown fields. A
+/// structural schema drops what it does not declare on write, so such a status
+/// keeps no mirrored remainder at all. It is one shape, not a test for pruning:
+/// a status declaring one unrelated field is not reported here and still prunes
+/// everything the inner side writes. Why it is a warning and not a shape error:
+/// `doc/widget_sync_fanout_design.md`, section 2.2.
 pub fn status_prunes_the_remainder(crd: &CustomResourceDefinition, kind: &KindConfig) -> bool {
     let schema = crd
         .spec
@@ -459,9 +455,9 @@ pub async fn check_crd(client: &Client, kind: &KindConfig, plural: &str) -> Resu
     check_shape(&crd, kind).map_err(|errors| CrdCheckError::Shape { name: name.clone(), errors })?;
     if status_prunes_the_remainder(&crd, kind) {
         warn!(
-            "{}: status declares only {} and does not set x-kubernetes-preserve-unknown-fields, \
-             so every other status field the inner implementation reports is pruned on write and \
-             the outer copy will show conditions and nothing else",
+            "{}: status declares only {} and does not set x-kubernetes-preserve-unknown-fields; \
+             a structural schema prunes the rest, so the outer copy will show conditions and \
+             nothing else",
             name,
             STATUS_ALWAYS_WRITTEN.join(" and ")
         );

@@ -158,8 +158,8 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterAddFinalizer), sync_step_after_mirror_write());
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterRemoveFinalizer), sync_step_after_mirror_write());
 
-    // The Patch of the mirror's spec ends the same way, except that a spec the
-    // inner cluster rewrote is written into the outer copy's status first.
+    // The Patch of the mirror's spec ends the same way, except that a rewritten
+    // spec is reported in the outer copy's status first.
     or_leads_to_combine_and_equality!(
         spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_patch_inner())),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterPatchOuterStatus)),
@@ -207,12 +207,12 @@ pub proof fn sync_reconcile_eventually_terminates_on_key(k: SyncKind, b: Binding
     );
     cluster.lemma_from_some_state_to_arbitrary_next_state_to_reconcile_idle(spec, controller_id, key, at_sync_step_closure(WidgetSyncStepView::AfterGetInner), sync_step_after_get_inner());
 
-    // Init sends the Get of the mirror, the Update that takes the finalizer, the
-    // teardown's List or the Update that releases a terminating copy with no
-    // inner cluster to address; for a live outer copy that names no inner cluster
-    // it writes the rejection into the status and ends; for one whose binding this
-    // reconciler does not serve it writes InnerUnreachable and ends in Error; for
-    // a terminating copy without the finalizer it is done.
+    // Init branches six ways. For a live copy: the Get of the mirror, the Update
+    // that takes the finalizer, the rejection written into the status when it
+    // names no inner cluster, or InnerUnreachable and Error when this reconciler
+    // does not serve its binding. For a terminating copy: the teardown's List,
+    // the Update that releases one this reconciler cannot address, or Done when
+    // it does not carry the finalizer.
     or_leads_to_combine_and_equality!(
         spec, lift_state(Cluster::at_expected_reconcile_states(controller_id, key, sync_step_after_init())),
         lift_state(at_sync_step(controller_id, key, WidgetSyncStepView::AfterGetInner)),

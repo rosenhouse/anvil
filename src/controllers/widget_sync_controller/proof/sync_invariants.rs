@@ -586,8 +586,8 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                                 }
                             },
                             // After a failed Create of the mirror, the failure is being
-                            // reported. After a Patch, either that or the spec the inner
-                            // cluster stored instead is being written into the status.
+                            // reported. After a Patch, the same -- unless the inner
+                            // cluster stored another spec, and SpecRewritten is.
                             WidgetSyncStepView::AfterCreateInner => {
                                 assert(resp_msg_opt is Some);
                                 assert(state_prime.reconcile_step is AfterReportError);

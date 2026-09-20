@@ -153,11 +153,14 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                     done
                 } else if cluster_of(k.selector, outer) is None || !serves(k, outer) {
                     // No inner cluster this controller can address: the copy names
-                    // none, or names a binding this controller holds no credential
-                    // for. Nothing here can ever confirm the mirror gone, so the
-                    // copy is released rather than held for ever. A binding that is
-                    // bound but unreachable, or refused, is not this case: it is
-                    // served, and the teardown below waits for it.
+                    // none, or names a binding it holds no credential for. Nothing
+                    // here can confirm the mirror gone, and holding the copy for
+                    // ever is the worse failure, so it is released and any mirror is
+                    // left to the janitor of that binding. A live copy waits instead,
+                    // because a binding that appears later is served by a later
+                    // reconcile; a terminating copy has no later. A bound but
+                    // unreachable or refused binding is served, and the teardown
+                    // below waits for it.
                     let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, false));
                     (at_step(WidgetSyncStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
                 } else {

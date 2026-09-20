@@ -61,13 +61,13 @@ On the outer copy:
   `Unknown` where the controller has no caught-up inner status for the
   current spec and `False` where it knows no mirror runs that spec. The
   `Ready` column of the table below says which.
-- Condition `Stalled`: `True` with the controller's own reason in a permanent
-  case (`ForeignObject`, `Forbidden`, `Rejected`, `CreateFailed`,
-  `SpecRewritten`). Otherwise, while `Synced` is `True` and the inner copy
-  has a `Stalled` condition, that condition (same normalization as `Ready`).
-  Otherwise `False` with `Synced`'s reason, so a synced mirror with no
-  `Stalled` condition reads `Stalled=False/Synced`.
-  `Ready` and `Stalled` are never both `True`.
+- Condition `Stalled`: `True` with the controller's own reason in a case
+  nothing the controller does again gets out of; the `Stalled` column of the
+  table below says which. Otherwise, while `Synced` is `True` and the inner
+  copy has a `Stalled` condition, that condition (same normalization as
+  `Ready`). Otherwise `False` with `Synced`'s reason, so a synced mirror with
+  no `Stalled` condition reads `Stalled=False/Synced`. `Ready` and `Stalled`
+  are never both `True`.
 - The conditions after those three: every condition the inner copy carries
   of another type, in the inner order, the first of each type, with status,
   reason and message as the inner copy wrote them and `observedGeneration`
@@ -106,13 +106,16 @@ A `False` `Synced` condition carries one of these reasons. The `Stalled` and
 | `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | `True` | `False` | the object is removed in the inner cluster |
 | `Forbidden` | the inner cluster refused a request for lack of authorization | `True` | `Unknown` | the credential's RBAC is fixed |
 | `InnerUnreachable` | the object's binding has no bound inner cluster (no kubeconfig Secret, or one that does not parse), or a request to it timed out or failed server-side; the inner cluster is not answering | `False` | `Unknown` | the inner cluster answers again, or its Secret appears |
-| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing, and nothing here creates it | `True` | `False` | the namespace is created |
+| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing, or the kind is not installed in the inner cluster, and the controller creates neither | `True` | `False` | the namespace or the CRD is created |
 | `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | `True` | `False` | the schema or the object is fixed |
-| `SpecRewritten` | the spec written to the mirror came back different: admission or defaulting in the inner cluster rewrote it, and writing it again would only repeat that | `True` | `False` | the inner cluster stops rewriting the spec |
+| `SpecRewritten` | the spec written to the mirror came back different: most often the inner CRD's schema is older than the outer one and prunes a field, otherwise a webhook or a default rewrote it | `True` | `False` | the inner CRD is brought level, or the webhook or default that rewrites the spec is removed |
 | `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | `False` | `Unknown` | the next reconcile |
 
 After a failed request the controller writes the status once and requeues; that
 requeue is the per-object backoff of "Retries" below, not the 60-second one.
+`SpecRewritten` follows a request that succeeded, so it takes the 60-second
+requeue and keeps re-patching the mirror on it; the reason says why nothing
+changes.
 `ready` and `observedCount` keep their last reported values. `ready` is a
 mirrored data field, not the `Ready` condition: while `Synced` is `False` the
 two can disagree, and the condition is the controller's assessment.
@@ -146,10 +149,12 @@ shows each request the teardown sends and which one failed.
   (`kubectl --context kind-widget-sync-outer patch widget demo --type json -p '[{"op":"add","path":"/metadata/finalizers/-","value":"example.com/hold"}]'`):
   the controller releases the sync finalizer, the mirror is gone and never
   recreated, and the copy stays under yours until you remove it.
-- Delete the outer copy while its inner cluster is disconnected (below), or
-  while the mirror carries a finalizer someone put on it in the inner cluster.
-  The copy stays terminating under the sync finalizer and gets no status
-  writes. The log shows which request failed; for a mirror the inner side
+- Delete the outer copy while its inner cluster is unreachable or refusing
+  this controller, or while the mirror carries a finalizer someone put on it
+  in the inner cluster. The copy stays terminating under the sync finalizer
+  and gets no status writes. (A copy whose binding has no kubeconfig Secret at
+  all is not this case: it is released at once, "Removing objects, bindings
+  and clusters" below.) The log shows which request failed; for a mirror the inner side
   holds, the mirror's own `deletionTimestamp` in the inner cluster is what to
   look at. Reconnect, or remove the inner finalizer, and the copy disappears
   at the controller's next attempt. The escape hatch, if the inner cluster is
@@ -170,8 +175,9 @@ shows each request the teardown sends and which one failed.
   network, edit the outer spec, reconnect. While the inner cluster is
   unreachable the outer copy reports `Synced=False/InnerUnreachable` at the new
   generation; after the heal it reaches `Synced=True`. Deleting the binding's
-  Secret `default/a-kubeconfig` reads the same way, without touching the
-  network; re-creating it binds the cluster again.
+  Secret `default/a-kubeconfig` reads the same way for a live copy, without
+  touching the network; re-creating it binds the cluster again. A terminating
+  copy of that binding is released instead, at once.
 - Copy `default/a-kubeconfig` into another namespace under the same name and
   create an object there bound to `a`. The claim refuses the second binding:
   the object reports `Synced=False/Forbidden` with `Stalled=True` and nothing
@@ -296,13 +302,13 @@ this one. Without that check the API server would reject every status write with
 only sign one WARN per attempt. A required field that declares a `default` is
 accepted, because defaulting runs before validation.
 
-A status that declares nothing beyond `observedGeneration` and `conditions`,
-and does not set `x-kubernetes-preserve-unknown-fields`, is **warned about at
-boot** rather than refused: everything the inner implementation reports past
-the conditions is pruned on write, so the outer copy shows conditions and
-nothing else. It is a warning because a CRD that declares its mirrored fields
-by hand is right to, as both demo CRDs do, and the controller cannot know what
-the inner side reports.
+A status that declares nothing beyond `observedGeneration` and `conditions`
+and does not set `x-kubernetes-preserve-unknown-fields` keeps no remainder at
+all: the outer copy shows conditions and nothing else. The controller warns
+about that shape at boot and serves the kind anyway
+(`doc/widget_sync_fanout_design.md`, section 2.2). It is one shape, not a test
+for pruning: a CRD that declares one unrelated field draws no warning and still
+prunes everything the inner side reports.
 
 An inner cluster is not checked at all: not for serving the kind, not for
 schema parity. Parity is an operational assumption. So is this, for now: **fields are
@@ -599,14 +605,21 @@ says.
 only once its mirror is confirmed gone, which needs the copy's inner cluster,
 so order matters: delete the copies that name a cluster and wait for them to
 go before you delete that cluster. Deleting the binding Secret first, or the
-Cluster API `Cluster` that owns it, is not fatal — a copy whose binding has
-no credential at all is released without confirmation, since nothing in this
-process could ever confirm it — but a mirror left in a workload cluster that
-is still running is then nobody's to collect until that binding comes back.
+Cluster API `Cluster` that owns it, is not fatal: a copy whose binding has no
+kubeconfig Secret is released at once. The mirror is then left in a workload
+cluster that is still running, with nobody to collect it until that binding
+comes back. What is left is the mirrors carrying the controller's label:
+
+```sh
+kubectl --context <inner> get <kind> -A -l anvil.dev/managed-by=widget-sync
+```
+
 A cluster that is merely unreachable, or one whose claim refuses this
-controller, is a different matter: it is still bound, so its copies stay
-terminating until it answers, and a namespace deleted around them stays
-`Terminating` too.
+controller, is still bound: its copies stay terminating until it answers, and
+a namespace deleted around them stays `Terminating` too. So is a binding whose
+Secret is there but unusable — a kubeconfig that does not parse, or one this
+controller refuses — which the process keeps retrying. Only a Secret that is
+gone releases a terminating copy; the escape hatch below is for the rest.
 
 The controller itself and a configured kind need the same order: stop the
 controller, or drop a `--kind`, only after the copies of every kind it serves
@@ -675,7 +688,11 @@ The recommended sequence is: pause, restore the outer cluster, look at what
 the restore produced, decide, resume. The gate withholds every Delete the
 process sends, the one the teardown of a deleted outer copy sends for its own
 mirror included: an outer copy deleted while paused stays terminating until
-the key is removed. While paused, the janitor answers each
+the key is removed. It withholds Deletes and nothing else, so a copy whose
+binding has no kubeconfig Secret is still released while paused, and its
+mirror is then an orphan the janitor deletes once the pause is lifted and the
+binding is back. Keep the Secrets in place for the length of a restore.
+While paused, the janitor answers each
 stale mirror with a withheld delete (a warn log with `cause="janitor
 paused"`) and retries it — and that retry is the backed-off one of "Retries"
 above. The gate answers a withheld Delete with a `Timeout`, which the janitor's

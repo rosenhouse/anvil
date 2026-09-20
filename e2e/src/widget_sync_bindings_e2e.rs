@@ -16,7 +16,8 @@
 //      Synced=False/Forbidden with Stalled=True, no mirror of it is ever
 //      created, and the mirrors of namespace `default` in cluster `a` survive a
 //      janitor window untouched (a refused binding runs no janitor);
-//   3. a missing Secret reads as an unreachable cluster: deleting `b-kubeconfig`
+//   3. a missing Secret reads as an unreachable cluster for a live copy (a
+//      terminating one is released, scenario 6): deleting `b-kubeconfig`
 //      makes the Widget bound to `b` report Synced=False/InnerUnreachable within
 //      two requeues, and re-creating the Secret brings it back to Synced=True at
 //      a spec edited while it was down -- so the mirror it ends up with was
@@ -30,7 +31,7 @@
 //      inner-a is answered, within the bound binding's re-check interval, by the
 //      same claim written again, which is what keeps a released cluster from
 //      being taken by a second binding unnoticed;
-//   6. a copy whose binding has no credential at all is released without a
+//   6. a copy whose binding has no kubeconfig Secret is released without
 //      confirmation: with the copied Secret of the refused binding deleted,
 //      deleting the tenant Widget lets it go on its own, where a bound binding
 //      would have held it terminating until its cluster answered.
@@ -473,17 +474,17 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
     .await?;
     info!("the released claim was taken again by the binding that holds the cluster");
 
-    // 6. A copy whose binding has no credential at all is released without a
-    //    confirmation: nothing in the process could ever confirm it. Deleting the
-    //    copied Secret unbinds `tenant/a` -- the refused binding of scenario 2,
-    //    which until now was bound and would have held `gamma` terminating -- and
-    //    the delete that follows goes through on its own, with no hand-stripped
-    //    finalizer. This also leaves the clusters as they were found.
+    // 6. Deleting the copied Secret unbinds `tenant/a`, so `gamma` is released
+    //    with no hand-stripped finalizer. This also leaves the clusters as they
+    //    were found. `gamma` has been reporting Forbidden since scenario 2, so
+    //    its reconcile is on the backed-off schedule, and the release can also
+    //    take one failed teardown first if the delete is noticed before the
+    //    unbinding is: BACKED_OFF_RETRY, not ONE_RECONCILE.
     tenant_secrets.delete(A_SECRET, &DeleteParams::default()).await.map_err(failed("delete the copied Secret"))?;
-    info!("deleted the copied Secret, so the binding {}/a has no credential at all", TENANT);
+    info!("deleted the copied Secret, so the binding {}/a has no kubeconfig Secret", TENANT);
     tenant_outer.api.delete("gamma", &DeleteParams::default()).await.map_err(failed("delete the tenant widget"))?;
     let t = tenant_outer.clone();
-    wait_until("the tenant widget of an unbound binding is released and gone", ONE_RECONCILE, move || {
+    wait_until("the tenant widget of an unbound binding is released and gone", BACKED_OFF_RETRY, move || {
         let t = t.clone();
         async move { Ok(t.get_opt("gamma").await?.is_none()) }
     })

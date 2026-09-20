@@ -510,6 +510,10 @@ pub struct BindingManager {
     outcomes: Option<tokio::sync::mpsc::UnboundedSender<AttemptResult>>,
     // The epoch of the next record made.
     next_epoch: u64,
+    // Whether the Secret watch has listed once. Until it has, this process does
+    // not know which bindings exist, and publishing what it has so far would
+    // read as "these are all of them" (ClusterClients::known).
+    listed: bool,
 }
 
 impl BindingManager {
@@ -535,6 +539,7 @@ impl BindingManager {
             bindings: HashMap::new(),
             outcomes: None,
             next_epoch: 0,
+            listed: false,
         }
     }
 
@@ -576,7 +581,10 @@ impl BindingManager {
                 _ = ticker.tick() => self.tick().await,
                 Some(result) = outcomes_rx.recv() => self.apply(result).await,
                 event = stream.next() => match event {
-                    Some(Ok(event)) => self.on_event(event).await,
+                    Some(Ok(event)) => {
+                        self.on_event(event).await;
+                        self.publish_known();
+                    }
                     // The watcher recovers on its own; the next poll re-lists.
                     Some(Err(e)) => warn!("binding manager: watching Secrets failed: {}; retrying", e),
                     None => break Err(anyhow!(
@@ -602,6 +610,7 @@ impl BindingManager {
             // A relist: bind what is there, drop what is not. Deletions missed
             // while the watch was down are exactly the bindings not listed.
             watcher::Event::Restarted(secrets) => {
+                self.listed = true;
                 let listed: HashSet<ClusterRef> = secrets.iter().filter_map(binding_of).collect();
                 let gone: Vec<ClusterRef> =
                     self.bindings.keys().filter(|b| !listed.contains(b)).cloned().collect();
@@ -612,6 +621,17 @@ impl BindingManager {
                     self.on_secret(secret).await;
                 }
             }
+        }
+    }
+
+    // Hand the reconcilers the bindings this process now knows, which is one per
+    // Secret it has seen: a cluster that is unreachable or refused is known, and
+    // only a Secret that is gone takes its binding out of the set. Nothing is
+    // published before the first List, so a reconcile at boot waits rather than
+    // reading the empty set as "no binding exists" (ClusterClients::known).
+    fn publish_known(&self) {
+        if self.listed {
+            self.clusters.known().publish(self.bindings.keys().cloned().collect());
         }
     }
 
@@ -845,7 +865,9 @@ impl BindingManager {
         self.clusters.remove_remote(binding).await;
         self.bindings.remove(binding);
         info!(
-            "binding {}: unbound, {}. Its objects report Synced=False/InnerUnreachable.",
+            "binding {}: unbound, {}. Its live objects report \
+             Synced=False/InnerUnreachable; its terminating ones are released, and \
+             any mirror left behind is the janitor's once the binding is back.",
             label(binding), why
         );
     }

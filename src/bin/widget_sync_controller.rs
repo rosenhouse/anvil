@@ -221,11 +221,14 @@ fn refused_kind(kind: &KindConfig, err: &impl std::fmt::Display) -> String {
 // the kind and a cluster to a model kind, the cluster selector the reconcilers
 // read an object's cluster with, and the bindings the reconciler serves. Built
 // afresh per reconcile (the runners take a factory) so that the binding set is
-// the snapshot of the process's bound clusters taken at the start of that
+// the snapshot of the process's known clusters taken at the start of that
 // reconcile and is fixed for the whole of it, which is what the model with the
 // binding set as a parameter asks for (doc/widget_sync_fanout_design.md,
-// section 3.2). A refused binding is in the snapshot: it is bound, and its
-// requests are the ones the shim answers Forbidden.
+// section 3.2). Known is one per kubeconfig Secret this process has seen. A
+// refused binding is in the snapshot, and its requests are the ones the shim
+// answers Forbidden; so is an unreachable one, whose requests time out. Only a
+// binding whose Secret is gone is out of it, and that is what the teardown
+// releases a terminating copy on.
 fn sync_kind(entry: &RegistryEntry, config: &KindConfig, bindings: Vec<ClusterRef>) -> SyncKindExec {
     let selector = match &config.selector {
         ClusterSelector::Name => ClusterSelectorExec::Name,
@@ -415,9 +418,10 @@ async fn main() -> Result<()> {
                 let make_sync: ReconcilerFactory<SyncReconciler> = Arc::new(move |clusters: ClusterClients| {
                     let (entry, config) = (sync_entry.clone(), sync_config.clone());
                     Box::pin(async move {
-                        // The bindings this reconcile serves: the clusters bound
-                        // right now, refused ones included.
-                        let bindings = clusters.remote_refs().await;
+                        // The bindings this reconcile serves: every cluster this
+                        // process has a kubeconfig Secret for. It waits for the
+                        // binding manager's first List (ClusterClients::known).
+                        let bindings = clusters.known_refs().await;
                         SyncReconciler { kind: sync_kind(&entry, &config, bindings) }
                     })
                 });
@@ -481,7 +485,7 @@ async fn main() -> Result<()> {
                             // The janitor does not consult the binding set, but its
                             // kind value is the same one the sync reconciler of this
                             // kind runs with, so it snapshots it too.
-                            let bindings = clusters.remote_refs().await;
+                            let bindings = clusters.known_refs().await;
                             JanitorReconciler { kind: sync_kind(&entry, &config, bindings), binding }
                         })
                     });
@@ -535,6 +539,7 @@ async fn main() -> Result<()> {
                 }
             });
 
+            let clusters_for_ready = clusters.clone();
             let manager = BindingManager::new(
                 clusters,
                 binding_kinds,
@@ -545,11 +550,16 @@ async fn main() -> Result<()> {
             );
             runner_names.push("the binding manager".to_string());
             let shutting_down = shutdown_rx.clone();
+            let known = clusters_for_ready.known();
             runners.push(tokio::spawn(manager.run(signalled(shutdown_rx))));
 
-            // Ready: every configured kind is served and has the right shape, and
-            // the sync runners are up. Whether any binding is usable is not part
-            // of it.
+            // Ready: every configured kind is served and has the right shape, the
+            // sync runners are up, and the kubeconfig Secrets have been listed
+            // once. Whether any binding is usable is not part of it, but the list
+            // is: a reconcile waits for it (ClusterClients::known), so a process
+            // that cannot list Secrets reconciles nothing, and saying it is ready
+            // would hide that behind a pod that never acts.
+            known.wait_listed().await;
             if let Some(path) = &ready_file {
                 match fs::write(path, b"") {
                     Ok(()) => info!("ready: created {}", path),

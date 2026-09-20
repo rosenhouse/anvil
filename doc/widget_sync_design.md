@@ -16,7 +16,8 @@ assumed. `deploy/widget_sync/README.md` says how to run the demo.
   `metadata.generation`; the one Update is of the outer copy's finalizers. No
   owner references cross clusters. The sync reconciler owns one finalizer on
   the outer copy, `anvil.dev/widget-sync`, and tears the mirror down before it
-  releases it (section 1.5).
+  releases it -- except for a copy whose inner cluster this process cannot
+  address at all, which it releases without confirming anything (section 1.5).
 - Proved (section 3): R1, the mirror eventually and stably carries the outer
   spec; R2, the outer status eventually and stably is the one derived from the
   inner status for that spec (its fields mirrored, its conditions merged),
@@ -143,33 +144,41 @@ by uid (section 1.5).
 **Error reasons.** `reason(e)` maps the model's API errors to the reason of
 the `Synced` condition: `Forbidden` for an authorization error;
 `InnerUnreachable` for `Timeout`, `ServerTimeout` and `InternalError`;
-`CreateFailed` for a `NotFound` answering the Create (the inner namespace is
-missing); `Rejected` for `Invalid`, `BadRequest` and `NotSupported`;
-`RequestFailed` otherwise (a `NotFound` answering the Patch, an
-`AlreadyExists`, a `Conflict`). In the model a failed JSON patch `test` is
-also answered `Invalid`; on a real API server the two share the 422 status
-and differ only in the message, and the shim hands a failed test to the
-reconciler as `Conflict`, so a race on the mirror reads `RequestFailed` and
-is retried, while `Rejected` is reserved for a schema or webhook rejection.
-The shim also maps a connection failure or a client-side request timeout to
-`Timeout`, so a partition from the inner cluster reads `InnerUnreachable`.
-`ForeignObject`, `Forbidden`, `Rejected`, `CreateFailed` and `SpecRewritten`
-are the permanent cases: nothing the reconciler does again changes the answer,
-and `Stalled` is `True` for them (section 1.4). `CreateFailed` is one of them
-because nothing here creates the inner namespace, so the Create fails the same
-way until an operator does (issue #49, finding 10); the reconcile still
-retries on its requeue.
+`CreateFailed` for a `NotFound` answering the Create; `Rejected` for
+`Invalid`, `BadRequest` and `NotSupported`; `RequestFailed` otherwise (a
+`NotFound` answering the Patch, an `AlreadyExists`, a `Conflict`). In the
+model a failed JSON patch `test` is also answered `Invalid`; on a real API
+server the two share the 422 status and differ only in the message, and the
+shim hands a failed test to the reconciler as `Conflict`, so a race on the
+mirror reads `RequestFailed` and is retried, while `Rejected` is reserved for
+a schema or webhook rejection. The shim also maps a connection failure or a
+client-side request timeout to `Timeout`, so a partition from the inner
+cluster reads `InnerUnreachable`. `ForeignObject`, `Forbidden`, `Rejected`,
+`CreateFailed` and `SpecRewritten` are the permanent cases: nothing the
+reconciler does again changes the answer, and `Stalled` is `True` for them
+(section 1.4). None of them stops the reconcile retrying on its requeue; what
+`Stalled` says is that an operator is what the object is waiting for.
+`CreateFailed` is one of them because a `NotFound` answering the Create is a
+missing inner namespace or a kind not installed in the inner cluster -- a real
+API server answers both with 404 -- and this controller creates neither.
 
-**A rewritten spec is reported, not written again.** The Patch response
-carries the object as stored. A spec that is not the one the patch wrote means
-the inner cluster rewrote it: a mutating webhook, a CRD default, a
-canonicalization. Patching again would get the same answer every time, with a
-write on every reconcile and nothing said about it, so the outcome is
-`SpecRewritten` (issue #49, finding 5). The model's API server stores what a
-Patch writes, so this branch is reachable only against a real one: no theorem
-mentions it, and R1 is stated for a server that keeps what it is given.
-Whether to tolerate such a difference instead, by comparing only the fields the
-controller wrote, is the analysis that finding leaves open.
+**A rewritten spec is reported.** The Patch response carries the object as
+stored. A spec that is not the one the patch wrote means the inner cluster
+rewrote it: most often a CRD schema older than the outer one, which prunes a
+field the patch carried, and otherwise a mutating webhook, a default, a
+canonicalization. Patching again gets the same answer every time, so the
+outcome is `SpecRewritten` and `Stalled` says an operator is needed. The
+reconcile still patches on its requeue: what the outcome adds is the report,
+not a stop. It also takes the plain requeue rather than the failure backoff,
+because the request succeeded, so it retries more often than `CreateFailed`
+does.
+
+The comparison is of the two decoded specs, so a rewrite that preserves the
+value is not told apart from one that does not. The model's API server stores
+what a Patch writes, so the branch is reachable only against a real server: no
+theorem mentions it, and R1 is proved over a model whose API server keeps what
+it is given. Whether to tolerate a difference instead, by comparing only the
+fields the controller wrote, is the analysis issue #49, finding 5 leaves open.
 
 **Patches test uid and generation.** A patch carries no `resourceVersion`, so
 writes by other actors to fields the patch does not test (inner status, labels,
@@ -288,11 +297,10 @@ whose status is none of the three is reported `Unknown` (`three_valued`).
   sync reconciler reconciled this generation, not that the inner condition
   was computed for it. `inner_caught_up` tests the inner
   `status.observedGeneration` only.
-- `Stalled`: if the outcome is permanent (`ForeignObject`, `Forbidden`,
-  `Rejected`, `CreateFailed`, `SpecRewritten`), `True` with that reason and
-  no message; else, if synced and the inner copy has a `Stalled` condition,
-  its status, reason and message; else `False` with the outcome's reason and
-  no message.
+- `Stalled`: if the outcome is permanent (section 1.2), `True` with that
+  reason and no message; else, if synced and the inner copy has a `Stalled`
+  condition, its status, reason and message; else `False` with the outcome's
+  reason and no message.
 - `Ready` and `Stalled` are never both `True`
   (`lemma_ready_and_stalled_exclusive`), which (G-shape) carries to a reader of
   the patch. It is not lifted to the stored outer copy.
@@ -332,16 +340,18 @@ as unchained and unmodelled.
 ### 1.5 The finalizer and the teardown
 
 The sync reconciler adds `anvil.dev/widget-sync` to an outer copy's finalizers
-on its first reconcile, before any mirror exists, and removes it only after it
-has deleted the mirror and read, with a successful List, that nothing of the
-copy's is left at the mirror key. An outer delete therefore stamps the copy
-terminating and returns; the copy disappears once the mirror is gone.
+on its first reconcile, before any mirror exists, and removes it after it has
+deleted the mirror and read, with a successful List, that nothing of the copy's
+is left at the mirror key. An outer delete therefore stamps the copy terminating
+and returns; the copy disappears once the mirror is gone. The one release that
+confirms nothing is of a copy whose inner cluster this process cannot address,
+below.
 
 ```
 Init, Outer.deletionTimestamp set
  ├─ finalizer anvil.dev/widget-sync missing → Done           (not ours to tear down)
  ├─ Outer names no inner cluster, or a binding this process does not serve
- │     → Update Outer {remove the finalizer} → Done          (nothing here can confirm)
+ │     → Update Outer {remove the finalizer} → Done          (nothing here could confirm the mirror gone)
  └─ List Inner{ns,name}                     (inner cluster, quorum read, selected by name)
       ├─ error (including a type-level 404) → Error          (nothing confirmed; retried)
       ├─ Ok, nothing listed → Update Outer {remove the finalizer} → Done
@@ -362,16 +372,21 @@ The rules behind the diagram:
   carries a `metadata.name` field selector (section 5.4).
 - The teardown writes no status. The copy is going away; a failed request is
   logged by the shim and retried from `Error` on the backoff.
-- A copy this process cannot address is released rather than held: one that
-  names no inner cluster, and one whose binding the process does not serve,
-  which means a binding with no credential at all, its Secret deleted or the
-  Cluster API object that owned it. Nothing here can ever confirm a mirror
-  gone in a cluster this process has no client for, and holding the copy for
-  ever is the worse failure: a mirror left behind in a cluster that is still
-  alive is collected by the janitor of its binding once that binding returns
-  (R3). A binding that is bound but unreachable, or one whose claim refuses
-  this controller, is not this case. It is served, the teardown waits for it,
-  and it recovers on its own.
+- A copy this process cannot address is released, not held: one that names no
+  inner cluster, and one whose binding has no kubeconfig Secret, because it was
+  deleted or because the Cluster API `Cluster` that owned it was. This process
+  has no client for that cluster and can never confirm the mirror gone, and
+  holding the copy for ever is the worse failure. A mirror left behind is then
+  an orphan of a live cluster, which is what the janitor of that binding
+  collects once the binding returns -- the case R3 is about, although R3 is
+  stated for a cluster that already runs that janitor and says nothing about
+  one started later.
+- A binding that is bound but unreachable, or one whose claim refuses this
+  controller, is not that case: it is served, the teardown waits for it, and it
+  recovers on its own. So is a binding whose Secret is there but unusable, which
+  the process retries rather than forgets. What the reconciler is given is the
+  set of bindings the process holds a Secret for, and the release rests on that
+  set being complete (section 3.5).
 - A terminating copy without the sync finalizer is not this controller's to
   tear down: it is left alone, and no mirror is created for it. A copy that
   carries the finalizer beside finalizers of others is torn down the same way;
@@ -404,9 +419,11 @@ to collect once the cluster answers (R3). R4 (section 3.3) is the promise:
 under the fairness of section 3.5, a terminating copy is released once the
 writes that would keep the finalizer on it have stopped. R4 states the release
 only. The order -- mirror deleted, its absence confirmed, the finalizer removed
--- is what `reconcile_core` does, not a theorem (issue #49, finding 17); a
-Create built from an earlier live snapshot can still land after the release,
-and the mirror it leaves is the janitor's (R3).
+-- is what `reconcile_core` does on the path that confirms, not a theorem
+(issue #49, finding 17); a Create built from an earlier live snapshot can still
+land after the release, and the mirror it leaves is the janitor's (R3). The
+release of a copy this process cannot address confirms nothing at all, and no
+theorem reaches it either.
 
 ## 2. The model
 
@@ -610,15 +627,17 @@ reconcilers.
 | Outer cluster restored with new uids | operational | the janitor pause gate (shim) withholds deletes; the model sees a failed request (`drop_req`); cleanup under R3 and R3s resumes when the gate is cleared (section 1.3) |
 | A kind present in more than one cluster (Pods, ConfigMaps) | no | the multi-store model assigns each kind to one side |
 | Foreign `Widget{ns,name}` pre-existing in the inner cluster | vacuous | only the sync reconciler creates inner-kind objects in the model; the exec code refuses to adopt and reports `ForeignObject` with `Stalled=True` |
-| Stale mirror of an earlier incarnation of the outer copy | yes | reported as `StaleMirror` until the janitor removes it (R3); R1's settling argument covers the wait. The teardown of section 1.5 leaves no such mirror behind an outer copy deleted with the sync finalizer on it |
+| Stale mirror of an earlier incarnation of the outer copy | yes | reported as `StaleMirror` until the janitor removes it (R3); R1's settling argument covers the wait. The teardown of section 1.5 leaves no such mirror behind an outer copy deleted with the sync finalizer on it, unless its binding has no Secret and the copy is released without confirmation |
 | Outer copy deleted | yes | the sync finalizer holds the copy while the sync reconciler deletes the mirror, confirms it gone with a List and releases (section 1.5); R4 states the release |
+| Outer copy deleted while its binding has no kubeconfig Secret | yes, as a release no theorem covers | the copy is released without confirmation, and any mirror is an orphan of a live cluster for the janitor of that binding to collect once the binding returns (section 1.5). R4's premise names a binding of the snapshot, so it does not reach this case |
 | Outer copy deleted while the inner cluster is unreachable, or while the inner side holds the mirror under a finalizer | yes | the copy stays terminating under the sync finalizer; R4 promises the release once requests get through and the mirror is released (D3); removing the sync finalizer by hand is the escape hatch |
 | Outer copy deleted under a finalizer of a third party | yes | torn down the same way; the copy stays stored under the other finalizer with its mirror gone (section 1.5); `outer_release_undisturbed` admits the third party's own release |
 | Outer copy deleted without the sync finalizer (removed by hand, or never added) | yes | the sync reconciler leaves it alone; its mirror is the janitor's (R3, R3s) |
 | Error responses to the reconcile's requests | yes | `drop_req` answers any request with any `APIError`; the reconcile reports the mapped reason once and requeues; the report is one more step of the reconcile in the liveness proofs |
 | Two outer clusters feeding one inner cluster | no | assumed away, and enforced operationally by the claim (`doc/widget_sync_fanout_design.md`, section 1.3) |
 | Many outer namespaces, each with its own inner cluster | yes | a kind and a binding are data in the model, and the theorems are stated for both (`doc/widget_sync_fanout_design.md`, sections 3 and 5) |
-| Namespaces, admission, schema drift | no | operational assumptions, section 3.5 |
+| Namespaces, schema drift | no | operational assumptions, section 3.5 |
+| Admission or defaulting in the inner cluster rewriting the mirror's spec | no | outside every theorem, and reported as `SpecRewritten` with `Stalled=True` (section 1.2) |
 | Two replicas of the controller | no | one replica assumed; a second is benign for safety (every write tests uid and generation or carries a uid precondition) but is outside the model, and costs status flapping and `AlreadyExists` noise |
 
 ### 2.4 The disturber
@@ -1033,7 +1052,7 @@ The echo controller in the testbed is an unverified stand-in for it.
 5. D3, for the pair on its own (section 2.5 proves it for the cluster with the modelled inner implementation), and, for the round trip only, D4. R1 to R4 do not need D4.
 6. Generation semantics as in section 5.1 on both real API servers (true for CRDs with the status subresource).
 7. The hypotheses of the refinement in 2.2, and one outer cluster per inner cluster.
-8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec; the outer CRD declares the mirrored status fields, or sets `x-kubernetes-preserve-unknown-fields` on `status`, since a structural schema prunes what it does not declare; an operator removes the sync finalizer by hand from a terminating copy whose bound inner cluster is not coming back (section 1.5); a List of an uninstalled kind fails, which the model's List never does (section 5.4).
+8. Operational: the inner namespace exists and the kind is installed there; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec (otherwise the copy reports `SpecRewritten`, section 1.2); the outer CRD declares the mirrored status fields, or sets `x-kubernetes-preserve-unknown-fields` on `status`, since a structural schema prunes what it does not declare; the binding set a reconcile is built with is complete, which is what the release of a terminating copy rests on (section 1.5); an operator removes the sync finalizer by hand from a terminating copy whose bound inner cluster is not coming back (section 1.5); a List of an uninstalled kind fails, which the model's List never does (section 5.4).
 
 ## 4. Deployment shape
 
@@ -1147,7 +1166,7 @@ instantiated at every state the solver sees. A lemma that reads a conjunct of
 | Native multi-store `ClusterState` | changes every `s.resources()` use and every `APIServerStep` case split in the repository; the multi-store model and refinement (section 2.2) give the same theorem without that |
 | The external-system hook for the inner cluster | a deterministic request-driven stub; cannot model an inner controller acting on its own |
 | Uid-suffixed mirror names | trivially provable cleanup, but names must match |
-| Reading status from the PATCH response | already modeled (`PatchResponse` carries the object); the copy rule refuses that status anyway, since it is for the previous generation; adds a state for no change in R1 to R3 |
+| Reading status from the PATCH response | the copy rule refuses that status anyway, since it is for the previous generation. The response's *spec* is read, for `SpecRewritten` (section 1.2) |
 | A token minted on the outer copy instead of its uid | requires writing outer metadata and does not survive recreation |
 
 ## 8. Future work
