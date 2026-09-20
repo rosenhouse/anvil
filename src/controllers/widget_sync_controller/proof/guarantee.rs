@@ -306,21 +306,53 @@ pub proof fn lemma_conditions_of_written_status(status: SyncedStatusView)
     assert("Ready"@.len() != "Stalled"@.len());
 }
 
-// Ready and Stalled are never both True in a status the sync reconciler writes.
+// The three condition statuses are distinct literals.
+pub proof fn lemma_condition_statuses_distinct()
+    ensures
+        condition_true() != condition_false(),
+        condition_true() != condition_unknown(),
+        condition_false() != condition_unknown(),
+{
+    reveal_strlit("True");
+    reveal_strlit("False");
+    reveal_strlit("Unknown");
+    assert("True"@.len() != "False"@.len());
+    assert("True"@.len() != "Unknown"@.len());
+    assert("False"@.len() != "Unknown"@.len());
+}
+
+// three_valued(status) is one of the three literals, and is True exactly when
+// status is.
+pub proof fn lemma_three_valued(status: StringView)
+    ensures
+        three_valued(status) == condition_true() || three_valued(status) == condition_false() || three_valued(status) == condition_unknown(),
+        three_valued(status) == condition_true() <==> status == condition_true(),
+{
+    lemma_condition_statuses_distinct();
+}
+
+// Ready and Stalled are never both True in a status the sync reconciler writes:
+// Ready is True only when synced, with an inner Ready that is True and no inner
+// Stalled that is True; Stalled is True only when the outcome is permanent, and so
+// not synced, or when the inner Stalled is True.
 pub proof fn lemma_ready_and_stalled_exclusive(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures
         !(ready_condition_for(generation, source, outcome).status == condition_true()
             && stalled_condition_for(generation, source, outcome).status == condition_true()),
 {
-    reveal_strlit("True");
-    reveal_strlit("False");
-    assert("True"@.len() != "False"@.len());
+    lemma_condition_statuses_distinct();
+    if source.ready_condition() is Some {
+        lemma_three_valued(source.ready_condition()->0.status);
+    }
+    if source.stalled_condition() is Some {
+        lemma_three_valued(source.stalled_condition()->0.status);
+    }
 }
 
-// (G-shape) of outer_status_for: the three conditions are two-valued, Ready is
-// True only when Synced is, and Ready and Stalled are never both True. Every
-// status the sync reconciler writes is an outer_status_for, so the guarantee
-// carries these to any reader of the patch.
+// (G-shape) of outer_status_for: Synced is two-valued, Ready and Stalled are
+// three-valued, Ready is True only when Synced is, and Ready and Stalled are never
+// both True. Every status the sync reconciler writes is an outer_status_for, so
+// the guarantee carries these to any reader of the patch.
 pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView)
     ensures
         ({
@@ -328,8 +360,8 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
             let ready = ready_condition_for(generation, source, outcome);
             let stalled = stalled_condition_for(generation, source, outcome);
             &&& (synced.status == condition_true() || synced.status == condition_false())
-            &&& (ready.status == condition_true() || ready.status == condition_false())
-            &&& (stalled.status == condition_true() || stalled.status == condition_false())
+            &&& (ready.status == condition_true() || ready.status == condition_false() || ready.status == condition_unknown())
+            &&& (stalled.status == condition_true() || stalled.status == condition_false() || stalled.status == condition_unknown())
             &&& (ready.status == condition_true() ==> synced.status == condition_true())
             &&& !(ready.status == condition_true() && stalled.status == condition_true())
             &&& (synced.status == condition_true() <==> synced.reason == Some(reason_synced()))
@@ -338,18 +370,55 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
             &&& (synced.status == condition_false() ==> {
                     &&& ready.reason == Some(reason_not_synced())
                     &&& ready.message is None
+                    &&& (ready.status == condition_unknown() <==> reason_reads_ready_unknown(synced.reason->0))
                     &&& stalled.reason == synced.reason
                     &&& stalled.message is None
                 })
         }),
 {
-    reveal_strlit("True");
-    reveal_strlit("False");
-    assert("True"@.len() != "False"@.len());
+    lemma_condition_statuses_distinct();
+    if source.ready_condition() is Some {
+        lemma_three_valued(source.ready_condition()->0.status);
+    }
+    if source.stalled_condition() is Some {
+        lemma_three_valued(source.stalled_condition()->0.status);
+    }
     lemma_ready_and_stalled_exclusive(generation, source, outcome);
     // Synced is the only reason of that name, so the reason identifies the outcome
     // as Synced and the condition's status follows.
     lemma_synced_is_the_only_synced_reason(outcome);
+    // The reason also decides between Unknown and False.
+    lemma_ready_unknown_by_reason(outcome);
+}
+
+// The outcomes under which Ready reads Unknown are exactly those whose reason
+// reason_reads_ready_unknown names. Each reason is a distinct literal; all but
+// one pair differ in length, and ForeignObject and RequestFailed differ in their
+// first character.
+pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
+    ensures outcome.ready_unknown() <==> reason_reads_ready_unknown(outcome.reason()),
+{
+    reveal_strlit("Synced");
+    reveal_strlit("InnerConverging");
+    reveal_strlit("InnerTerminating");
+    reveal_strlit("ForeignObject");
+    reveal_strlit("StaleMirror");
+    reveal_strlit("Forbidden");
+    reveal_strlit("InnerUnreachable");
+    reveal_strlit("CreateFailed");
+    reveal_strlit("Rejected");
+    reveal_strlit("RequestFailed");
+    assert("Synced"@.len() == 6);
+    assert("InnerConverging"@.len() == 15);
+    assert("InnerTerminating"@.len() == 16);
+    assert("ForeignObject"@.len() == 13);
+    assert("StaleMirror"@.len() == 11);
+    assert("Forbidden"@.len() == 9);
+    assert("InnerUnreachable"@.len() == 16);
+    assert("CreateFailed"@.len() == 12);
+    assert("Rejected"@.len() == 8);
+    assert("RequestFailed"@.len() == 13);
+    assert("ForeignObject"@[0] != "RequestFailed"@[0]);
 }
 
 // No outcome but Synced reports the reason Synced. Each reason is a distinct

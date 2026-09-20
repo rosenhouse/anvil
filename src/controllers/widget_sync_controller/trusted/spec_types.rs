@@ -193,6 +193,17 @@ pub open spec fn ready_condition_type() -> StringView { "Ready"@ }
 pub open spec fn stalled_condition_type() -> StringView { "Stalled"@ }
 pub open spec fn condition_true() -> StringView { "True"@ }
 pub open spec fn condition_false() -> StringView { "False"@ }
+pub open spec fn condition_unknown() -> StringView { "Unknown"@ }
+
+// A condition status is one of the three; anything else an inner condition
+// carries is reported as Unknown.
+pub open spec fn three_valued(status: StringView) -> StringView {
+    if status == condition_true() || status == condition_false() || status == condition_unknown() {
+        status
+    } else {
+        condition_unknown()
+    }
+}
 
 impl SyncedStatusView {
     pub open spec fn synced_condition(self) -> Option<SyncedConditionView> {
@@ -286,6 +297,26 @@ impl SyncOutcomeView {
             _ => false,
         }
     }
+
+    // Whether Ready reads Unknown rather than False while not synced. The split
+    // is by reason. A reason that can arise without the reconcile having read a
+    // caught-up inner status for the current spec -- the mirror is converging
+    // or terminating, the inner cluster did not answer, a request failed or was
+    // refused -- reads Unknown: the mirror may still be running the spec, and
+    // Ready does not deny it. A reason that arises only once the reconcile knows
+    // no mirror of this copy runs the spec -- the object at the mirror key is
+    // foreign or stale, the Create failed, a request was rejected -- reads
+    // False. Unknown is the safe side where a reason can arise both ways, such
+    // as a Create refused after a NotFound. The same split over the reason the
+    // request carries is reason_reads_ready_unknown.
+    pub open spec fn ready_unknown(self) -> bool {
+        match self {
+            SyncOutcomeView::InnerConverging => true,
+            SyncOutcomeView::InnerTerminating => true,
+            SyncOutcomeView::Failed(failure) => failure is InnerUnreachable || failure is RequestFailed || failure is Forbidden,
+            _ => false,
+        }
+    }
 }
 
 pub open spec fn make_condition(type_: StringView, status: StringView, observed_generation: Option<int>, reason: Option<StringView>, message: Option<StringView>) -> SyncedConditionView {
@@ -301,35 +332,43 @@ pub open spec fn synced_condition_for(outer_generation: Option<int>, outcome: Sy
     make_condition(synced_condition_type(), condition_status(outcome.synced()), outer_generation, Some(outcome.reason()), None)
 }
 
-// Ready: True exactly when the outcome is Synced and the inner copy's own Ready
-// condition, if present, is True and its own Stalled condition, if present, is not
-// True (so Ready and Stalled are never both True). Otherwise False: with reason
-// NotSynced when not synced, else with the reason and message of the inner
-// condition that denies it. `source` is consulted only when synced.
+// Ready, three-valued. `source` is consulted only when synced.
+//
+// Not synced: reason NotSynced, no message; Unknown or False by the outcome
+// (SyncOutcomeView::ready_unknown). Synced with an inner Stalled
+// condition that is True: False, with that condition's reason and message.
+// Synced with an inner Ready condition: that condition's status (three_valued),
+// reason and message. Synced with no inner Ready condition: Unknown, reason
+// NoInnerReadyCondition, no message.
+//
+// So Ready is True only when synced and the inner Ready condition is True, and
+// never while Stalled is True.
 pub open spec fn ready_condition_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedConditionView {
     let inner_ready = source.ready_condition();
     let inner_stalled = source.stalled_condition();
     if !outcome.synced() {
-        make_condition(ready_condition_type(), condition_false(), outer_generation, Some(reason_not_synced()), None)
+        let status = if outcome.ready_unknown() { condition_unknown() } else { condition_false() };
+        make_condition(ready_condition_type(), status, outer_generation, Some(reason_not_synced()), None)
     } else if inner_stalled is Some && inner_stalled->0.status == condition_true() {
         make_condition(ready_condition_type(), condition_false(), outer_generation, inner_stalled->0.reason, inner_stalled->0.message)
     } else if inner_ready is Some {
-        make_condition(ready_condition_type(), condition_status(inner_ready->0.status == condition_true()), outer_generation, inner_ready->0.reason, inner_ready->0.message)
+        make_condition(ready_condition_type(), three_valued(inner_ready->0.status), outer_generation, inner_ready->0.reason, inner_ready->0.message)
     } else {
-        make_condition(ready_condition_type(), condition_true(), outer_generation, Some(reason_synced()), None)
+        make_condition(ready_condition_type(), condition_unknown(), outer_generation, Some(reason_no_inner_ready_condition()), None)
     }
 }
 
-// Stalled: True when the outcome is permanent, with the outcome's reason; else,
-// when the inner status is consulted (synced) and the inner copy has a Stalled
-// condition of its own, that condition's status, reason and message; else False
-// with the outcome's reason.
+// Stalled: True when the outcome is permanent, with the outcome's reason and no
+// message; else, when synced and the inner copy has a Stalled condition of its
+// own, that condition's status (three_valued), reason and message; else False
+// with the outcome's reason and no message. A synced mirror with no Stalled
+// condition reads False with reason Synced.
 pub open spec fn stalled_condition_for(outer_generation: Option<int>, source: SyncedStatusView, outcome: SyncOutcomeView) -> SyncedConditionView {
     let inner_stalled = source.stalled_condition();
     if outcome.permanent() {
         make_condition(stalled_condition_type(), condition_true(), outer_generation, Some(outcome.reason()), None)
     } else if outcome.synced() && inner_stalled is Some {
-        make_condition(stalled_condition_type(), condition_status(inner_stalled->0.status == condition_true()), outer_generation, inner_stalled->0.reason, inner_stalled->0.message)
+        make_condition(stalled_condition_type(), three_valued(inner_stalled->0.status), outer_generation, inner_stalled->0.reason, inner_stalled->0.message)
     } else {
         make_condition(stalled_condition_type(), condition_false(), outer_generation, Some(outcome.reason()), None)
     }
@@ -363,8 +402,23 @@ pub open spec fn reason_foreign_object() -> StringView { "ForeignObject"@ }
 pub open spec fn reason_stale_mirror() -> StringView { "StaleMirror"@ }
 pub open spec fn reason_inner_terminating() -> StringView { "InnerTerminating"@ }
 pub open spec fn reason_synced() -> StringView { "Synced"@ }
-// The reason of a False Ready condition when the outer copy is not synced.
+// The reason of the Ready condition when the outer copy is not synced.
 pub open spec fn reason_not_synced() -> StringView { "NotSynced"@ }
+// The reason of an Unknown Ready condition when the mirror is synced but its
+// status carries no Ready condition.
+pub open spec fn reason_no_inner_ready_condition() -> StringView { "NoInnerReadyCondition"@ }
+
+// The Synced reasons under which a not-synced Ready reads Unknown:
+// SyncOutcomeView::ready_unknown over the reason the request carries
+// (proof::guarantee::lemma_ready_unknown_by_reason), which is how the guarantee
+// states the split.
+pub open spec fn reason_reads_ready_unknown(reason: StringView) -> bool {
+    ||| reason == reason_inner_converging()
+    ||| reason == reason_inner_terminating()
+    ||| reason == FailureReasonView::InnerUnreachable.reason()
+    ||| reason == FailureReasonView::RequestFailed.reason()
+    ||| reason == FailureReasonView::Forbidden.reason()
+}
 
 // Why a request of the reconcile failed, as reported in the Synced condition
 // before the reconcile ends in Error.

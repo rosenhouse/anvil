@@ -17,7 +17,8 @@
 //      condition, and Synced=True at the outer generation;
 //   3. a Gadget whose name is not a binding of this process ("elsewhere") is
 //      answered as an unreachable inner cluster: the outer copy reports
-//      Synced=False/InnerUnreachable, not Stalled, and nothing is ever created
+//      Synced=False/InnerUnreachable with Ready=Unknown/NotSynced, not
+//      Stalled, and nothing is ever created
 //      in the inner cluster for it;
 //   4. adding a kind did not rename anything on the outer Widget status: it
 //      still carries exactly observedGeneration, conditions, ready and
@@ -186,6 +187,12 @@ fn reports_inner_unreachable(outer: &Gadget) -> Result<bool, Error> {
     }
     if condition(&status.conditions, "Stalled").map(|c| c.status == "True").unwrap_or(false) {
         error!("InnerUnreachable is reported as Stalled, which the design calls a transient reason: {:?}", status);
+        return Err(Error::WidgetSyncFailed);
+    }
+    // No caught-up inner status was read, so Ready is Unknown, not False.
+    let ready = condition(&status.conditions, "Ready");
+    if !ready.map(|c| c.status == "Unknown" && c.reason.as_deref() == Some("NotSynced")).unwrap_or(false) {
+        error!("InnerUnreachable is not reported as Ready=Unknown/NotSynced: {:?}", status);
         return Err(Error::WidgetSyncFailed);
     }
     Ok(true)

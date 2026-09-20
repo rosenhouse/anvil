@@ -48,33 +48,58 @@ On the outer copy:
 - Condition `Synced` with `status: "True"` and `observedGeneration ==
   metadata.generation`: the spec is in the inner cluster and `ready` and
   `observedCount` are the inner implementation's status for it.
-- Condition `Ready`: `True` exactly when `Synced` is `True` and the inner
-  copy's own `Ready` condition (if present) is `True` and its own `Stalled`
-  condition (if present) is not; otherwise `False`, with reason `NotSynced`
-  when not synced and the inner condition's reason and message otherwise.
-- Condition `Stalled`: `True` when the controller is in a permanent case
-  (`ForeignObject`, `Forbidden`, `Rejected`) or the inner copy's own
-  `Stalled` condition is `True`; the reason is the controller's own when it
-  has one, else the inner condition's. `Ready` and `Stalled` are never both
-  `True`.
+- Condition `Ready`: `True`, `False` or `Unknown`. While `Synced` is `True`
+  it repeats the inner copy's own `Ready` condition (its reason and message
+  when it has them, and its status if that is `True`, `False` or `Unknown`;
+  any other status reads `Unknown`). Two exceptions: an inner `Stalled=True`
+  forces `Ready=False` with that condition's reason and message, and a mirror
+  with no `Ready` condition reads `Unknown` with reason
+  `NoInnerReadyCondition`. The inner condition's own `observedGeneration` is
+  not read; the outer stamp is the generation the sync controller reconciled.
+  While `Synced` is `False` the reason is `NotSynced`. The status is
+  `Unknown` where the controller has no caught-up inner status for the
+  current spec and `False` where it knows no mirror runs that spec. The
+  `Ready` column of the table below says which.
+- Condition `Stalled`: `True` with the controller's own reason in a permanent
+  case (`ForeignObject`, `Forbidden`, `Rejected`). Otherwise, while `Synced`
+  is `True` and the inner copy has a `Stalled` condition, that condition
+  (same normalization as `Ready`). Otherwise `False` with `Synced`'s reason,
+  so a synced mirror with no `Stalled` condition reads `Stalled=False/Synced`.
+  `Ready` and `Stalled` are never both `True`.
 
-A `False` `Synced` condition carries one of these reasons:
+Wait on `Synced`, which the sync controller writes for every kind it serves.
+`kubectl wait --for=condition=` reads the condition's status only, not its
+`observedGeneration`, so right after a spec edit it returns on the previous
+generation's `Synced=True`; wait for
+`--for=jsonpath='{.status.observedGeneration}'=<generation>` first. Alert on
+`Ready != True`, which covers `False` and `Unknown` alike; it fires on every
+spec edit while the inner side converges, so hold it for the convergence time
+you tolerate (there is no `lastTransitionTime` to hold it on). `kubectl wait
+--for=condition=Ready` waits for `True`, so it times out for a kind whose
+implementation reports no `Ready` condition: the outer copy reads
+`Ready=Unknown/NoInnerReadyCondition` for it.
 
-| Reason | Meaning | Stalled | Clears when |
-|---|---|---|---|
-| `InnerConverging` | the mirror carries the spec; the inner status is for an older generation of it | no | the inner implementation catches up |
-| `InnerTerminating` | the mirror has a deletion timestamp | no | the inner side releases it and a new mirror is created |
-| `StaleMirror` | the object at the mirror's name is a mirror of a previous incarnation of this copy (label present, other `parent-uid`) | no | the janitor removes it |
-| `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | yes | the object is removed in the inner cluster |
-| `Forbidden` | the inner cluster refused a request for lack of authorization | yes | the credential's RBAC is fixed |
-| `InnerUnreachable` | the object's binding has no bound inner cluster (no kubeconfig Secret, or one that does not parse), or a request to it timed out or failed server-side; the inner cluster is not answering | no | the inner cluster answers again, or its Secret appears |
-| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | no | the namespace is created |
-| `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | yes | the schema or the object is fixed |
-| `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | no | the next reconcile |
+A `False` `Synced` condition carries one of these reasons. The `Stalled` and
+`Ready` columns are what the controller reports beside it, asserted by
+`unit_tests::widget_sync_controller::outer_status_for`:
+
+| Reason | Meaning | Stalled | Ready | Clears when |
+|---|---|---|---|---|
+| `InnerConverging` | the mirror carries the spec; the inner status is for an older generation of it | `False` | `Unknown` | the inner implementation catches up |
+| `InnerTerminating` | the mirror has a deletion timestamp | `False` | `Unknown` | the inner side releases it and a new mirror is created |
+| `StaleMirror` | the object at the mirror's name is a mirror of a previous incarnation of this copy (label present, other `parent-uid`) | `False` | `False` | the janitor removes it |
+| `ForeignObject` | the object at the mirror's name has no mirror identity; it is never touched | `True` | `False` | the object is removed in the inner cluster |
+| `Forbidden` | the inner cluster refused a request for lack of authorization | `True` | `Unknown` | the credential's RBAC is fixed |
+| `InnerUnreachable` | the object's binding has no bound inner cluster (no kubeconfig Secret, or one that does not parse), or a request to it timed out or failed server-side; the inner cluster is not answering | `False` | `Unknown` | the inner cluster answers again, or its Secret appears |
+| `CreateFailed` | the Create of the mirror was answered NotFound: the inner namespace is missing | `False` | `False` | the namespace is created |
+| `Rejected` | a request was rejected as invalid by the API server's schema or an admission webhook (a patch whose `test` failed after a race on the mirror is reported as `RequestFailed` instead, and the next reconcile retries) | `True` | `False` | the schema or the object is fixed |
+| `RequestFailed` | any other error (a conflict, an object that appeared or vanished between two requests) | `False` | `Unknown` | the next reconcile |
 
 After a failed request the controller writes the status once and requeues; that
 requeue is the per-object backoff of "Retries" below, not the 60-second one.
-`ready` and `observedCount` keep their last reported values.
+`ready` and `observedCount` keep their last reported values. `ready` is a
+mirrored data field, not the `Ready` condition: while `Synced` is `False` the
+two can disagree, and the condition is the controller's assessment.
 
 The mirror carries `anvil.dev/managed-by: widget-sync` and
 `anvil.dev/parent-uid: <outer uid>`, no owner references and no finalizers of

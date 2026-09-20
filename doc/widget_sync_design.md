@@ -219,22 +219,41 @@ reaches `Synced=True`.
 
 `Ready` and `Stalled` combine the sync reconciler's own outcome with the inner
 copy's conditions of the same type, which are consulted only when the inner
-status is, that is when `Synced` is `True`:
+status is, that is when `Synced` is `True`. Each is `True`, `False` or
+`Unknown` (`ready_condition_for`, `stalled_condition_for`); an inner condition
+whose status is none of the three is reported `Unknown` (`three_valued`).
 
-- `Ready` is `True` exactly when `Synced` is `True`, the inner `Ready`
-  condition, if present, is `True`, and the inner `Stalled` condition, if
-  present, is not `True`. Otherwise it is `False`: with reason `NotSynced`
-  when not synced, else with the reason and message of the inner condition
-  that denies it. When synced with no inner `Ready` condition it is `True`
-  with reason `Synced`.
-- `Stalled` is `True` when the outcome is permanent (`ForeignObject`,
-  `Forbidden`, `Rejected`), with that reason, or when the inner `Stalled`
-  condition is `True`, with that condition's reason and message. Otherwise it
-  is `False`, with the inner `Stalled` condition's reason and message when
-  synced and present, else with the outcome's reason.
+- `Ready`, when not synced, has reason `NotSynced` and no message. Its
+  status is `Unknown` or `False` by the outcome's reason
+  (`SyncOutcomeView::ready_unknown`). A reason that can arise without the
+  reconcile having read a caught-up inner status for the current spec reads
+  `Unknown`: `InnerConverging`, `InnerTerminating`, `InnerUnreachable`,
+  `RequestFailed` and `Forbidden`. The mirror may still be running the spec,
+  so `Ready` does not deny it. A reason that arises only once the reconcile
+  knows no mirror of this copy runs the spec reads `False`: `ForeignObject`,
+  `StaleMirror`, `Rejected` and `CreateFailed`. The split is by reason, so
+  `Unknown` is also what a `Forbidden` or `RequestFailed` answer to the
+  `Create` after a `NotFound` reads, where the reconcile did see that no
+  mirror exists; `Unknown` is the safe side.
+- `Ready`, when synced: if the inner `Stalled` condition is `True`, `False`
+  with that condition's reason and message; else, if there is an inner
+  `Ready` condition, its status, reason and message; else `Unknown` with
+  reason `NoInnerReadyCondition` and no message. So `Ready` is `True` only
+  when synced and the inner `Ready` condition is `True`. The inner
+  condition's own `observedGeneration` is not read: the outer stamp says the
+  sync reconciler reconciled this generation, not that the inner condition
+  was computed for it; `inner_caught_up` tests the inner
+  `status.observedGeneration` only.
+- `Stalled`: if the outcome is permanent (`ForeignObject`, `Forbidden`,
+  `Rejected`), `True` with that reason and no message; else, if synced and
+  the inner copy has a `Stalled` condition, its status, reason and message;
+  else `False` with the outcome's reason and no message.
 - `Ready` and `Stalled` are never both `True`
   (`lemma_ready_and_stalled_exclusive`), which (G-shape) carries to a reader of
-  the patch. It is still not lifted to the stored outer copy.
+  the patch. It is not lifted to the stored outer copy.
+
+The inner condition the merge reads is the first of its type, which is what
+the exec scan finds (`SyncedStatusView::condition`).
 
 The rest of this section describes `reconcile_core`, not a theorem. What the
 guarantee proves of a status write is (G-shape) and (G-gen) (section 3.1), which
@@ -594,12 +613,17 @@ whose uid is issued and bound to that key; `Patch` of the mirror's spec;
 `observedGeneration` (G-gen), and whose condition list is those three and
 nothing else, in that order (G-shape). It sends nothing else.
 
-(G-shape) also relates the three to each other. Each is `True` or `False`.
-`Ready` is `True` only when `Synced` is, and never at the same time as
-`Stalled`. `Synced` is `True` exactly when its reason is `Synced`, and it
-carries no message. A `False` `Synced` means no inner status was read, and the
-other two say so rather than reporting one: `Ready` denies with `NotSynced`,
-`Stalled` repeats `Synced`'s reason, and neither carries a message.
+(G-shape) also relates the three to each other. `Synced` is `True` or `False`;
+`Ready` and `Stalled` are each `True`, `False` or `Unknown`. `Ready` is `True`
+only when `Synced` is, and never at the same time as `Stalled`. `Synced` is
+`True` exactly when its reason is `Synced`, and it carries no message. A
+`False` `Synced` means no caught-up inner status was read, and the other two
+say so rather than reporting one: `Ready` is `Unknown` or `False` with reason
+`NotSynced`, `Stalled` repeats `Synced`'s reason, and neither carries a
+message. `Synced`'s reason names the outcome, and the outcome decides which
+of `Unknown` and `False` (section 1.4), so (G-shape) pins it: `Ready` is
+`Unknown` exactly under the five reasons of `reason_reads_ready_unknown`
+(`lemma_ready_unknown_by_reason`).
 
 What (G-shape) never does is relate a reported condition to the inner cluster.
 The mirrored remainder is unconstrained, and so are the `Ready` and `Stalled`
@@ -608,11 +632,6 @@ the path that matters. Tying either to the status the mirror held needs the
 `Get` response that produced it, which no state keeps, so a reconciler reporting
 `Synced` and `Ready` over invented mirrored fields still satisfies the
 guarantee. Issue #49 finding 2 is open.
-
-Each condition being two-valued is `outer_status_for`'s merge, which issue #49
-finding 16 disputes: a workload reporting `Ready=Unknown` is reported `False`.
-(G-shape) states that merge rather than endorsing it, so changing it changes the
-guarantee.
 
 **Janitor** (`widget_janitor_guarantee`). A request sent while reconciling a
 mirror is a `List` of outer copies in the mirror's namespace, or a `Delete` of
