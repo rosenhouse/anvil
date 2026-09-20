@@ -545,11 +545,13 @@ pub proof fn lemma_always_sync_pending_requests_match_snapshots(spec: TempPred<C
                         match state.reconcile_step {
                             WidgetSyncStepView::Init => {
                                 if state_prime.reconcile_step is AfterGetInner || state_prime.reconcile_step is AfterAddFinalizer
-                                    || state_prime.reconcile_step is AfterListMirror {
+                                    || state_prime.reconcile_step is AfterListMirror
+                                    || state_prime.reconcile_step is AfterRemoveFinalizer {
                                 } else {
-                                    // The object names no inner cluster (the rejection is
-                                    // reported) or a binding this reconciler does not
-                                    // serve (the inner cluster is reported unreachable).
+                                    // A live object that names no inner cluster (the
+                                    // rejection is reported) or a binding this reconciler
+                                    // does not serve (the inner cluster is reported
+                                    // unreachable); a terminating one is released above.
                                     assert(state_prime.reconcile_step is AfterPatchOuterStatus || state_prime.reconcile_step is AfterReportError);
                                     assert(pending_status_patch_is_merged(k, msg, outer));
                                     assert(cluster_of(k.selector, outer) is None || !serves(k, outer));

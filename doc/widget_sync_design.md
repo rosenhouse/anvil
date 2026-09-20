@@ -322,8 +322,8 @@ terminating and returns; the copy disappears once the mirror is gone.
 ```
 Init, Outer.deletionTimestamp set
  ├─ finalizer anvil.dev/widget-sync missing → Done           (not ours to tear down)
- ├─ Outer names no inner cluster → status Rejected → Done    (the finalizer stays)
- ├─ Outer names a binding this process does not serve → report InnerUnreachable
+ ├─ Outer names no inner cluster, or a binding this process does not serve
+ │     → Update Outer {remove the finalizer} → Done          (nothing here can confirm)
  └─ List Inner{ns,name}                     (inner cluster, quorum read, selected by name)
       ├─ error (including a type-level 404) → Error          (nothing confirmed; retried)
       ├─ Ok, nothing listed → Update Outer {remove the finalizer} → Done
@@ -342,15 +342,18 @@ The rules behind the diagram:
 - Absence is confirmed the way the janitor confirms it (section 1.3): by a
   successful List that lacks the object, never by a `NotFound`. The List
   carries a `metadata.name` field selector (section 5.4).
-- Past `Init`, the teardown writes no status: the copy is going away, and a
-  failed request is logged by the shim and retried from `Error` on the
-  backoff. `Init` reports two outcomes, before any request to the inner side:
-  a copy that names no inner cluster (`Rejected`, permanent) and one whose
-  binding this process does not serve (`InnerUnreachable`). Both keep the
-  finalizer: nothing can be confirmed for them. A copy whose binding is gone,
-  its Secret deleted, is the second case, for as long as the binding is gone;
-  the first can only carry the finalizer if someone added it by hand, by the
-  last rule below.
+- The teardown writes no status. The copy is going away; a failed request is
+  logged by the shim and retried from `Error` on the backoff.
+- A copy this process cannot address is released rather than held: one that
+  names no inner cluster, and one whose binding the process does not serve,
+  which means a binding with no credential at all, its Secret deleted or the
+  Cluster API object that owned it. Nothing here can ever confirm a mirror
+  gone in a cluster this process has no client for, and holding the copy for
+  ever is the worse failure: a mirror left behind in a cluster that is still
+  alive is collected by the janitor of its binding once that binding returns
+  (R3). A binding that is bound but unreachable, or one whose claim refuses
+  this controller, is not this case. It is served, the teardown waits for it,
+  and it recovers on its own.
 - A terminating copy without the sync finalizer is not this controller's to
   tear down: it is left alone, and no mirror is created for it. A copy that
   carries the finalizer beside finalizers of others is torn down the same way;
@@ -362,9 +365,9 @@ The rules behind the diagram:
 - A mirror the inner side holds under a finalizer of its own is stamped by the
   Delete and released by the inner side (D3); the teardown waits, and confirms
   afterwards.
-- The finalizer is added only to a copy this process serves: an object that
-  names no inner cluster, or a binding the process does not know, is reported
-  and never owned. The Update that adds or removes it carries the resource
+- The finalizer is added only to a copy this process serves: a live object
+  that names no inner cluster, or a binding the process does not know, is
+  reported and never owned. The Update that adds or removes it carries the resource
   version the copy was read with and changes nothing but the finalizers. A
   `Conflict` ends the reconcile in `Error` with nothing reported; the retry
   starts from the copy as it is then.
@@ -374,9 +377,9 @@ under a finalizer of the inner side's own means once the inner side has let it
 go; a recreate under the same name never meets the stale mirror of its own
 predecessor; and the inner cluster is told before the outer copy disappears.
 What it costs: a delete waits for the inner cluster. While that cluster is
-unreachable, refuses this controller, or is no longer bound, the copy stays
-terminating under the finalizer, its last status in place and the shim's warn
-log saying which request failed. That is the Kubernetes convention for a
+unreachable, or refuses this controller, the copy stays terminating under the
+finalizer, its last status in place and the shim's warn log saying which
+request failed. That is the Kubernetes convention for a
 finalizer, escape hatch included: remove the finalizer by hand
 (`deploy/widget_sync/README.md`, "Scenarios"). The mirror is then the janitor's
 to collect once the cluster answers (R3). R4 (section 3.3) is the promise:
@@ -1012,7 +1015,7 @@ The echo controller in the testbed is an unverified stand-in for it.
 5. D3, for the pair on its own (section 2.5 proves it for the cluster with the modelled inner implementation), and, for the round trip only, D4. R1 to R4 do not need D4.
 6. Generation semantics as in section 5.1 on both real API servers (true for CRDs with the status subresource).
 7. The hypotheses of the refinement in 2.2, and one outer cluster per inner cluster.
-8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec; the outer CRD declares the mirrored status fields, or sets `x-kubernetes-preserve-unknown-fields` on `status`, since a structural schema prunes what it does not declare; an operator removes the sync finalizer by hand from a terminating copy whose inner cluster is not coming back, or that names no inner cluster (section 1.5); a List of an uninstalled kind fails, which the model's List never does (section 5.4).
+8. Operational: the inner namespace exists; CRD schema parity; the CRD is installed in the outer cluster whenever its API server answers; one replica; no mutating admission on the inner spec; the outer CRD declares the mirrored status fields, or sets `x-kubernetes-preserve-unknown-fields` on `status`, since a structural schema prunes what it does not declare; an operator removes the sync finalizer by hand from a terminating copy whose bound inner cluster is not coming back (section 1.5); a List of an uninstalled kind fails, which the model's List never does (section 5.4).
 
 ## 4. Deployment shape
 

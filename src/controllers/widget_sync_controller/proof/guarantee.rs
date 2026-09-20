@@ -846,10 +846,17 @@ proof fn lemma_sync_new_request_is_guaranteed(
                     }
                 },
                 APIRequest::UpdateRequest(update_req) => {
-                    assert(update_req == sync_reconciler::outer_finalizer_update(outer, true));
-                    // The finalizer is added at Init only when the snapshot lacks it.
-                    assert(!has_sync_finalizer(outer.metadata));
-                    lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, true);
+                    if outer.metadata.deletion_timestamp is Some {
+                        // The release of a terminating copy with no inner cluster
+                        // this controller can address.
+                        assert(update_req == sync_reconciler::outer_finalizer_update(outer, false));
+                        lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, false);
+                    } else {
+                        assert(update_req == sync_reconciler::outer_finalizer_update(outer, true));
+                        // The finalizer is added at Init only when the snapshot lacks it.
+                        assert(!has_sync_finalizer(outer.metadata));
+                        lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, true);
+                    }
                 },
                 APIRequest::ListRequest(list_req) => {
                     assert(list_req == sync_reconciler::mirror_list(k, outer));

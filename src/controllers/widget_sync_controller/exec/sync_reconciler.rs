@@ -151,12 +151,12 @@ pub fn reconcile_core(kind: &SyncKindExec, outer: &SyncedObject, resp_o: Option<
                     return (at_step(WidgetSyncStep::Done), None);
                 }
                 let selected = outer.cluster_of(&kind.selector);
-                if selected.is_none() {
-                    return write_outer_status_or_done(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::Rejected)));
-                }
                 let binding = binding_of(kind, outer);
-                if !kind.knows(&binding) {
-                    return report_error(kind, outer, reported_status(kind, outer, SyncOutcome::Failed(FailureReason::InnerUnreachable)));
+                if selected.is_none() || !kind.knows(&binding) {
+                    // No inner cluster this controller can address: release rather
+                    // than hold the copy for ever.
+                    let req = KubeAPIRequest::UpdateRequest(outer_finalizer_update(kind, outer, false));
+                    return (at_step(WidgetSyncStep::AfterRemoveFinalizer), Some(Request::KRequest(req)));
                 }
                 // Teardown: read the mirror key.
                 let req = KubeAPIRequest::ListRequest(mirror_list(kind, outer));

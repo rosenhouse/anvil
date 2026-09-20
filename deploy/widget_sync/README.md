@@ -585,21 +585,26 @@ margin (`JANITOR_WINDOW` in `e2e/src/widget_sync_e2e.rs`), and the binary's
 unit tests hold the default and the manifest's value to what this paragraph
 says.
 
-**Removing objects, bindings, kinds and the controller.** The sync finalizer
-makes order matter. A copy is released only once its mirror is confirmed
-gone, which needs the copy's inner cluster: delete the copies that name a
-cluster and wait for them to go before the cluster's binding Secret, the
-Cluster API `Cluster` that owns it, or a namespace that holds both. A copy
-whose binding is gone reports `Synced=False/InnerUnreachable` and keeps the
-sync finalizer, because nothing in this process can confirm anything for a
-cluster it has no client for; a namespace deleted around such copies stays
-`Terminating` on them. The same holds for the controller itself and for a
-kind: stop the controller, or drop a `--kind`, only after the copies of every
-kind it serves are gone, and remove a CRD only after that, since only a
-running controller releases the finalizer. A build without the finalizer
-cannot release it either, so before rolling back to one, strip the finalizer
-from every served copy. The escape hatch applies to any of these, one object
-at a time as in "Scenarios" or a namespace at a time:
+**Removing objects, bindings, kinds and the controller.** A copy is released
+only once its mirror is confirmed gone, which needs the copy's inner cluster,
+so order matters: delete the copies that name a cluster and wait for them to
+go before you delete that cluster. Deleting the binding Secret first, or the
+Cluster API `Cluster` that owns it, is not fatal — a copy whose binding has
+no credential at all is released without confirmation, since nothing in this
+process could ever confirm it — but a mirror left in a workload cluster that
+is still running is then nobody's to collect until that binding comes back.
+A cluster that is merely unreachable, or one whose claim refuses this
+controller, is a different matter: it is still bound, so its copies stay
+terminating until it answers, and a namespace deleted around them stays
+`Terminating` too.
+
+The controller itself and a configured kind need the same order: stop the
+controller, or drop a `--kind`, only after the copies of every kind it serves
+are gone, and remove a CRD only after that, since only a running controller
+releases the finalizer. A build without the finalizer cannot release it
+either, so before rolling back to one, strip the finalizer from every served
+copy. The escape hatch applies to any of these, one object at a time as in
+"Scenarios" or a namespace at a time:
 
 ```sh
 kubectl --context kind-widget-sync-outer -n default get widgets -o name \

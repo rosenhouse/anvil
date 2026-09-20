@@ -871,7 +871,10 @@ pub proof fn lemma_sync_model_ok(sk: SyncKind, bnd: Binding, spec_ok: spec_fn(Va
                 },
                 _ => {
                     if req is UpdateRequest {
-                        let add = state.reconcile_step is Init;
+                        // Init adds the finalizer to a live copy and releases a
+                        // terminating one it cannot address; every other step
+                        // that updates the finalizers releases.
+                        let add = state.reconcile_step is Init && outer.metadata.deletion_timestamp is None;
                         assert(req == APIRequest::UpdateRequest(sync_reconciler::outer_finalizer_update(outer, add)));
                         let obj = req->UpdateRequest_0.obj;
                         assert(obj.kind == cr.kind);

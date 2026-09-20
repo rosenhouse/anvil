@@ -151,15 +151,15 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                     // Terminating without the sync finalizer: not this controller's
                     // to tear down, and a status write would only prolong it.
                     done
-                } else if cluster_of(k.selector, outer) is None {
-                    // The copy names no inner cluster, so there is no mirror key to
-                    // confirm: report the rejection and keep the finalizer until the
-                    // copy names one again or the finalizer is removed by hand.
-                    write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::Rejected)))
-                } else if !serves(k, outer) {
-                    // The inner cluster cannot be reached from this controller, so
-                    // the mirror cannot be confirmed gone: report and requeue.
-                    report_error(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::InnerUnreachable)))
+                } else if cluster_of(k.selector, outer) is None || !serves(k, outer) {
+                    // No inner cluster this controller can address: the copy names
+                    // none, or names a binding this controller holds no credential
+                    // for. Nothing here can ever confirm the mirror gone, so the
+                    // copy is released rather than held for ever. A binding that is
+                    // bound but unreachable, or refused, is not this case: it is
+                    // served, and the teardown below waits for it.
+                    let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, false));
+                    (at_step(WidgetSyncStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
                 } else {
                     // Teardown: read the mirror key.
                     let req = APIRequest::ListRequest(mirror_list(k, outer));
