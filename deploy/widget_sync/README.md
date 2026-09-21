@@ -28,6 +28,7 @@ You need docker, kind, kubectl, and the toolchain `tools/deploy.sh` uses.
 ```sh
 ./tools/two-cluster-test.sh --build          # build images, create the three clusters, deploy
 kubectl --context kind-widget-sync-outer apply -f deploy/widget_sync/widget.yaml
+kubectl --context kind-widget-sync-outer get widget demo
 kubectl --context kind-widget-sync-outer get widget demo -o yaml
 kubectl --context kind-widget-sync-inner-a get widget demo -o yaml
 cd e2e && cargo run -- widget-sync           # the end-to-end tests against the same clusters
@@ -39,6 +40,17 @@ Without `--build` the script reuses the images
 `local/widget-sync-controller:v0.1.0` and `local/widget-echo-controller:v0.1.0`.
 
 ## What to look at
+
+`kubectl get widget` prints the binding the copy names, the three conditions
+below and the reason behind a `Synced` that is not `True`:
+
+```
+NAME   CLUSTER   SYNCED   REASON   READY   STALLED   AGE
+demo   a         True     Synced   True    False     45s
+```
+
+A `Gadget` prints the same without the cluster column: its own name is the
+binding. Everything else is in `-o yaml`.
 
 On the outer copy:
 

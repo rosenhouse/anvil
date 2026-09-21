@@ -187,6 +187,15 @@ impl VStatefulSetSpec {
 #[kube(group = "anvil.dev", version = "v1", kind = "Widget")]
 #[kube(shortname = "wdg", namespaced)]
 #[kube(status = "WidgetStatus")]
+// What `kubectl get widget` shows: the binding the copy names, the three
+// conditions an operator reads, and the reason behind a `Synced` that is not
+// `True`. crd_manifest_tests pins the set and the paths.
+#[kube(printcolumn = r#"{"name":"Cluster","type":"string","jsonPath":".spec.clusterName"}"#)]
+#[kube(printcolumn = r#"{"name":"Synced","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].reason"}"#)]
+#[kube(printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#)]
 pub struct WidgetSpec {
     /// The name of the binding whose cluster receives the mirror. Immutable.
     // The immutability is the CEL rule `self == oldSelf` on the field in
@@ -295,6 +304,12 @@ impl Default for Widget {
 #[kube(group = "anvil.dev", version = "v1", kind = "Gadget")]
 #[kube(namespaced)]
 #[kube(status = "GadgetStatus")]
+// As Widget's, without a binding column: a Gadget's own name is the binding.
+#[kube(printcolumn = r#"{"name":"Synced","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].reason"}"#)]
+#[kube(printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#)]
 pub struct GadgetSpec {
     pub size: i32,
     pub labels: Option<Vec<String>>,
@@ -527,6 +542,38 @@ mod crd_manifest_tests {
     fn demo_crds_are_widget_then_gadget() {
         let names: Vec<String> = super::demo_crds().into_iter().map(|c| c.metadata.name.unwrap()).collect();
         assert_eq!(names, vec!["widgets.anvil.dev", "gadgets.anvil.dev"]);
+    }
+
+    // The columns `kubectl get` prints, as deploy/widget_sync/README.md states
+    // them. A Widget names its binding in the spec and a Gadget in its own name,
+    // which is the one column they differ by; the rest are the three conditions
+    // an operator reads and the reason behind a `Synced` that is not `True`.
+    #[test]
+    fn the_demo_crds_print_the_conditions() {
+        fn columns(crd: &k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition)
+            -> Vec<(String, String, String)> {
+            crd.spec.versions[0]
+                .additional_printer_columns
+                .as_ref()
+                .expect("no printer columns")
+                .iter()
+                .map(|c| (c.name.clone(), c.type_.clone(), c.json_path.clone()))
+                .collect()
+        }
+        let conditions = |type_: &str, field: &str| {
+            format!(".status.conditions[?(@.type==\"{}\")].{}", type_, field)
+        };
+        let shared = vec![
+            ("Synced".to_string(), "string".to_string(), conditions("Synced", "status")),
+            ("Reason".to_string(), "string".to_string(), conditions("Synced", "reason")),
+            ("Ready".to_string(), "string".to_string(), conditions("Ready", "status")),
+            ("Stalled".to_string(), "string".to_string(), conditions("Stalled", "status")),
+            ("Age".to_string(), "date".to_string(), ".metadata.creationTimestamp".to_string()),
+        ];
+        let mut widget = vec![("Cluster".to_string(), "string".to_string(), ".spec.clusterName".to_string())];
+        widget.extend(shared.clone());
+        assert_eq!(columns(&super::demo_crds()[0]), widget);
+        assert_eq!(columns(&super::demo_crds()[1]), shared);
     }
 
     // What `export` prints must boot: the shape check of the configured

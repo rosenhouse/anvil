@@ -12,7 +12,22 @@ spec:
     singular: gadget
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Synced")].status
+      name: Synced
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Synced")].reason
+      name: Reason
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Stalled")].status
+      name: Stalled
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
     name: v1
     schema:
       openAPIV3Schema:
