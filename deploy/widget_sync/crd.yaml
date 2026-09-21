@@ -13,7 +13,34 @@ spec:
     singular: widget
   scope: Namespaced
   versions:
-  - additionalPrinterColumns: []
+  - additionalPrinterColumns:
+    - jsonPath: .spec.clusterName
+      name: Cluster
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Synced")].status
+      name: Synced
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].status
+      name: Ready
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Stalled")].status
+      name: Stalled
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Synced")].reason
+      name: Synced-Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Ready")].reason
+      name: Ready-Reason
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="Stalled")].reason
+      name: Stalled-Reason
+      priority: 1
+      type: string
     name: v1
     schema:
       openAPIV3Schema:

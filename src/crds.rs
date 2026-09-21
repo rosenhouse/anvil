@@ -187,6 +187,21 @@ impl VStatefulSetSpec {
 #[kube(group = "anvil.dev", version = "v1", kind = "Widget")]
 #[kube(shortname = "wdg", namespaced)]
 #[kube(status = "WidgetStatus")]
+// What `kubectl get widget` shows: the binding the copy names and the three
+// conditions an operator reads. The reason of each condition is at `-o wide`,
+// where the one that explains the row is picked by the conditions beside it:
+// while `Synced` is `False` its own reason carries the outcome, and once it is
+// `True` the inner copy's reasons come through `Ready` and `Stalled`. This
+// dialect cannot fall through to whichever is live, so all three are printed.
+// crd_manifest_tests pins the set, the paths and the priorities.
+#[kube(printcolumn = r#"{"name":"Cluster","type":"string","jsonPath":".spec.clusterName"}"#)]
+#[kube(printcolumn = r#"{"name":"Synced","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#)]
+#[kube(printcolumn = r#"{"name":"Synced-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].reason","priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"Ready-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].reason","priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].reason","priority":1}"#)]
 pub struct WidgetSpec {
     /// The name of the binding whose cluster receives the mirror. Immutable.
     // The immutability is the CEL rule `self == oldSelf` on the field in
@@ -295,6 +310,14 @@ impl Default for Widget {
 #[kube(group = "anvil.dev", version = "v1", kind = "Gadget")]
 #[kube(namespaced)]
 #[kube(status = "GadgetStatus")]
+// As Widget's, without a binding column: a Gadget's own name is the binding.
+#[kube(printcolumn = r#"{"name":"Synced","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].status"}"#)]
+#[kube(printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#)]
+#[kube(printcolumn = r#"{"name":"Synced-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Synced\")].reason","priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"Ready-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].reason","priority":1}"#)]
+#[kube(printcolumn = r#"{"name":"Stalled-Reason","type":"string","jsonPath":".status.conditions[?(@.type==\"Stalled\")].reason","priority":1}"#)]
 pub struct GadgetSpec {
     pub size: i32,
     pub labels: Option<Vec<String>>,
@@ -527,6 +550,49 @@ mod crd_manifest_tests {
     fn demo_crds_are_widget_then_gadget() {
         let names: Vec<String> = super::demo_crds().into_iter().map(|c| c.metadata.name.unwrap()).collect();
         assert_eq!(names, vec!["widgets.anvil.dev", "gadgets.anvil.dev"]);
+    }
+
+    // The columns `kubectl get` prints, as deploy/widget_sync/README.md states
+    // them: the binding, the three conditions, and each condition's reason at
+    // `-o wide` (priority 1). A Widget names its binding in the spec and a Gadget
+    // in its own name, which is the one column they differ by.
+    #[test]
+    fn the_demo_crds_print_the_conditions() {
+        fn columns(crd: &k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition)
+            -> Vec<(String, String, String, Option<i32>)> {
+            crd.spec.versions[0]
+                .additional_printer_columns
+                .as_ref()
+                .expect("no printer columns")
+                .iter()
+                .map(|c| (c.name.clone(), c.type_.clone(), c.json_path.clone(), c.priority))
+                .collect()
+        }
+        let condition = |type_: &str, field: &str| {
+            format!(".status.conditions[?(@.type==\"{}\")].{}", type_, field)
+        };
+        let status = |type_: &str| {
+            (type_.to_string(), "string".to_string(), condition(type_, "status"), None)
+        };
+        // Every reason the three conditions carry is printed, because the
+        // JSONPath of a column cannot fall through to whichever one explains
+        // the row.
+        let reason = |type_: &str| {
+            (format!("{}-Reason", type_), "string".to_string(), condition(type_, "reason"), Some(1))
+        };
+        let shared = vec![
+            status("Synced"),
+            status("Ready"),
+            status("Stalled"),
+            ("Age".to_string(), "date".to_string(), ".metadata.creationTimestamp".to_string(), None),
+            reason("Synced"),
+            reason("Ready"),
+            reason("Stalled"),
+        ];
+        let mut widget = vec![("Cluster".to_string(), "string".to_string(), ".spec.clusterName".to_string(), None)];
+        widget.extend(shared.clone());
+        assert_eq!(columns(&super::demo_crds()[0]), widget);
+        assert_eq!(columns(&super::demo_crds()[1]), shared);
     }
 
     // What `export` prints must boot: the shape check of the configured

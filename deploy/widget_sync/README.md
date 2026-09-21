@@ -30,6 +30,7 @@ You need docker, kind, kubectl, and the toolchain `tools/deploy.sh` uses.
 kubectl --context kind-widget-sync-outer apply -f deploy/widget_sync/widget.yaml
 kubectl --context kind-widget-sync-outer get widget demo -o yaml
 kubectl --context kind-widget-sync-inner-a get widget demo -o yaml
+kubectl --context kind-widget-sync-outer get widget demo   # once the controller has reconciled it
 cd e2e && cargo run -- widget-sync           # the end-to-end tests against the same clusters
 cd e2e && cargo run -- widget-sync-kinds
 cd e2e && cargo run -- widget-sync-bindings
@@ -39,6 +40,29 @@ Without `--build` the script reuses the images
 `local/widget-sync-controller:v0.1.0` and `local/widget-echo-controller:v0.1.0`.
 
 ## What to look at
+
+On an outer copy, `kubectl get widget` prints the binding it names and the three
+conditions below; `-o wide` adds the reason of each. Until the controller has
+reconciled the object the four condition columns are empty.
+
+```
+$ kubectl --context kind-widget-sync-outer get widget
+NAME   CLUSTER   SYNCED   READY   STALLED   AGE
+demo   a         True     True    False     45s
+
+$ kubectl --context kind-widget-sync-outer get widget -o wide
+NAME   CLUSTER   SYNCED   READY   STALLED   AGE   SYNCED-REASON   READY-REASON   STALLED-REASON
+demo   a         True     True    False     45s   Synced          Echoed         Synced
+```
+
+`READY-REASON` is `Echoed` because that is the reason the demo's inner
+implementation writes; a mirror's own reasons come through `Ready` and
+`Stalled` once `Synced` is `True`. All three reasons are printed because a
+column's JSONPath cannot pick whichever one explains the row: read the one the
+condition columns point at. A `Gadget` prints the same without the cluster
+column, its own name being the binding. An inner copy has no `Synced` or
+`Stalled` of its own, so those columns are empty there. Everything else is in
+`-o yaml`.
 
 On the outer copy:
 
@@ -94,7 +118,8 @@ you tolerate. There is no `lastTransitionTime` to hold it on. `kubectl wait
 implementation reports no `Ready` condition: the outer copy reads
 `Ready=Unknown/NoInnerReadyCondition` for it.
 
-A `False` `Synced` condition carries one of these reasons. The `Stalled` and
+A `False` `Synced` condition carries one of these reasons, which is the
+`SYNCED-REASON` column of `kubectl get widget -o wide`. The `Stalled` and
 `Ready` columns are what the controller reports beside it, asserted by
 `unit_tests::widget_sync_controller::outer_status_for`:
 
