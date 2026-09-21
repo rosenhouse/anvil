@@ -26,7 +26,7 @@ use kube_core::{ErrorResponse, NamespaceResourceScope};
 use serde::{de::DeserializeOwned, Serialize};
 use tracing::{debug, error, info, warn};
 use crate::crds::Error;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::path::Path;
@@ -58,10 +58,86 @@ type KubeApiResource = kube::api::ApiResource;
 // clusters while the controllers run. A request to a binding that is not in the
 // map fails as if the cluster were unreachable, one to a refused binding as if
 // the cluster had denied it (see ClusterUnavailable).
+//
+// `known` is a different set: the bindings the process has a kubeconfig Secret
+// for, whether or not a client could be built from one. A cluster that is down
+// leaves the map and stays known. That is the set a reconciler is built with
+// (KnownBindings).
 #[derive(Clone)]
 pub struct ClusterClients {
     pub primary: Client,
     remotes: Arc<RwLock<HashMap<ClusterRef, RemoteBinding>>>,
+    known: KnownBindings,
+}
+
+// The bindings the process knows: one per kubeconfig Secret the binding manager
+// has seen, whatever state its cluster is in. It is what the sync reconciler is
+// built with, so `serves` means "this process has a credential for the binding",
+// not "the cluster is answering right now": a terminating copy of an unreachable
+// binding is waited for, and only one whose Secret is gone is released
+// (doc/widget_sync_design.md, section 1.5).
+//
+// It is unset until the binding manager's first List of the Secrets, and a
+// snapshot taken before then waits for it. The empty set is a claim -- this
+// process holds no credential for any cluster -- and reading it off a process
+// that has not looked yet would release every terminating copy at boot.
+#[derive(Clone)]
+pub struct KnownBindings(Arc<tokio::sync::watch::Sender<Option<HashSet<ClusterRef>>>>);
+
+impl KnownBindings {
+    // Unset: every snapshot waits for the first publish.
+    pub fn new() -> KnownBindings {
+        KnownBindings(Arc::new(tokio::sync::watch::channel(None).0))
+    }
+
+    // Set once, for a process whose bindings are fixed at boot.
+    pub fn fixed(bindings: impl IntoIterator<Item = ClusterRef>) -> KnownBindings {
+        let known = KnownBindings::new();
+        known.publish(bindings.into_iter().collect());
+        known
+    }
+
+    // What the next snapshot reads. The binding manager publishes the whole set
+    // on every change and is the only writer.
+    pub fn publish(&self, bindings: HashSet<ClusterRef>) {
+        self.0.send_replace(Some(bindings));
+    }
+
+    // The bindings known right now, in namespace and name order, waiting for the
+    // first publish if it has not come. A wait is reported, because until it ends
+    // nothing of this kind is reconciled and the process looks idle rather than
+    // blocked: the Secret watch is what it is waiting for.
+    pub async fn snapshot(&self) -> Vec<ClusterRef> {
+        let mut rx = self.0.subscribe();
+        let mut waited = false;
+        loop {
+            let current = rx.borrow_and_update().clone();
+            if let Some(bindings) = current {
+                if waited {
+                    info!("the bindings are known; reconciling again");
+                }
+                let mut bindings: Vec<ClusterRef> = bindings.into_iter().collect();
+                bindings.sort_by(|a, b| (&a.namespace, &a.name).cmp(&(&b.namespace, &b.name)));
+                return bindings;
+            }
+            if !waited {
+                warn!("waiting for the binding manager to list the kubeconfig Secrets; nothing is reconciled until it does");
+                waited = true;
+            }
+            if rx.changed().await.is_err() {
+                // Every sender is gone, so the process is shutting down and no
+                // set will ever be published. Waiting for ever is right here: an
+                // empty answer would read as "no binding exists".
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+
+    // Wait for the first publish and discard it: what the process does before it
+    // says it is ready.
+    pub async fn wait_listed(&self) {
+        let _ = self.snapshot().await;
+    }
 }
 
 // The two clients of a remote cluster: `requests` for reconcile requests, built
@@ -136,17 +212,27 @@ impl From<ClusterUnavailable> for Error {
 impl ClusterClients {
     // new starts with the primary client and no bound remote cluster.
     pub fn new(primary: Client) -> Self {
-        ClusterClients { primary, remotes: Arc::new(RwLock::new(HashMap::new())) }
+        ClusterClients { primary, remotes: Arc::new(RwLock::new(HashMap::new())), known: KnownBindings::new() }
     }
 
+    // A process with no remote cluster at all: nothing publishes a known set, so
+    // it is the empty one from the start and a snapshot answers at once.
     pub fn single(primary: Client) -> Self {
-        Self::new(primary)
+        ClusterClients {
+            primary,
+            remotes: Arc::new(RwLock::new(HashMap::new())),
+            known: KnownBindings::fixed(Vec::new()),
+        }
     }
 
     // with_remote is new plus one ready binding, for a process configured with a
     // fixed remote cluster.
     pub async fn with_remote(primary: Client, cluster: ClusterRef, clients: RemoteClients) -> Self {
-        let clusters = Self::new(primary);
+        let clusters = ClusterClients {
+            primary,
+            remotes: Arc::new(RwLock::new(HashMap::new())),
+            known: KnownBindings::fixed([cluster.clone()]),
+        };
         clusters.insert_remote(cluster, clients, BindingStatus::Ready).await;
         clusters
     }
@@ -192,6 +278,16 @@ impl ClusterClients {
 
     pub async fn remote_refs(&self) -> Vec<ClusterRef> {
         self.remotes.read().await.keys().cloned().collect()
+    }
+
+    // The bindings a reconciler is built with; see KnownBindings.
+    pub async fn known_refs(&self) -> Vec<ClusterRef> {
+        self.known.snapshot().await
+    }
+
+    // The binding manager's handle on the known set.
+    pub fn known(&self) -> KnownBindings {
+        self.known.clone()
     }
 
     // remote_of returns the clients of a bound cluster whatever its status; the
@@ -530,7 +626,7 @@ where
 // behaviour depends on the process's current bindings is built anew, from a
 // snapshot taken at the start of the reconcile, and is then fixed for the whole
 // of it: the sync reconciler of a kind takes the bound clusters
-// (ClusterClients::remote_refs) as its binding set, and the model its conformance
+// (ClusterClients::known_refs) as its binding set, and the model its conformance
 // proof is about is the one of that snapshot (doc/widget_sync_fanout_design.md,
 // section 3.2). A reconciler with no such state ignores the argument and returns
 // a constant.
@@ -1900,6 +1996,42 @@ mod tests {
         assert_eq!(names(filter.filter(Restarted(vec![object("a", "u3", 2), object("c", "u5", 1)]))), Vec::<String>::new());
         assert_eq!(names(filter.filter(Applied(object("b", "u4", 3)))), vec!["b"]);
         assert_eq!(filter.seen.len(), 3);
+    }
+
+    fn binding(namespace: &str, name: &str) -> ClusterRef {
+        ClusterRef::new(namespace.to_string(), name.to_string())
+    }
+
+    fn binding_names(bindings: &[ClusterRef]) -> Vec<String> {
+        bindings.iter().map(|b| format!("{}/{}", b.namespace, b.name)).collect()
+    }
+
+    // The set a reconcile is built with answers only once the binding manager
+    // has listed, and then it answers in order. Before that a snapshot waits:
+    // the empty set means "this process holds no credential for any cluster",
+    // which the sync teardown releases terminating copies on, and a process that
+    // has not looked yet must not say it.
+    #[tokio::test]
+    async fn the_known_bindings_answer_nothing_until_the_first_list() {
+        let known = KnownBindings::new();
+        assert!(tokio::time::timeout(Duration::from_millis(50), known.snapshot()).await.is_err());
+
+        known.publish([binding("tenant", "a"), binding("default", "b")].into_iter().collect());
+        assert_eq!(binding_names(&known.snapshot().await), vec!["default/b", "tenant/a"]);
+
+        // A cluster that goes away leaves the set; the empty set is now an answer.
+        known.publish([binding("tenant", "a")].into_iter().collect());
+        assert_eq!(binding_names(&known.snapshot().await), vec!["tenant/a"]);
+        known.publish(HashSet::new());
+        assert!(known.snapshot().await.is_empty());
+    }
+
+    // A process whose bindings are fixed at boot never waits.
+    #[tokio::test]
+    async fn fixed_known_bindings_answer_at_once() {
+        assert!(KnownBindings::fixed(Vec::new()).snapshot().await.is_empty());
+        let one = KnownBindings::fixed([binding("tenant", "a")]);
+        assert_eq!(binding_names(&one.snapshot().await), vec!["tenant/a"]);
     }
 
     // The requeue of a finished reconcile, and of a read that fails before the

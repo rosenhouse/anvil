@@ -17,6 +17,7 @@ use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::{
 };
 use kube::{Api, Client};
 use std::fmt;
+use tracing::warn;
 
 /// One failing row of the table in design section 2.2.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -413,14 +414,55 @@ pub fn check_kind_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Fetch the CRD of `kind` from the cluster `client` talks to and run `check_shape`.
+/// Whether this kind's status schema declares nothing beyond the two fields the
+/// controller itself always writes and does not preserve unknown fields. A
+/// structural schema drops what it does not declare on write, so such a status
+/// keeps no mirrored remainder at all. It is one shape, not a test for pruning:
+/// a status declaring one unrelated field is not reported here and still prunes
+/// everything the inner side writes. Why it is a warning and not a shape error:
+/// `doc/widget_sync_fanout_design.md`, section 2.2.
+pub fn status_prunes_the_remainder(crd: &CustomResourceDefinition, kind: &KindConfig) -> bool {
+    let schema = crd
+        .spec
+        .versions
+        .iter()
+        .find(|v| v.name == kind.version && v.served)
+        .and_then(|v| v.schema.as_ref())
+        .and_then(|s| s.open_api_v3_schema.as_ref());
+    let status = match schema.and_then(|schema| property(schema, "status")) {
+        Some(status) => status,
+        // No status schema at all is a shape error, reported as one.
+        None => return false,
+    };
+    if status.x_kubernetes_preserve_unknown_fields.unwrap_or(false) {
+        return false;
+    }
+    match status.properties.as_ref() {
+        Some(properties) => properties.keys().all(|name| STATUS_ALWAYS_WRITTEN.contains(&name.as_str())),
+        None => true,
+    }
+}
+
+/// Fetch the CRD of `kind` from the cluster `client` talks to and run
+/// `check_shape`. A status schema that would prune the mirrored fields is warned
+/// about, not refused.
 pub async fn check_crd(client: &Client, kind: &KindConfig, plural: &str) -> Result<(), CrdCheckError> {
     let name = crd_name(kind, plural);
     let crd = Api::<CustomResourceDefinition>::all(client.clone())
         .get(&name)
         .await
         .map_err(|source| CrdCheckError::Fetch { name: name.clone(), source })?;
-    check_shape(&crd, kind).map_err(|errors| CrdCheckError::Shape { name, errors })
+    check_shape(&crd, kind).map_err(|errors| CrdCheckError::Shape { name: name.clone(), errors })?;
+    if status_prunes_the_remainder(&crd, kind) {
+        warn!(
+            "{}: status declares only {} and does not set x-kubernetes-preserve-unknown-fields; \
+             a structural schema prunes the rest, so the outer copy will show conditions and \
+             nothing else",
+            name,
+            STATUS_ALWAYS_WRITTEN.join(" and ")
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -870,6 +912,31 @@ mod tests {
         );
     }
 
+    // The warning is about what a structural schema drops on write, which is a
+    // shape the check accepts. It fires for a status that declares only what the
+    // controller itself writes and preserves nothing else.
+    #[test]
+    fn a_status_that_declares_only_our_own_fields_is_warned_about() {
+        let full = good_crd(with_cluster_name(old_widget_spec(), true), widget_status());
+        assert_eq!(check_shape(&full, &by_field()), Ok(()));
+        assert!(!status_prunes_the_remainder(&full, &by_field()));
+
+        let mut status = widget_status();
+        status["properties"] = json!({
+            "observedGeneration": status["properties"]["observedGeneration"].clone(),
+            "conditions": status["properties"]["conditions"].clone(),
+        });
+        let bare = good_crd(with_cluster_name(old_widget_spec(), true), status.clone());
+        assert_eq!(check_shape(&bare, &by_field()), Ok(()));
+        assert!(status_prunes_the_remainder(&bare, &by_field()));
+
+        // Preserving unknown fields is the other way to keep the remainder.
+        status["x-kubernetes-preserve-unknown-fields"] = json!(true);
+        let preserving = good_crd(with_cluster_name(old_widget_spec(), true), status);
+        assert_eq!(check_shape(&preserving, &by_field()), Ok(()));
+        assert!(!status_prunes_the_remainder(&preserving, &by_field()));
+    }
+
     // The demo manifests must pass with the selectors the demo configures.
     #[test]
     fn the_demo_crd_manifests_have_the_shape() {
@@ -877,11 +944,15 @@ mod tests {
             serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd.yaml")).unwrap();
         assert_eq!(check_shape(&widget, &by_field()), Ok(()));
         assert_eq!(check_shape(&widget, &by_name()), Ok(()));
+        // Each declares the field its inner implementation reports, so neither
+        // draws the pruning warning.
+        assert!(!status_prunes_the_remainder(&widget, &by_field()));
 
         let gadget: CustomResourceDefinition =
             serde_yaml::from_str(include_str!("../../deploy/widget_sync/crd_gadget.yaml")).unwrap();
         let gadget_by_name: KindConfig = "anvil.dev/v1/Gadget:name".parse().unwrap();
         assert_eq!(check_shape(&gadget, &gadget_by_name), Ok(()));
+        assert!(!status_prunes_the_remainder(&gadget, &gadget_by_name));
         // Gadget has no cluster field, so a field selector is refused on the spec row alone.
         let gadget_by_field: KindConfig = "anvil.dev/v1/Gadget:field:spec.clusterName".parse().unwrap();
         let errors = check_shape(&gadget, &gadget_by_field).unwrap_err();

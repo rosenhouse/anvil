@@ -47,8 +47,9 @@ fn not_synced_outcomes() -> Vec<(SyncOutcome, &'static str, &'static str, &'stat
         (SyncOutcome::ForeignObject, "ForeignObject", "True", "False"),
         (SyncOutcome::Failed(FailureReason::Forbidden), "Forbidden", "True", "Unknown"),
         (SyncOutcome::Failed(FailureReason::InnerUnreachable), "InnerUnreachable", "False", "Unknown"),
-        (SyncOutcome::Failed(FailureReason::CreateFailed), "CreateFailed", "False", "False"),
+        (SyncOutcome::Failed(FailureReason::CreateFailed), "CreateFailed", "True", "False"),
         (SyncOutcome::Failed(FailureReason::Rejected), "Rejected", "True", "False"),
+        (SyncOutcome::Failed(FailureReason::SpecRewritten), "SpecRewritten", "True", "False"),
         (SyncOutcome::Failed(FailureReason::RequestFailed), "RequestFailed", "False", "Unknown"),
     ]
 }
@@ -79,7 +80,7 @@ fn the_readme_table_is_the_not_synced_outcomes() {
 #[test]
 fn the_readme_table_has_a_row_per_not_synced_outcome() {
     let rows = not_synced_outcomes();
-    assert_eq!(rows.len(), 9);
+    assert_eq!(rows.len(), 10);
     for (outcome, _, _, _) in rows {
         match outcome {
             SyncOutcome::Synced => panic!("Synced is not a row of the table"),
@@ -91,6 +92,7 @@ fn the_readme_table_has_a_row_per_not_synced_outcome() {
             | SyncOutcome::Failed(FailureReason::InnerUnreachable)
             | SyncOutcome::Failed(FailureReason::CreateFailed)
             | SyncOutcome::Failed(FailureReason::Rejected)
+            | SyncOutcome::Failed(FailureReason::SpecRewritten)
             | SyncOutcome::Failed(FailureReason::RequestFailed) => {}
         }
     }

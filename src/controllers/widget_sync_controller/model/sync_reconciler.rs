@@ -151,15 +151,18 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                     // Terminating without the sync finalizer: not this controller's
                     // to tear down, and a status write would only prolong it.
                     done
-                } else if cluster_of(k.selector, outer) is None {
-                    // The copy names no inner cluster, so there is no mirror key to
-                    // confirm: report the rejection and keep the finalizer until the
-                    // copy names one again or the finalizer is removed by hand.
-                    write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::Rejected)))
-                } else if !serves(k, outer) {
-                    // The inner cluster cannot be reached from this controller, so
-                    // the mirror cannot be confirmed gone: report and requeue.
-                    report_error(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::InnerUnreachable)))
+                } else if cluster_of(k.selector, outer) is None || !serves(k, outer) {
+                    // No inner cluster this controller can address: the copy names
+                    // none, or names a binding it holds no credential for. Nothing
+                    // here can confirm the mirror gone, and holding the copy for
+                    // ever is the worse failure, so it is released and any mirror is
+                    // left to the janitor of that binding. A live copy waits instead,
+                    // because a binding that appears later is served by a later
+                    // reconcile; a terminating copy has no later. A bound but
+                    // unreachable or refused binding is served, and the teardown
+                    // below waits for it.
+                    let req = APIRequest::UpdateRequest(outer_finalizer_update(outer, false));
+                    (at_step(WidgetSyncStepView::AfterRemoveFinalizer), Some(RequestView::KRequest(req)))
                 } else {
                     // Teardown: read the mirror key.
                     let req = APIRequest::ListRequest(mirror_list(k, outer));
@@ -283,11 +286,23 @@ pub open spec fn reconcile_core(k: SyncKind, outer: SyncedObjectView, resp_o: Op
                 error
             } else {
                 let res = extract_some_k_patch_resp_view(resp_o);
-                if res is Ok {
-                    done
-                } else {
+                if res is Err {
                     // The Patch failed: report why, then requeue.
                     report_error(k, outer, failure_status(outer, res->Err_0, false))
+                } else {
+                    let unmarshalled = unmarshal(inner_key(k, outer).kind, res->Ok_0);
+                    if unmarshalled is Err {
+                        error
+                    } else if unmarshalled->Ok_0.spec != outer.spec {
+                        // The Patch landed and the inner cluster stored another
+                        // spec: admission or defaulting there rewrote it, and
+                        // patching again would only repeat that. The model's API
+                        // server stores what a Patch writes, so this is reachable
+                        // only against a real one.
+                        write_outer_status_or_done(k, outer, reported_status(outer, SyncOutcomeView::Failed(FailureReasonView::SpecRewritten)))
+                    } else {
+                        done
+                    }
                 }
             }
         },

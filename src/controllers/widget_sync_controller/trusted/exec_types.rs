@@ -104,6 +104,7 @@ pub enum FailureReason {
     InnerUnreachable,
     CreateFailed,
     Rejected,
+    SpecRewritten,
     RequestFailed,
 }
 
@@ -116,6 +117,7 @@ impl View for FailureReason {
             FailureReason::InnerUnreachable => spec_types::FailureReasonView::InnerUnreachable,
             FailureReason::CreateFailed => spec_types::FailureReasonView::CreateFailed,
             FailureReason::Rejected => spec_types::FailureReasonView::Rejected,
+            FailureReason::SpecRewritten => spec_types::FailureReasonView::SpecRewritten,
             FailureReason::RequestFailed => spec_types::FailureReasonView::RequestFailed,
         }
     }
@@ -130,6 +132,7 @@ impl FailureReason {
             FailureReason::InnerUnreachable => "InnerUnreachable".to_string(),
             FailureReason::CreateFailed => "CreateFailed".to_string(),
             FailureReason::Rejected => "Rejected".to_string(),
+            FailureReason::SpecRewritten => "SpecRewritten".to_string(),
             FailureReason::RequestFailed => "RequestFailed".to_string(),
         }
     }
@@ -190,6 +193,8 @@ impl SyncOutcome {
             SyncOutcome::ForeignObject => true,
             SyncOutcome::Failed(FailureReason::Forbidden) => true,
             SyncOutcome::Failed(FailureReason::Rejected) => true,
+            SyncOutcome::Failed(FailureReason::CreateFailed) => true,
+            SyncOutcome::Failed(FailureReason::SpecRewritten) => true,
             _ => false,
         }
     }

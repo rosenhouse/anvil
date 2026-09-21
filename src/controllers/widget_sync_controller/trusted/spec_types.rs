@@ -337,13 +337,17 @@ impl SyncOutcomeView {
         }
     }
 
-    // A case the reconciler cannot get out of by itself: a foreign object it
-    // refuses to adopt, a credential the inner cluster refuses, a request it
-    // rejects, an object that names no inner cluster.
+    // A case the reconciler cannot get out of by itself, and `Stalled` says so:
+    // a foreign object it refuses to adopt, a credential the inner cluster
+    // refuses, a request it rejects, an object that names no inner cluster, a
+    // Create answered NotFound (nothing here creates the inner namespace, nor
+    // installs the kind), a spec the inner cluster rewrote. None of them stops
+    // the reconcile retrying on its requeue; the operator is what is waited for.
     pub open spec fn permanent(self) -> bool {
         match self {
             SyncOutcomeView::ForeignObject => true,
-            SyncOutcomeView::Failed(failure) => failure is Forbidden || failure is Rejected,
+            SyncOutcomeView::Failed(failure) => failure is Forbidden || failure is Rejected || failure is CreateFailed
+                || failure is SpecRewritten,
             _ => false,
         }
     }
@@ -357,8 +361,8 @@ impl SyncOutcomeView {
     // running the spec, and Ready does not deny it. A reason that arises only
     // once the reconcile knows no mirror of this copy runs the spec -- the
     // object at the mirror key is foreign or stale (ForeignObject, StaleMirror),
-    // the Create failed (CreateFailed), a request was rejected (Rejected) --
-    // reads False. Where a reason can arise both ways, such as a Create refused
+    // the Create failed (CreateFailed), a request was rejected (Rejected), the
+    // mirror holds another spec (SpecRewritten) -- reads False. Where a reason can arise both ways, such as a Create refused
     // after a NotFound, Unknown retracts nothing. reason_reads_ready_unknown is
     // the same split, keyed by the reason the request carries.
     pub open spec fn ready_unknown(self) -> bool {
@@ -545,6 +549,10 @@ pub enum FailureReasonView {
     CreateFailed,
     // The request was rejected as invalid, or the object names no inner cluster.
     Rejected,
+    // The Patch of the mirror's spec landed and the inner cluster stored a
+    // different spec: admission or defaulting there rewrote it. Patching again
+    // would only repeat that, so the outcome is permanent.
+    SpecRewritten,
     // Anything else.
     RequestFailed,
 }
@@ -556,6 +564,7 @@ impl FailureReasonView {
             FailureReasonView::InnerUnreachable => "InnerUnreachable"@,
             FailureReasonView::CreateFailed => "CreateFailed"@,
             FailureReasonView::Rejected => "Rejected"@,
+            FailureReasonView::SpecRewritten => "SpecRewritten"@,
             FailureReasonView::RequestFailed => "RequestFailed"@,
         }
     }
@@ -591,9 +600,10 @@ pub open spec fn error_reason(err: APIError, answering_create: bool) -> FailureR
 pub open spec fn no_cluster_name() -> StringView { ""@ }
 
 // The binding of `outer`: its namespace and the cluster its selector names.
-// A selector-less outer copy is refused at `Init` (Failed(Rejected)) before
-// `serves` is ever consulted, so a binding (ns, no_cluster_name()) that happens
-// to be in `k.bindings` is never served for such an object.
+// A selector-less outer copy never reaches the inner side: at `Init` a live one
+// is refused (Failed(Rejected)) and a terminating one is released, both before
+// `serves` is consulted, so a binding (ns, no_cluster_name()) that happens to be
+// in `k.bindings` is never served for such an object.
 pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
     ClusterRefView {
         namespace: outer.metadata.namespace->0,
@@ -605,9 +615,10 @@ pub open spec fn binding_of(k: SyncKind, outer: SyncedObjectView) -> Binding {
 }
 
 // The controller knows the binding of `outer`. A reconcile of an outer copy this
-// is false of reports Failed(InnerUnreachable) and ends without ever addressing
-// the inner side, so every request the sync reconciler sends names a binding of
-// `k.bindings` and, with that set finite, a kind a concrete cluster can install.
+// is false of ends without ever addressing the inner side -- a live copy reports
+// Failed(InnerUnreachable), a terminating one is released -- so every request the
+// sync reconciler sends to an inner cluster names a binding of `k.bindings` and,
+// with that set finite, a kind a concrete cluster can install.
 pub open spec fn serves(k: SyncKind, outer: SyncedObjectView) -> bool {
     k.bindings.contains(binding_of(k, outer))
 }

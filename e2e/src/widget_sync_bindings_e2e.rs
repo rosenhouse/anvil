@@ -16,7 +16,8 @@
 //      Synced=False/Forbidden with Stalled=True, no mirror of it is ever
 //      created, and the mirrors of namespace `default` in cluster `a` survive a
 //      janitor window untouched (a refused binding runs no janitor);
-//   3. a missing Secret reads as an unreachable cluster: deleting `b-kubeconfig`
+//   3. a missing Secret reads as an unreachable cluster for a live copy (a
+//      terminating one is released, scenario 6): deleting `b-kubeconfig`
 //      makes the Widget bound to `b` report Synced=False/InnerUnreachable within
 //      two requeues, and re-creating the Secret brings it back to Synced=True at
 //      a spec edited while it was down -- so the mirror it ends up with was
@@ -29,7 +30,11 @@
 //   5. the claim is re-created: deleting `kube-system/anvil-sync-claim` in
 //      inner-a is answered, within the bound binding's re-check interval, by the
 //      same claim written again, which is what keeps a released cluster from
-//      being taken by a second binding unnoticed.
+//      being taken by a second binding unnoticed;
+//   6. a copy whose binding has no kubeconfig Secret is released without
+//      confirmation: with the copied Secret of the refused binding deleted,
+//      deleting the tenant Widget lets it go on its own, where a bound binding
+//      would have held it terminating until its cluster answered.
 use k8s_openapi::api::core::v1::{ConfigMap, Namespace, Secret};
 use k8s_openapi::ByteString;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
@@ -51,7 +56,7 @@ use crate::common::*;
 use crate::widget_sync_e2e::{
     client_for_context, failed, is_mirror_of, outer_reports, still_the_same_mirror, synced_condition, uid, wait_for,
     wait_until, Widgets, BACKED_OFF_RETRY, JANITOR_WINDOW, MARGIN, ONE_RECONCILE, OUTER_CONTEXT, REMOTE_TIMEOUT,
-    remove_finalizer, REQUEUE, RETRY_BASE, SYNC_FINALIZER, TIMEOUT,
+    REQUEUE, RETRY_BASE, TIMEOUT,
 };
 
 const INNER_A_CONTEXT: &str = "kind-widget-sync-inner-a";
@@ -469,23 +474,21 @@ pub async fn widget_sync_bindings_e2e_test() -> Result<(), Error> {
     .await?;
     info!("the released claim was taken again by the binding that holds the cluster");
 
-    // Leave the clusters as they were found: the outer copies go, each teardown
-    // removes its mirror, and the copied credential of the refused binding is
-    // removed so that a later run starts from one binding per inner cluster.
-    // `gamma` is served by the refused binding, so its teardown cannot confirm
-    // its mirror gone (there is none, and the List that would say so is answered
-    // Forbidden): the copy would stay terminating under the sync finalizer. The
-    // escape hatch of the deploy README applies -- delete, then remove the
-    // finalizer by hand -- and the copy goes at once.
+    // 6. Deleting the copied Secret unbinds `tenant/a`, so `gamma` is released
+    //    with no hand-stripped finalizer. This also leaves the clusters as they
+    //    were found. `gamma` has been reporting Forbidden since scenario 2, so
+    //    its reconcile is on the backed-off schedule, and the release can also
+    //    take one failed teardown first if the delete is noticed before the
+    //    unbinding is: BACKED_OFF_RETRY, not ONE_RECONCILE.
+    tenant_secrets.delete(A_SECRET, &DeleteParams::default()).await.map_err(failed("delete the copied Secret"))?;
+    info!("deleted the copied Secret, so the binding {}/a has no kubeconfig Secret", TENANT);
     tenant_outer.api.delete("gamma", &DeleteParams::default()).await.map_err(failed("delete the tenant widget"))?;
-    remove_finalizer(&tenant_outer, "gamma", SYNC_FINALIZER).await?;
     let t = tenant_outer.clone();
-    wait_until("the tenant widget stripped of the sync finalizer is gone", TIMEOUT, move || {
+    wait_until("the tenant widget of an unbound binding is released and gone", BACKED_OFF_RETRY, move || {
         let t = t.clone();
         async move { Ok(t.get_opt("gamma").await?.is_none()) }
     })
     .await?;
-    tenant_secrets.delete(A_SECRET, &DeleteParams::default()).await.map_err(failed("delete the copied Secret"))?;
     namespaces.delete(TENANT, &DeleteParams::default()).await.map_err(failed("delete the tenant namespace"))?;
     inner_a_namespaces
         .delete(TENANT, &DeleteParams::default())

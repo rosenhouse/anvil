@@ -177,8 +177,9 @@ pub proof fn lemma_always_sync_crs_are_bound(spec: TempPred<ClusterState>, clust
 
 // The steps at which the sync reconciler is working on the mirror: the Get of the
 // mirror and the two writes that can follow it. The Init step reaches AfterGetInner
-// only when its snapshot's selector names a cluster (the other outcome of Init is
-// the status write that reports the rejection), and the snapshot of a reconcile
+// only when its snapshot's selector names a cluster (a live copy that names none
+// has the rejection written into its status; a terminating one is released), and
+// the snapshot of a reconcile
 // never changes, so at these three steps the selection is a name. This is what the
 // Create of a mirror needs: without it, an outer copy naming no cluster and one
 // naming the empty cluster name are indistinguishable, which is what binding_of
@@ -471,8 +472,8 @@ pub proof fn lemma_outer_status_for_conditions_are_coherent(generation: Option<i
 
 // The outcomes under which Ready reads Unknown are exactly those whose reason
 // reason_reads_ready_unknown names. Every reason that reads Unknown differs in
-// length from every reason that does not, except ForeignObject and
-// RequestFailed, which differ in their first character.
+// length from every reason that does not, except RequestFailed, which differs
+// in its first character from ForeignObject and SpecRewritten.
 pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     ensures outcome.ready_unknown() <==> reason_reads_ready_unknown(outcome.reason()),
 {
@@ -485,6 +486,7 @@ pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     reveal_strlit("InnerUnreachable");
     reveal_strlit("CreateFailed");
     reveal_strlit("Rejected");
+    reveal_strlit("SpecRewritten");
     reveal_strlit("RequestFailed");
     assert("Synced"@.len() == 6);
     assert("InnerConverging"@.len() == 15);
@@ -495,8 +497,10 @@ pub proof fn lemma_ready_unknown_by_reason(outcome: SyncOutcomeView)
     assert("InnerUnreachable"@.len() == 16);
     assert("CreateFailed"@.len() == 12);
     assert("Rejected"@.len() == 8);
+    assert("SpecRewritten"@.len() == 13);
     assert("RequestFailed"@.len() == 13);
     assert("ForeignObject"@[0] != "RequestFailed"@[0]);
+    assert("SpecRewritten"@[0] != "RequestFailed"@[0]);
 }
 
 // No outcome but Synced reports the reason Synced. Each reason is a distinct
@@ -513,6 +517,7 @@ pub proof fn lemma_synced_is_the_only_synced_reason(outcome: SyncOutcomeView)
     reveal_strlit("InnerUnreachable");
     reveal_strlit("CreateFailed");
     reveal_strlit("Rejected");
+    reveal_strlit("SpecRewritten");
     reveal_strlit("RequestFailed");
     assert("Synced"@.len() != "InnerConverging"@.len());
     assert("Synced"@.len() != "InnerTerminating"@.len());
@@ -522,6 +527,7 @@ pub proof fn lemma_synced_is_the_only_synced_reason(outcome: SyncOutcomeView)
     assert("Synced"@.len() != "InnerUnreachable"@.len());
     assert("Synced"@.len() != "CreateFailed"@.len());
     assert("Synced"@.len() != "Rejected"@.len());
+    assert("Synced"@.len() != "SpecRewritten"@.len());
     assert("Synced"@.len() != "RequestFailed"@.len());
 }
 
@@ -846,10 +852,17 @@ proof fn lemma_sync_new_request_is_guaranteed(
                     }
                 },
                 APIRequest::UpdateRequest(update_req) => {
-                    assert(update_req == sync_reconciler::outer_finalizer_update(outer, true));
-                    // The finalizer is added at Init only when the snapshot lacks it.
-                    assert(!has_sync_finalizer(outer.metadata));
-                    lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, true);
+                    if outer.metadata.deletion_timestamp is Some {
+                        // This releases a terminating copy this controller cannot
+                        // address.
+                        assert(update_req == sync_reconciler::outer_finalizer_update(outer, false));
+                        lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, false);
+                    } else {
+                        assert(update_req == sync_reconciler::outer_finalizer_update(outer, true));
+                        // The finalizer is added at Init only when the snapshot lacks it.
+                        assert(!has_sync_finalizer(outer.metadata));
+                        lemma_snapshot_finalizer_update_is_guaranteed(k, controller_id, s, cr_key, true);
+                    }
                 },
                 APIRequest::ListRequest(list_req) => {
                     assert(list_req == sync_reconciler::mirror_list(k, outer));
