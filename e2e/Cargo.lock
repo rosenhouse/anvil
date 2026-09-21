@@ -455,6 +455,7 @@ name = "e2e_test"
 version = "0.1.0"
 dependencies = [
  "futures",
+ "http 1.1.0",
  "k8s-openapi",
  "kube",
  "kube-client",

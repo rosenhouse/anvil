@@ -10,7 +10,10 @@
 //      references; the outer copy carries the sync finalizer
 //      `anvil.dev/widget-sync` and the mirror carries no finalizer of ours;
 //   2. the outer copy's status reports the inner copy's status, stamped with the
-//      outer generation (1 for a fresh object) and a true Synced condition;
+//      outer generation (1 for a fresh object) and a true Synced condition, and
+//      the row `kubectl get widget` prints carries every column the CRD
+//      declares -- a printer column whose JSONPath the API server cannot parse
+//      is dropped when it first serves a table, and nothing else would catch it;
 //   3. a spec change bumps the outer generation by exactly one, propagates, and
 //      the status catches up at the new generation;
 //   4. an out-of-band edit of the mirror's spec in the inner cluster is
@@ -140,6 +143,45 @@ fn widget(name: &str, count: i32, message: &str) -> Widget {
     let mut w = Widget::new(name, spec);
     w.metadata.namespace = Some("default".to_string());
     w
+}
+
+// The row `kubectl get` prints, straight from the API server: the Table
+// representation, rendered by the API server from the CRD's printer columns.
+// Asking for it is the only way to find out whether those columns work. The
+// API server accepts any JSONPath beginning with a dot when the CRD is
+// created and only parses it when it first serves a Table; a path it cannot
+// parse is dropped there, with the whole table falling back to NAME and AGE
+// and nothing said about it on this side.
+async fn printed_row(client: &Client, name: &str) -> Result<(Vec<String>, Vec<String>), Error> {
+    let uri = format!("/apis/anvil.dev/v1/namespaces/default/widgets/{}", name);
+    let req = http::Request::builder()
+        .method("GET")
+        .uri(uri)
+        .header("Accept", "application/json;as=Table;v=v1;g=meta.k8s.io")
+        .body(Vec::new())
+        .map_err(|e| {
+            error!("cannot build the Table request for Widget {}: {}", name, e);
+            Error::WidgetSyncFailed
+        })?;
+    let table: serde_json::Value = client.request(req).await.map_err(|e| {
+        error!("cannot read Widget {} as a Table: {}", name, e);
+        Error::WidgetLookupFailed(e)
+    })?;
+    let strings = |v: Option<&serde_json::Value>| -> Vec<String> {
+        v.and_then(|v| v.as_array())
+            .map(|a| a.iter().map(|c| match c {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Null => String::new(),
+                other => other.to_string(),
+            }).collect())
+            .unwrap_or_default()
+    };
+    let columns = table["columnDefinitions"]
+        .as_array()
+        .map(|a| a.iter().map(|c| c["name"].as_str().unwrap_or("").to_string()).collect())
+        .unwrap_or_default();
+    let cells = strings(table["rows"].as_array().and_then(|r| r.first()).map(|r| &r["cells"]));
+    Ok((columns, cells))
 }
 
 // Widgets in namespace `default` of one cluster.
@@ -391,6 +433,36 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
         }
     })
     .await?;
+
+    // 2b. The row `kubectl get widget` prints. Every column is checked, because
+    //     the API server drops a printer column whose JSONPath it cannot parse
+    //     and says so only in its own log: a typo would leave NAME and AGE and
+    //     no test would notice. This is also what pins the sample output in
+    //     deploy/widget_sync/README.md.
+    let (columns, cells) = printed_row(&outer_client, "demo").await?;
+    let expected_columns =
+        vec!["Name", "Cluster", "Synced", "Ready", "Stalled", "Age", "Synced-Reason", "Ready-Reason", "Stalled-Reason"];
+    if columns != expected_columns {
+        error!("kubectl get widget prints {:?}, expected {:?}; a printer column the API server could not parse is dropped silently", columns, expected_columns);
+        return Err(Error::WidgetSyncFailed);
+    }
+    // The demo's inner implementation reports Ready=True with its own reason
+    // and writes no Stalled, so the outer copy reads Stalled=False/Synced
+    // (deploy/widget_sync/README.md, "What to look at"). Age is a duration this
+    // test does not pin.
+    let expected_cells = vec!["demo", "a", "True", "True", "False"];
+    if cells.len() != expected_columns.len() || cells[..5] != expected_cells[..] {
+        error!("kubectl get widget prints the row {:?}, expected {:?} then AGE and the three reasons", cells, expected_cells);
+        return Err(Error::WidgetSyncFailed);
+    }
+    // The three reasons `-o wide` adds. Ready's is the echo controller's own,
+    // copied through; the other two are the sync controller's.
+    let expected_reasons = vec!["Synced", "Echoed", "Synced"];
+    if cells[6..] != expected_reasons[..] {
+        error!("the wide row {:?} carries the reasons {:?}, expected {:?}", cells, &cells[6..], expected_reasons);
+        return Err(Error::WidgetSyncFailed);
+    }
+    info!("kubectl get widget prints {:?} over {:?}: ok", cells, columns);
 
     // 3. A spec change bumps the generation by exactly one, propagates, and the
     //    status catches up at the new generation.
