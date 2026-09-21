@@ -83,6 +83,12 @@ spec:
               value: /run/widget-sync/ready
             - name: JANITOR_PAUSE_FILE
               value: /etc/widget-sync/janitor/pause
+            # reportingInstance on every Event this process publishes, which
+            # events.k8s.io requires: which run of this Deployment reported it.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
           # A startup probe, not a readiness probe: the file appears once the
           # boot checks have passed and never disappears, so there is nothing
           # to re-check afterwards.

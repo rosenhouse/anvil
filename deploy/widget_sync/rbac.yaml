@@ -22,7 +22,7 @@
 # (`controller crash`, src/shim_layer/fault_injection.rs) needs: it gets and
 # replaces the one ConfigMap default/fault-injection-config through the primary
 # client, so the grant is get and update on that name only. `run` mode never
-# uses it. Not granted: events (the controller emits none).
+# uses it.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -64,6 +64,15 @@ rules:
       - gadgets/status
     verbs:
       - patch
+  # One Event per status write, which is one reported-state change, on the
+  # object the status belongs to. `create` only: an Event is never read back or
+  # amended, and the API server expires it on its own.
+  - apiGroups:
+      - events.k8s.io
+    resources:
+      - events
+    verbs:
+      - create
   # The bindings: the manager watches every namespace, selecting on the label
   # `cluster.x-k8s.io/cluster-name`, so no other Secret reaches this process.
   - apiGroups:

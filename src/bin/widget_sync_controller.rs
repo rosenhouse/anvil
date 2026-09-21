@@ -66,6 +66,9 @@ const USAGE: &str = "usage: widget_sync_controller export
 // The fieldManager both reconcilers write with; the API server records it in
 // the managedFields of the mirrors and of the outer status.
 const FIELD_MANAGER: &str = "widget-sync";
+// What an Event this process publishes is reported by, in `kubectl describe`
+// and in the Event's own reportingController.
+const EVENT_REPORTER: &str = "widget-sync-controller";
 
 // Requests to an inner cluster time out quickly so that a partition surfaces as
 // a failed reconcile (which is retried) instead of a hung one. The binding
@@ -379,7 +382,11 @@ async fn main() -> Result<()> {
             }
             let outer_id = outer_cluster_id(&primary, cluster_id_override).await?;
 
-            let clusters = ClusterClients::new(primary);
+            // Events are reported as this controller, from this pod. The pod
+            // name is `reportingInstance`, which events.k8s.io requires, and it
+            // is what says which run of the Deployment reported a given Event.
+            let clusters = ClusterClients::new(primary)
+                .reporting_events_as(EVENT_REPORTER, env::var("POD_NAME").ok());
 
             // One shutdown signal for the whole process: on SIGTERM (or SIGINT)
             // the sync runners and the binding manager stop taking new work and
@@ -687,6 +694,24 @@ mod tests {
         assert_eq!(args[at + 1], "60s");
         assert_eq!(parse_flags(&args).unwrap().janitor_interval, Duration::from_secs(60));
         assert_eq!(configured_kinds(&args).unwrap().len(), 2);
+    }
+
+    // events.k8s.io requires reportingInstance, which this process reads from
+    // POD_NAME, so the manifest has to pass it down the downward API.
+    #[test]
+    fn the_demo_manifest_passes_the_pod_name_down() {
+        let manifest = include_str!("../../deploy/widget_sync/deploy_local.yaml");
+        let deployment = serde_yaml::Deserializer::from_str(manifest)
+            .map(|doc| serde_yaml::Value::deserialize(doc).unwrap())
+            .find(|doc| doc["kind"] == "Deployment")
+            .expect("deploy_local.yaml carries a Deployment");
+        let containers = deployment["spec"]["template"]["spec"]["containers"].as_sequence().unwrap();
+        let env = containers[0]["env"].as_sequence().unwrap();
+        let pod_name = env
+            .iter()
+            .find(|e| e["name"] == "POD_NAME")
+            .expect("the manifest passes POD_NAME");
+        assert_eq!(pod_name["valueFrom"]["fieldRef"]["fieldPath"], "metadata.name");
     }
 
     #[test]

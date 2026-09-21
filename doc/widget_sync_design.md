@@ -320,10 +320,19 @@ controller's own. While not synced the copied conditions are kept as last
 reported, with the stamp they were read at, as the mirrored fields are.
 `Synced=False` says the tail is kept; the stamp says which generation it was
 read at, and can equal the current one. A copied condition carries no
-`lastTransitionTime`, because the controller reads no clock (issue #49,
+`lastTransitionTime`, because the reconciler reads no clock (issue #49,
 finding 15); the exec builder drops it by rebuilding each copy from the five
 fields of the view (pinned by
-`unit_tests::widget_sync_controller::outer_status_for`). No two conditions
+`unit_tests::widget_sync_controller::outer_status_for`). When something
+changed is what the shim's Events carry instead: it publishes one on the outer
+copy whenever what it reports about the copy changes. A status write is not
+that on its own -- the reconciler writes when the status it computed differs
+from the stored one (`write_outer_status_or_done`), and that status carries the
+mirrored remainder and the inner conditions' messages, so an inner
+implementation that heartbeats into its own status makes every reconcile a
+write -- so the shim keeps, per object, what it last published. No reconciler,
+model or proof knows about Events, as none knows about the boot check
+(`deploy/widget_sync/README.md`). No two conditions
 on the outer copy share a type. The demo CRDs declare `status.conditions` a
 map list keyed by `type`, so their API servers refuse any write that repeats
 one; the boot check neither requires nor checks the list type.
