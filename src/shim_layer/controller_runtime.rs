@@ -32,6 +32,8 @@ use std::marker::PhantomData;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use k8s_openapi::api::core::v1::ObjectReference;
+use kube::runtime::events::{Event, EventType, Recorder, Reporter};
 use tokio::sync::RwLock;
 use vstd::string::*;
 
@@ -63,11 +65,52 @@ type KubeApiResource = kube::api::ApiResource;
 // for, whether or not a client could be built from one. A cluster that is down
 // leaves the map and stays known. That is the set a reconciler is built with
 // (KnownBindings).
+// How this process reports Events, and what it last reported about each object.
+//
+// The memory is what makes one Event mean one reported-state change. A status
+// write is not that by itself: the reconciler writes when the status it
+// computed differs from the stored one, and that status carries the mirrored
+// remainder of the inner status and the inner conditions' messages, so an inner
+// implementation that writes a heartbeat into its own status makes every
+// reconcile a write. An outer CRD that prunes or defaults the status does the
+// same, on every reconcile, for ever -- a shape the boot check warns about and
+// serves anyway. Without this an Event would follow each of them.
+#[derive(Clone)]
+struct EventReporting {
+    reporter: Reporter,
+    last: Arc<std::sync::Mutex<HashMap<RetryKey, (EventType, String, Option<String>)>>>,
+}
+
+impl EventReporting {
+    // Whether `event` says something other than the last Event published about
+    // `key`, recording it as the last if so. Recorded before the publish and
+    // not after: a publish that fails is not retried, and reporting the same
+    // thing again on the next reconcile is the stream of duplicates this
+    // exists to stop.
+    fn is_new(&self, key: &RetryKey, event: &Event) -> bool {
+        let published = (event.type_, event.reason.clone(), event.note.clone());
+        let mut last = self.last.lock().unwrap_or_else(|e| e.into_inner());
+        if last.get(key) == Some(&published) {
+            return false;
+        }
+        last.insert(key.clone(), published);
+        true
+    }
+
+    fn forget(&self, key: &RetryKey) {
+        self.last.lock().unwrap_or_else(|e| e.into_inner()).remove(key);
+    }
+}
+
 #[derive(Clone)]
 pub struct ClusterClients {
     pub primary: Client,
     remotes: Arc<RwLock<HashMap<ClusterRef, RemoteBinding>>>,
     known: KnownBindings,
+    // How Events are reported, when the process reports any. Events are of the
+    // primary cluster, which is where the objects a reconciler reports on live,
+    // so the client they need is the one beside this field.
+    events: Option<EventReporting>,
 }
 
 // The bindings the process knows: one per kubeconfig Secret the binding manager
@@ -212,7 +255,39 @@ impl From<ClusterUnavailable> for Error {
 impl ClusterClients {
     // new starts with the primary client and no bound remote cluster.
     pub fn new(primary: Client) -> Self {
-        ClusterClients { primary, remotes: Arc::new(RwLock::new(HashMap::new())), known: KnownBindings::new() }
+        ClusterClients { primary, remotes: Arc::new(RwLock::new(HashMap::new())), known: KnownBindings::new(), events: None }
+    }
+
+    // Report Events as `controller`, from `instance`. Without this nothing is
+    // reported and no permission on events is needed.
+    pub fn reporting_events_as(mut self, controller: &str, instance: Option<String>) -> Self {
+        self.events = Some(EventReporting {
+            reporter: Reporter { controller: controller.to_string(), instance },
+            last: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        });
+        self
+    }
+
+    // Publish `event` about the object at `key`, unless the same Event was the
+    // last one published about it. Answers whether it was published.
+    async fn publish_event(&self, key: &RetryKey, reference: ObjectReference, event: Event) -> Result<bool, kube::Error> {
+        let reporting = match &self.events {
+            Some(reporting) => reporting,
+            None => return Ok(false),
+        };
+        if !reporting.is_new(key, &event) {
+            return Ok(false);
+        }
+        Recorder::new(self.primary.clone(), reporting.reporter.clone(), reference).publish(event).await?;
+        Ok(true)
+    }
+
+    // Drop what was last published about `key`, when the object is gone. The
+    // retry state is dropped at the same points.
+    pub fn forget_events(&self, key: &RetryKey) {
+        if let Some(reporting) = &self.events {
+            reporting.forget(key);
+        }
     }
 
     // A process with no remote cluster at all: nothing publishes a known set, so
@@ -222,6 +297,7 @@ impl ClusterClients {
             primary,
             remotes: Arc::new(RwLock::new(HashMap::new())),
             known: KnownBindings::fixed(Vec::new()),
+            events: None,
         }
     }
 
@@ -232,6 +308,7 @@ impl ClusterClients {
             primary,
             remotes: Arc::new(RwLock::new(HashMap::new())),
             known: KnownBindings::fixed([cluster.clone()]),
+            events: None,
         };
         clusters.insert_remote(cluster, clients, BindingStatus::Ready).await;
         clusters
@@ -1057,6 +1134,7 @@ where
         Fetched::Object(cr) => cr,
         Fetched::Gone => {
             ctx.retry_backoff.forget(&retry_key);
+            ctx.clusters.forget_events(&retry_key);
             return Ok(Action::await_change());
         }
         Fetched::Failed(action) => return Ok(action),
@@ -1120,6 +1198,7 @@ where
         Fetched::Object(cr) => cr,
         Fetched::Gone => {
             ctx.retry_backoff.forget(&retry_key);
+            ctx.clusters.forget_events(&retry_key);
             return Ok(Action::await_change());
         }
         Fetched::Failed(action) => return Ok(action),
@@ -1446,6 +1525,8 @@ where
                                         }
                                         Ok(obj) => {
                                             info!("{} PatchStatus {} done", log_header, key);
+                                            let event_key = (patch_status_req.namespace.clone(), patch_status_req.name.clone());
+                                            report_status_event(ctx, &patch_status_req.api_resource, &event_key, &obj).await;
                                             Ok(DynamicObject::from_kube_in(obj, cluster))
                                         }
                                     }
@@ -1928,6 +2009,112 @@ impl Default for DynRunnerOptions {
     }
 }
 
+// Publish the Event of a status this process just wrote, if it reports Events
+// at all, the object is of the primary cluster -- the status of a mirror is the
+// inner implementation's to report, not ours -- and the Event is not the one
+// last published about this object.
+//
+// The kind and apiVersion come from the resource the request was built from,
+// never from the response body: `kubectl describe` finds an Event by the kind,
+// namespace, name and uid it names, so a reference missing its kind is an Event
+// nothing ever shows, with no error anywhere to say so.
+//
+// A failure to publish is logged and dropped. An Event is a record of what the
+// reconcile did, and losing one must not change what it did; the publish is
+// also bounded, so an Events endpoint that stops answering costs one timeout
+// rather than the reconcile.
+async fn report_status_event(
+    ctx: &Data,
+    api_resource: &ApiResource,
+    key: &RetryKey,
+    obj: &KubeDynamicObject,
+) {
+    if !matches!(api_resource.cluster(), ClusterId::Primary) {
+        return;
+    }
+    let event = match obj.data.get("status").and_then(status_event) {
+        Some(event) => event,
+        None => return,
+    };
+    let kube_resource = api_resource.as_kube_ref();
+    let reference = ObjectReference {
+        api_version: Some(kube_resource.api_version.clone()),
+        kind: Some(kube_resource.kind.clone()),
+        name: obj.metadata.name.clone(),
+        namespace: obj.metadata.namespace.clone(),
+        uid: obj.metadata.uid.clone(),
+        resource_version: None,
+        field_path: None,
+    };
+    let published = tokio::time::timeout(EVENT_PUBLISH_TIMEOUT, ctx.clusters.publish_event(key, reference, event));
+    match published.await {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => warn!("cannot publish the Event of {}/{}: {}; the status was written and the Event is lost", key.0, key.1, e),
+        Err(_) => warn!("publishing the Event of {}/{} timed out; the status was written and the Event is lost", key.0, key.1),
+    }
+}
+
+// How long a publish may take before the reconcile goes on without it. An Event
+// is a record, so it waits on nothing important; this is what keeps a slow
+// Events endpoint off the reconcile's critical path.
+const EVENT_PUBLISH_TIMEOUT: Duration = Duration::from_secs(5);
+
+// The Event a reported status is worth, or None for a status with no `Synced`
+// condition -- the status of a kind this process does not report on.
+//
+// One Event per status write, and a status write is one reported-state change:
+// the sync reconciler compares the status it computed against the stored one
+// and writes only when they differ (model/sync_reconciler.rs,
+// write_outer_status_or_done), so a converging object that reconciles every
+// minute writes nothing and reports nothing. That is what keeps this from
+// being a stream of duplicates without a per-object memory of the last state.
+//
+// The reason is the one the `Synced` condition carries, which is already the
+// PascalCase word the convention wants. `Warning` when `Stalled` is `True` and
+// `Normal` otherwise, which is the same split the conditions themselves make:
+// `Stalled` is what says nothing the controller does again gets the object out
+// of this, so an operator filtering `--field-selector type=Warning` sees the
+// copies waiting on a person and not the ones merely converging. Reading the
+// split off `Stalled` rather than off a list of reasons here is what keeps the
+// two from drifting apart.
+//
+// The note carries each condition's message as well as its reason, so that two
+// Events that differ only in what the inner cluster said about the object are
+// not published as one.
+fn status_event(status: &serde_json::Value) -> Option<Event> {
+    let conditions = status.get("conditions")?.as_array()?;
+    let of_type = |type_: &str| {
+        conditions.iter().find(|c| c.get("type").and_then(|t| t.as_str()) == Some(type_))
+    };
+    let field = |c: Option<&serde_json::Value>, name: &str| {
+        c.and_then(|c| c.get(name)).and_then(|v| v.as_str()).map(|s| s.to_string())
+    };
+    let synced = of_type("Synced")?;
+    field(Some(synced), "status")?;
+    let reason = field(Some(synced), "reason")?;
+    let describe = |type_: &str| {
+        let c = of_type(type_);
+        let status = field(c, "status")?;
+        let mut described = match field(c, "reason") {
+            Some(reason) => format!("{}={}/{}", type_, status, reason),
+            None => format!("{}={}", type_, status),
+        };
+        if let Some(message) = field(c, "message") {
+            described.push_str(&format!(" ({})", message));
+        }
+        Some(described)
+    };
+    let stalled = field(of_type("Stalled"), "status");
+    let note: Vec<String> = ["Synced", "Ready", "Stalled"].iter().filter_map(|t| describe(t)).collect();
+    Some(Event {
+        type_: if stalled.as_deref() == Some("True") { EventType::Warning } else { EventType::Normal },
+        reason,
+        note: Some(note.join(", ")),
+        action: "Sync".to_string(),
+        secondary: None,
+    })
+}
+
 // deletes_withheld is the delete-withholding gate: true when a pause file is
 // configured and exists at this moment. While it is true, reconcile_with does
 // not send Delete requests and answers the reconciler with a Timeout instead,
@@ -2032,6 +2219,125 @@ mod tests {
         assert!(KnownBindings::fixed(Vec::new()).snapshot().await.is_empty());
         let one = KnownBindings::fixed([binding("tenant", "a")]);
         assert_eq!(binding_names(&one.snapshot().await), vec!["tenant/a"]);
+    }
+
+    // The Event of a reported status: Warning when `Stalled` is `True`, which
+    // is what says a person is needed, and Normal otherwise -- a copy that is
+    // merely converging is not a Warning, although it is not synced either. The
+    // note carries each condition's reason and message. A status of a kind this
+    // process does not report on -- no Synced condition -- is worth no Event.
+    #[test]
+    fn a_reported_status_becomes_an_event() {
+        use serde_json::json;
+        let status = |conditions: serde_json::Value| json!({ "conditions": conditions });
+        let condition = |type_: &str, s: &str, reason: &str| {
+            json!({ "type": type_, "status": s, "reason": reason })
+        };
+
+        let synced = status(json!([
+            condition("Synced", "True", "Synced"),
+            condition("Ready", "True", "Echoed"),
+            condition("Stalled", "False", "Synced"),
+        ]));
+        let event = status_event(&synced).expect("a Synced condition is an event");
+        assert_eq!(event.type_, EventType::Normal);
+        assert_eq!(event.reason, "Synced");
+        assert_eq!(event.action, "Sync");
+        assert_eq!(event.note.as_deref(), Some("Synced=True/Synced, Ready=True/Echoed, Stalled=False/Synced"));
+
+        // Converging is not synced and not a Warning: nobody is waiting on a
+        // person, and every spec edit passes through here.
+        let converging = status(json!([
+            condition("Synced", "False", "InnerConverging"),
+            condition("Ready", "Unknown", "NotSynced"),
+            condition("Stalled", "False", "InnerConverging"),
+        ]));
+        let event = status_event(&converging).expect("a Synced condition is an event");
+        assert_eq!(event.type_, EventType::Normal);
+        assert_eq!(event.reason, "InnerConverging");
+
+        // Stalled is the Warning, whatever Synced says. Here the spec did reach
+        // the inner cluster and the mirror's own Stalled came back through.
+        let stalled = status(json!([
+            condition("Synced", "True", "Synced"),
+            json!({ "type": "Ready", "status": "False", "reason": "QuotaExceeded", "message": "no room for 3" }),
+            json!({ "type": "Stalled", "status": "True", "reason": "QuotaExceeded", "message": "no room for 3" }),
+        ]));
+        let event = status_event(&stalled).expect("a Synced condition is an event");
+        assert_eq!(event.type_, EventType::Warning);
+        assert_eq!(event.reason, "Synced");
+        assert_eq!(
+            event.note.as_deref(),
+            Some("Synced=True/Synced, Ready=False/QuotaExceeded (no room for 3), Stalled=True/QuotaExceeded (no room for 3)")
+        );
+
+        // A mirror's status, written by the inner implementation: no Synced.
+        let inner = status(json!([condition("Ready", "True", "Echoed")]));
+        assert!(status_event(&inner).is_none());
+        // Neither a status with no conditions at all, nor one whose Synced
+        // condition is too bare to name a reason.
+        assert!(status_event(&json!({ "observedGeneration": 1 })).is_none());
+        assert!(status_event(&status(json!([json!({ "type": "Synced", "status": "True" })]))).is_none());
+    }
+
+    // The property the whole feature rests on: the same reported state is
+    // published once, however many status writes it takes. A status write is
+    // not a reported-state change -- the mirrored remainder and the inner
+    // messages ride in the status too -- so without this an inner
+    // implementation that heartbeats, or an outer CRD that prunes the status,
+    // is an Event per reconcile for ever.
+    #[test]
+    fn the_same_reported_state_is_published_once() {
+        use serde_json::json;
+        let reporting = EventReporting {
+            reporter: Reporter { controller: "widget-sync-controller".to_string(), instance: None },
+            last: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        };
+        let demo: RetryKey = ("default".to_string(), "demo".to_string());
+        let other: RetryKey = ("default".to_string(), "other".to_string());
+        let event = |ready: &str| {
+            status_event(&json!({ "conditions": [
+                { "type": "Synced", "status": "True", "reason": "Synced" },
+                { "type": "Ready", "status": ready, "reason": "Echoed" },
+                { "type": "Stalled", "status": "False", "reason": "Synced" },
+            ]}))
+            .unwrap()
+        };
+
+        assert!(reporting.is_new(&demo, &event("True")), "the first report of an object is published");
+        assert!(!reporting.is_new(&demo, &event("True")), "the same state again is not");
+        assert!(!reporting.is_new(&demo, &event("True")), "nor a third time");
+        // Another object's state is its own.
+        assert!(reporting.is_new(&other, &event("True")));
+        // A change is published, and then it is the one that repeats.
+        assert!(reporting.is_new(&demo, &event("False")));
+        assert!(!reporting.is_new(&demo, &event("False")));
+        assert!(reporting.is_new(&demo, &event("True")));
+
+        // An object that goes away takes its state with it, so a copy
+        // recreated under the same name reports its first state again.
+        reporting.forget(&demo);
+        assert!(reporting.is_new(&demo, &event("True")));
+        assert!(!reporting.is_new(&other, &event("True")), "forgetting one object leaves the others");
+    }
+
+    // Two Events that differ only in a condition's message are two Events: the
+    // message is what the inner cluster said about the object, and a change of
+    // it is a change of what is reported.
+    #[test]
+    fn the_note_separates_statuses_that_differ_only_in_a_message() {
+        use serde_json::json;
+        let with_message = |message: &str| {
+            json!({ "conditions": [
+                { "type": "Synced", "status": "True", "reason": "Synced" },
+                { "type": "Ready", "status": "False", "reason": "Progressing", "message": message },
+                { "type": "Stalled", "status": "False", "reason": "Synced" },
+            ]})
+        };
+        let two = status_event(&with_message("2/3 ready")).unwrap();
+        let three = status_event(&with_message("3/3 ready")).unwrap();
+        assert_eq!(two.reason, three.reason);
+        assert_ne!(two.note, three.note);
     }
 
     // The requeue of a finished reconcile, and of a read that fails before the

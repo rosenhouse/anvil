@@ -10,10 +10,12 @@
 //      references; the outer copy carries the sync finalizer
 //      `anvil.dev/widget-sync` and the mirror carries no finalizer of ours;
 //   2. the outer copy's status reports the inner copy's status, stamped with the
-//      outer generation (1 for a fresh object) and a true Synced condition, and
-//      the row `kubectl get widget` prints carries every column the CRD
-//      declares -- a printer column whose JSONPath the API server cannot parse
-//      is dropped when it first serves a table, and nothing else would catch it;
+//      outer generation (1 for a fresh object) and a true Synced condition; the
+//      row `kubectl get widget` prints carries every column the CRD declares --
+//      a printer column whose JSONPath the API server cannot parse is dropped
+//      when it first serves a table, and nothing else would catch it -- and the
+//      copy carries an Event of what was reported, one per change and not one
+//      per reconcile;
 //   3. a spec change bumps the outer generation by exactly one, propagates, and
 //      the status catches up at the new generation;
 //   4. an out-of-band edit of the mirror's spec in the inner cluster is
@@ -47,6 +49,7 @@
 //      hatch -- disappears at once and leaves its mirror to the janitor;
 //  11. deleting the outer copy of a foreign inner object releases it at once,
 //      and the foreign object survives.
+use k8s_openapi::api::events::v1::Event as K8sEvent;
 use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
 use kube::{
     api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams, ResourceExt},
@@ -143,6 +146,30 @@ fn widget(name: &str, count: i32, message: &str) -> Widget {
     let mut w = Widget::new(name, spec);
     w.metadata.namespace = Some("default".to_string());
     w
+}
+
+// The Events published on one outer copy, newest last, as (type, reason).
+// `kubectl describe` shows these; the controller publishes one per status
+// write, which is one reported-state change.
+async fn events_on(client: &Client, name: &str, uid: &str) -> Result<Vec<(String, String)>, Error> {
+    let api: Api<K8sEvent> = Api::namespaced(client.clone(), "default");
+    // By uid as well as name: a copy deleted and recreated under the same name
+    // is a different object, and its predecessor's Events are not its own.
+    let selector = format!("regarding.name={},regarding.kind=Widget,regarding.uid={}", name, uid);
+    let list = api.list(&ListParams::default().fields(&selector)).await.map_err(|e| {
+        error!("cannot list the Events of Widget {}: {}", name, e);
+        Error::WidgetLookupFailed(e)
+    })?;
+    let mut events: Vec<(chrono::DateTime<chrono::Utc>, String, String)> = list
+        .items
+        .into_iter()
+        .filter_map(|e| {
+            let at = e.event_time.map(|t| t.0)?;
+            Some((at, e.type_.unwrap_or_default(), e.reason.unwrap_or_default()))
+        })
+        .collect();
+    events.sort_by_key(|(at, _, _)| *at);
+    Ok(events.into_iter().map(|(_, t, r)| (t, r)).collect())
 }
 
 // The row `kubectl get` prints, straight from the API server: the Table
@@ -463,6 +490,30 @@ pub async fn widget_sync_e2e_test() -> Result<(), Error> {
         return Err(Error::WidgetSyncFailed);
     }
     info!("kubectl get widget prints {:?} over {:?}: ok", cells, columns);
+
+    // 2c. One Event per reported-state change, on the copy it is about. How
+    //     many precede the last one depends on how much of the convergence the
+    //     controller reported on the way -- a mirror that is not caught up yet
+    //     is a Warning/InnerConverging -- so what is pinned is the last one and
+    //     that the list stops growing: the status write an Event follows
+    //     happens only when the status differs from the stored one, so an
+    //     object that just sits there reconciling reports nothing further.
+    let demo_uid = outer.get("demo").await?.metadata.uid.clone().unwrap_or_default();
+    let events = events_on(&outer_client, "demo", &demo_uid).await?;
+    match events.last() {
+        Some((type_, reason)) if type_ == "Normal" && reason == "Synced" => {}
+        _ => {
+            error!("the Events of demo are {:?}, expected the last to be Normal/Synced", events);
+            return Err(Error::WidgetSyncFailed);
+        }
+    }
+    sleep(ONE_RECONCILE).await;
+    let after = events_on(&outer_client, "demo", &demo_uid).await?;
+    if after != events {
+        error!("demo reconciled for {:?} and its Events went from {:?} to {:?}; one per reconcile, not one per change", ONE_RECONCILE, events, after);
+        return Err(Error::WidgetSyncFailed);
+    }
+    info!("demo carries the Events {:?}, unchanged after {:?} of reconciling: ok", events, ONE_RECONCILE);
 
     // 3. A spec change bumps the generation by exactly one, propagates, and the
     //    status catches up at the new generation.

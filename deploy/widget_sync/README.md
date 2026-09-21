@@ -64,6 +64,41 @@ column, its own name being the binding. An inner copy has no `Synced` or
 `Stalled` of its own, so those columns are empty there. Everything else is in
 `-o yaml`.
 
+**The history is in the Events.** The controller publishes one Event on an
+outer copy each time what it reports about it changes, with the `Synced` reason
+as the Event reason and all three conditions, with their messages, in the
+Event's. A fresh copy of the demo reports twice, once on the way:
+
+```
+$ kubectl --context kind-widget-sync-outer describe widget demo
+...
+Events:
+  Type    Reason            Age   From                    Message
+  ----    ------            ----  ----                    -------
+  Normal  InnerConverging   2m    widget-sync-controller  Synced=False/InnerConverging, Ready=Unknown/NotSynced, Stalled=False/InnerConverging
+  Normal  Synced            2m    widget-sync-controller  Synced=True/Synced, Ready=True/Echoed, Stalled=False/Synced
+```
+
+`Warning` is `Stalled=True`, the same signal the conditions make: a copy
+waiting on a person. A copy that is merely converging, or whose cluster is not
+answering, is `Normal` — it is not synced, and nobody has to do anything about
+it. `--field-selector type=Warning` on `kubectl get events` narrows to the
+copies that are waiting.
+
+One Event per change and not per reconcile. The controller writes the status
+whenever it differs from the stored one, which is more often than the reported
+state changes: the status carries the mirrored remainder of the inner status,
+so an inner implementation that writes a heartbeat into its own status makes
+every reconcile a write, and an outer CRD whose schema prunes or defaults the
+status does the same for ever (below). The controller therefore keeps, per
+object, what it last published, and publishes again only when that changes.
+
+Events carry timestamps, which the conditions do not (no condition carries
+`lastTransitionTime`, below), so they are where to look for when something
+changed. Do not build an alert on them: a publish that fails is logged and
+dropped, and the API server expires Events on its own schedule, an hour by
+default. They are a record to read, not a channel to depend on.
+
 On the outer copy:
 
 - `status.observedGeneration == metadata.generation`: the controller has
@@ -113,7 +148,9 @@ generation's `Synced=True`; wait for
 `--for=jsonpath='{.status.observedGeneration}'=<generation>` first. Alert on
 `Ready != True`, which covers `False` and `Unknown` alike. It fires on every
 spec edit while the inner side converges, so hold it for the convergence time
-you tolerate. There is no `lastTransitionTime` to hold it on. `kubectl wait
+you tolerate. There is no `lastTransitionTime` to hold it on, so hold it in the alerting rule
+itself (Prometheus's `for:`, or the equivalent) rather than on the Events above,
+which are best-effort and expire. `kubectl wait
 --for=condition=Ready` waits for `True`, so it times out for a kind whose
 implementation reports no `Ready` condition: the outer copy reads
 `Ready=Unknown/NoInnerReadyCondition` for it.
